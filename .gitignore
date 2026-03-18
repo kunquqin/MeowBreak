@@ -29,3 +29,6 @@ npm-debug.log*
 
 # 开发时设置文件（项目根目录）
 workbreak-settings.json
+
+# 本地录制等（不提交到仓库）
+record/
