@@ -1,0 +1,139 @@
+# WorkBreak — Agent 开发指引
+
+本文档为 AI Agent 与开发者提供产品背景、技术约定和实现边界，便于从零协作开发 WorkBreak 桌面应用。
+
+---
+
+## 1. 产品概览
+
+### 1.1 名称与描述
+
+- **产品名称**：WorkBreak（工作代号，后续可改）
+- **一句话描述**：帮助长期对着电脑工作的打工人，按时收到吃饭、起身活动和休息提醒的桌面应用。
+
+### 1.2 目标用户与场景
+
+- **主要用户**：长时间坐在电脑前的上班族、自由职业者、程序员。
+- **使用场景**：工作日开着电脑时，容易忘记吃饭、久坐不动、连续工作不休息。
+
+### 1.3 要解决的核心问题
+
+- **现有方案**：手机闹钟、系统日历提醒、便利贴。
+- **现有方案的问题**：需手动设置、不够智能、易被忽略、与工作流割裂。
+- **本产品**：常驻系统托盘，按计划自动提醒，无需每天重新设置。
+
+---
+
+## 2. 功能边界（MVP）
+
+### 2.1 要做（第一版）
+
+1. **吃饭提醒**：早/中/晚，时间可配置。
+2. **活动提醒**：每隔 X 分钟提示起身活动。
+3. **休息提醒**：番茄钟式，工作 X 分钟后提示休息。
+4. **系统托盘**：后台静默运行，托盘图标与基础菜单。
+5. **设置界面**：可调整提醒时间与间隔（简单、清晰）。
+
+### 2.2 不做（第一版）
+
+- 不做健康数据统计与报表。
+- 不做团队协作。
+- 不做手机端。
+- 不做 AI 智能调度。
+- 不做日历系统集成。
+
+### 2.3 参考产品
+
+- 类似 [Stretchly](https://github.com/hovancik/stretchly)（开源休息提醒），在此基础上增加**吃饭提醒**和**更友好的设置界面**。
+
+---
+
+## 3. 技术栈与目录结构
+
+### 3.1 技术栈
+
+- **运行时**：Electron（优先支持 Windows，未来兼容 macOS）。
+- **前端**：React 18 + TypeScript。
+- **样式**：Tailwind CSS。
+- **构建**：Vite + vite-plugin-electron。
+
+### 3.2 目录结构
+
+```
+01_WorkBreak/
+├── AGENTS.md                 # 本文件：产品与开发指引
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+├── tsconfig.node.json
+├── tailwind.config.js
+├── postcss.config.js
+├── .gitignore
+│
+├── src/
+│   ├── main/                 # Electron 主进程
+│   │   └── index.ts          # 入口：窗口、托盘、生命周期
+│   ├── preload/              # 预加载脚本（主进程与渲染进程桥接）
+│   │   └── index.ts
+│   └── renderer/             # React 渲染进程（前端）
+│       ├── index.html
+│       └── src/
+│           ├── main.tsx      # React 入口
+│           ├── App.tsx       # 根组件
+│           ├── index.css     # 全局样式（Tailwind 入口）
+│           ├── vite-env.d.ts # 类型声明（含 window.electronAPI）
+│           ├── components/   # 通用 UI 组件（后续添加）
+│           ├── pages/        # 页面级组件（如设置页）（后续添加）
+│           ├── stores/       # 状态（如设置、提醒状态）（后续添加）
+│           ├── hooks/        # 自定义 Hooks（后续添加）
+│           └── utils/        # 工具函数（后续添加）
+│
+└── out/                      # 构建产物（git 忽略）
+    ├── main/
+    ├── preload/
+    └── renderer/
+```
+
+### 3.3 脚本约定
+
+- `npm run dev`：启动 Vite 开发服务器 + Electron，带 HMR。
+- `npm run build`：构建主进程 + 预加载 + 渲染进程到 `out/`。
+- `npm run start`：使用已构建产物运行 Electron（需先 `npm run build`）。
+
+---
+
+## 4. 开发约定
+
+### 4.1 代码与风格
+
+- 使用 **TypeScript**，开启严格模式；渲染进程与主进程均写 TS。
+- 组件与页面使用 **函数组件 + Hooks**，优先 `named export` 便于按需引用。
+- 样式以 **Tailwind** 为主，必要时配合 `index.css` 中的少量自定义类。
+- 路径别名：`@/` 指向 `src/renderer/src/`，用于 `import '@/components/...'` 等。
+
+### 4.2 跨进程通信
+
+- 仅通过 **preload** 暴露能力给渲染进程；使用 `contextBridge.exposeInMainWorld`，不直接暴露 `require('electron')`。
+- 在 `src/renderer/src/vite-env.d.ts` 中为 `window.electronAPI` 等扩展类型，保持类型安全。
+
+### 4.3 平台兼容
+
+- 优先保证 **Windows** 行为正确；涉及路径、托盘、通知时考虑 **macOS** 差异（如 `process.platform === 'darwin'`），避免写死 Windows 逻辑，为后续兼容留口子。
+
+### 4.4 状态与持久化
+
+- 设置（提醒时间、间隔等）需持久化；可选用 Electron 的 `app.getPath('userData')` + JSON 文件，或轻量存储方案，后续实现时再定具体 API。
+- 提醒计划、下次触发时间等可放在主进程或通过 preload 与渲染进程同步，以主进程为“单一事实来源”为佳。
+
+---
+
+## 5. 与 Agent 协作时的注意点
+
+- **先看 AGENTS.md**：实现功能前先对齐本文档中的“要做/不做”和目录结构。
+- **MVP 优先**：第一版不实现统计、协作、手机端、AI、日历集成。
+- **结构扩展**：新增功能时，组件进 `components/`，页面进 `pages/`，状态/逻辑进 `stores/`、`hooks/`、`utils/`，保持结构清晰。
+- **命名**：产品对外名称保持 WorkBreak，代码与资源命名可沿用 `workbreak`/`WorkBreak`，与现有 `package.json` 一致。
+
+---
+
+确认目录与 AGENTS.md 无误后，即可按上述约定开始实现吃饭提醒、活动提醒、休息提醒、托盘与设置界面等 MVP 功能。

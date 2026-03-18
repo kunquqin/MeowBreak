@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Electron
+*.cache
+
+# 开发时设置文件（项目根目录）
+workbreak-settings.json
