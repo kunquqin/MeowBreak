@@ -2,10 +2,20 @@
  * 提醒相关类型与默认值，主进程与渲染进程共用。
  */
 
-/** 子提醒：固定时间（HH:mm）或间隔（时/分/秒）。间隔可设重复次数，null=无限 */
+/** 拆分与中间休息（固定时间、间隔均可选） */
+export interface SplitRestOptions {
+  /** 拆成几份，默认 1 表示不拆分 */
+  splitCount?: number
+  /** 中间休息时长（秒），0 表示无休息 */
+  restDurationSeconds?: number
+  /** 休息时弹窗文案 */
+  restContent?: string
+}
+
+/** 子提醒：固定时间（HH:mm）或间隔（时/分/秒）。间隔可设重复次数，null=无限。均可选拆分+中间休息。 */
 export type SubReminder =
-  | { id: string; mode: 'fixed'; time: string; content: string }
-  | { id: string; mode: 'interval'; intervalHours?: number; intervalMinutes: number; intervalSeconds?: number; content: string; repeatCount: number | null }
+  | ({ id: string; mode: 'fixed'; time: string; content: string } & SplitRestOptions)
+  | ({ id: string; mode: 'interval'; intervalHours?: number; intervalMinutes: number; intervalSeconds?: number; content: string; repeatCount: number | null } & SplitRestOptions)
 
 /** 提醒类型（用户可增删），下含多个子提醒 */
 export interface ReminderCategory {
@@ -19,7 +29,20 @@ export interface AppSettings {
   reminderCategories: ReminderCategory[]
 }
 
-/** 设置页倒计时展示用，由主进程 getReminderCountdowns 返回 */
+/** 重置进度时由渲染进程传入的当前间隔配置（可与磁盘不一致），主进程优先使用 */
+export interface ResetIntervalPayload {
+  categoryName: string
+  content: string
+  intervalHours?: number
+  intervalMinutes: number
+  intervalSeconds?: number
+  repeatCount: number | null
+  splitCount?: number
+  restDurationSeconds?: number
+  restContent?: string
+}
+
+/** 设置页倒计时展示用，由主进程 getReminderCountdowns 返回。拆分时附带 phase 信息用于多段进度条。 */
 export interface CountdownItem {
   key: string
   type: 'fixed' | 'interval'
@@ -28,6 +51,24 @@ export interface CountdownItem {
   time?: string
   repeatCount?: number | null
   firedCount?: number
+  /** 拆分份数，>1 时有多段进度 */
+  splitCount?: number
+  /** 每段工作时长（毫秒） */
+  segmentDurationMs?: number
+  /** 中间休息时长（毫秒），0 不显示蓝条 */
+  restDurationMs?: number
+  /** 当前阶段 work | rest */
+  currentPhase?: 'work' | 'rest'
+  /** 当前阶段索引（工作 0..splitCount-1，休息 0..splitCount-2） */
+  phaseIndex?: number
+  /** 当前阶段已过时间（毫秒） */
+  phaseElapsedMs?: number
+  /** 当前阶段总时长（毫秒） */
+  phaseTotalMs?: number
+  /** 整轮总时长（毫秒），用于进度条总长 */
+  cycleTotalMs?: number
+  /** 仅工作段剩余时间（毫秒），不含休息；用于倒计时显示，与用户设置的「倒计时」一致 */
+  workRemainingMs?: number
 }
 
 function genId(): string {

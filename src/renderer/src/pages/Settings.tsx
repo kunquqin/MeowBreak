@@ -21,6 +21,12 @@ function formatRemaining(remainingMs: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
+/** 时间戳或 Date 格式化为 HH:mm，用于起止时间标签 */
+function formatTimeHHmm(ts: number | Date): string {
+  const d = typeof ts === 'number' ? new Date(ts) : ts
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 /** 时间漏斗图标，用于倒计时区域 */
 function HourglassIcon({ className }: { className?: string }) {
   return (
@@ -30,11 +36,21 @@ function HourglassIcon({ className }: { className?: string }) {
   )
 }
 
+/** 秒数 ↔ 时/分/秒 */
+function secondsToHms(sec: number): { h: number; m: number; s: number } {
+  const s = Math.max(0, Math.floor(sec))
+  return { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60), s: s % 60 }
+}
+function hmsToSeconds(h: number, m: number, s: number): number {
+  return Math.max(0, h * 3600 + m * 60 + s)
+}
+
 type SubReminderRowProps = {
   item: SubReminder
   categoryIndex: number
   itemIndex: number
   categoryId: string
+  categoryName: string
   countdowns: CountdownItem[]
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
   removeItem: (ci: number, ii: number) => void
@@ -50,6 +66,177 @@ type SubReminderRowProps = {
   onDragEnd?: () => void
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
+  splitPanelOpen: { categoryIndex: number; itemIndex: number } | null
+  setSplitPanelOpen: (v: { categoryIndex: number; itemIndex: number } | null) => void
+  /** 重置后立即刷新倒计时列表，使界面马上更新 */
+  refreshCountdowns?: () => void
+}
+
+/** 拆分配置面板：份数、中间休息（时/分/秒），输入时实时写回 item，进度条随动；确认关闭，取消恢复初值 */
+function SplitConfigPanel({
+  item,
+  categoryIndex,
+  itemIndex,
+  updateItem,
+  onClose,
+  segmentMaxSeconds,
+}: {
+  item: SubReminder
+  categoryIndex: number
+  itemIndex: number
+  updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
+  onClose: () => void
+  segmentMaxSeconds: number
+}) {
+  const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
+  const restSec = item.restDurationSeconds ?? 0
+  const { h: rh, m: rm, s: rs } = secondsToHms(restSec)
+  const [showRestH, setShowRestH] = useState(rh > 0)
+  const [showRestS, setShowRestS] = useState(rs > 0)
+  const [n, setN] = useState(splitCount)
+  const [restH, setRestH] = useState(rh)
+  const [restM, setRestM] = useState(rm)
+  const [restS, setRestS] = useState(rs)
+  const [restContent, setRestContent] = useState(item.restContent ?? '休息一下')
+  const [err, setErr] = useState<string | null>(null)
+  const initialRef = useRef({ splitCount, restSec, restContent: item.restContent ?? '休息一下' })
+  useEffect(() => { initialRef.current = { splitCount, restSec, restContent: item.restContent ?? '休息一下' } }, [splitCount, restSec, item.restContent])
+
+  const applyRest = (h: number, m: number, s: number) => {
+    const totalRestSec = hmsToSeconds(h, m, s)
+    if (segmentMaxSeconds > 0 && totalRestSec > segmentMaxSeconds) {
+      setErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
+      return
+    }
+    setErr(null)
+    updateItem(categoryIndex, itemIndex, { restDurationSeconds: totalRestSec })
+  }
+
+  const handleConfirm = () => {
+    const totalRestSec = hmsToSeconds(restH, restM, restS)
+    if (segmentMaxSeconds > 0 && totalRestSec > segmentMaxSeconds) {
+      setErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
+      return
+    }
+    setErr(null)
+    updateItem(categoryIndex, itemIndex, {
+      splitCount: Math.max(1, Math.min(10, n)),
+      restDurationSeconds: totalRestSec,
+      restContent: restContent.trim() || undefined,
+    })
+    onClose()
+  }
+
+  const handleCancel = () => {
+    const init = initialRef.current
+    updateItem(categoryIndex, itemIndex, {
+      splitCount: init.splitCount,
+      restDurationSeconds: init.restSec,
+      restContent: init.restContent || undefined,
+    })
+    setErr(null)
+    onClose()
+  }
+
+  return (
+    <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg p-3 min-w-[220px] space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-slate-600 text-sm shrink-0">拆分</span>
+        <input
+          type="number"
+          min={1}
+          max={10}
+          value={n}
+          onChange={(e) => {
+            const v = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))
+            setN(v)
+            updateItem(categoryIndex, itemIndex, { splitCount: v })
+          }}
+          className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
+        />
+        <span className="text-slate-600 text-sm shrink-0">份</span>
+      </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-slate-600 text-sm shrink-0 w-full">中间休息</span>
+        {showRestH && (
+          <>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={restH}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0))
+                setRestH(v)
+                applyRest(v, restM, restS)
+              }}
+              className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
+            />
+            <span className="text-slate-500 text-sm">时</span>
+          </>
+        )}
+        {!showRestH && (
+          <button type="button" onClick={() => setShowRestH(true)} className="text-slate-400 hover:text-slate-600 text-sm border border-dashed border-slate-300 rounded px-1 py-0.5">
+            +时
+          </button>
+        )}
+        <input
+          type="number"
+          min={0}
+          max={59}
+          value={restM}
+          onChange={(e) => {
+            const v = Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0))
+            setRestM(v)
+            applyRest(restH, v, restS)
+          }}
+          className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
+        />
+        <span className="text-slate-500 text-sm">分</span>
+        {showRestS && (
+          <>
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={restS}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0))
+                setRestS(v)
+                applyRest(restH, restM, v)
+              }}
+              className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
+            />
+            <span className="text-slate-500 text-sm">秒</span>
+          </>
+        )}
+        {!showRestS && (
+          <button type="button" onClick={() => setShowRestS(true)} className="text-slate-400 hover:text-slate-600 text-sm border border-dashed border-slate-300 rounded px-1 py-0.5">
+            +秒
+          </button>
+        )}
+      </div>
+      <div>
+        <span className="text-slate-600 text-sm block mb-0.5">休息弹窗文案</span>
+        <input
+          type="text"
+          value={restContent}
+          onChange={(e) => {
+            const v = e.target.value
+            setRestContent(v)
+            updateItem(categoryIndex, itemIndex, { restContent: v.trim() || undefined })
+          }}
+          placeholder="休息时提示语"
+          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+        />
+      </div>
+      {err && <p className="text-red-600 text-xs">{err}</p>}
+      <div className="flex justify-end gap-1">
+        <button type="button" onClick={handleCancel} className="rounded border border-slate-300 px-2 py-1 text-sm">取消</button>
+        <button type="button" onClick={handleConfirm} className="rounded bg-slate-700 text-white px-2 py-1 text-sm">确认</button>
+      </div>
+    </div>
+  )
 }
 
 /** 重复次数控件：输入框（∞ 或数字）+ 加减 + 右侧三角下拉（hover 显），选项为 自定义 / ∞ */
@@ -128,6 +315,7 @@ function SubReminderRow({
   categoryIndex,
   itemIndex,
   categoryId,
+  categoryName,
   countdowns,
   updateItem,
   removeItem,
@@ -143,16 +331,20 @@ function SubReminderRow({
   onDragEnd,
   repeatDropdown,
   setRepeatDropdown,
+  splitPanelOpen,
+  setSplitPanelOpen,
+  refreshCountdowns,
 }: SubReminderRowProps) {
   const controls = useDragControls()
   const presetAreaRef = useRef<HTMLDivElement>(null)
   const repeatAreaRef = useRef<HTMLDivElement>(null)
+  const splitAreaRef = useRef<HTMLDivElement>(null)
   const countdownKey = `${categoryId}_${item.id}`
   const cd = countdowns.find((c) => c.key === countdownKey)
   const isPresetOpen = presetDropdown?.categoryIndex === categoryIndex && presetDropdown?.itemIndex === itemIndex
   const isRepeatOpen = repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown?.itemIndex === itemIndex
 
-  /** 进度条剩余比例 0~1；结束/暂停/重置时为 1（全绿） */
+  /** 进度条剩余比例 0~1；结束/暂停/重置时为 1（全绿）。拆分配置下：主进程已重启则用 cd.cycleTotalMs + cd.remainingMs；未重启则用间隔已过时间推算周期内位置 */
   const progressRatio = (() => {
     if (!cd) return 1
     if (cd.type === 'fixed') {
@@ -160,13 +352,21 @@ function SubReminderRow({
       if (cd.remainingMs <= 0) return 1
       return Math.min(1, cd.remainingMs / totalMs)
     }
-    const totalMs = item.mode === 'interval'
-      ? ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
-      : 0
-    if (totalMs <= 0) return 1
+    const splitN = item.splitCount ?? 1
+    const totalWorkMs = ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
+    const cycleTotalMs = splitN > 1 && totalWorkMs > 0
+      ? Math.floor(totalWorkMs / splitN) * splitN + (item.restDurationSeconds ?? 0) * 1000 * (splitN - 1)
+      : totalWorkMs
+    if (cycleTotalMs <= 0) return 1
     if (cd.remainingMs <= 0) return 1
     if (cd.repeatCount != null && cd.firedCount != null && cd.firedCount >= cd.repeatCount) return 1
-    return Math.min(1, cd.remainingMs / totalMs)
+    if (splitN <= 1) return Math.min(1, cd.remainingMs / cycleTotalMs)
+    if (cd.cycleTotalMs != null && cd.cycleTotalMs > 0) {
+      return Math.min(1, cd.remainingMs / cd.cycleTotalMs)
+    }
+    const elapsedInInterval = Math.max(0, totalWorkMs - cd.remainingMs)
+    const elapsedInCycle = Math.min(cycleTotalMs, elapsedInInterval)
+    return Math.min(1, (cycleTotalMs - elapsedInCycle) / cycleTotalMs)
   })()
 
   useEffect(() => {
@@ -190,6 +390,22 @@ function SubReminderRow({
     document.addEventListener('mousedown', onMouseDown)
     return () => document.removeEventListener('mousedown', onMouseDown)
   }, [isRepeatOpen, setRepeatDropdown])
+
+  const isSplitOpen = splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen?.itemIndex === itemIndex
+  useEffect(() => {
+    if (!isSplitOpen) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (splitAreaRef.current && !splitAreaRef.current.contains(e.target as Node)) {
+        setSplitPanelOpen(null)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [isSplitOpen, setSplitPanelOpen])
+
+  const segmentMaxSeconds = item.mode === 'interval'
+    ? Math.floor(((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) / Math.max(1, (item.splitCount ?? 1)))
+    : 0
 
   return (
     <Reorder.Item
@@ -228,65 +444,7 @@ function SubReminderRow({
           ⋮⋮
         </span>
       </div>
-      {item.mode === 'fixed' ? (
-        <input
-          type="time"
-          value={item.time}
-          onChange={(e) => updateItem(categoryIndex, itemIndex, { time: e.target.value })}
-          className="rounded border border-slate-300 px-2 py-1 text-sm"
-        />
-      ) : (
-        <>
-          <div className="flex items-center gap-2 shrink-0 ml-3">
-          <span className="text-slate-500 text-sm shrink-0">倒计时</span>
-          <input
-            type="number"
-            min={0}
-            max={23}
-            value={item.intervalHours ?? 0}
-            onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalHours: Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)) })}
-            className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-          />
-          <span className="text-slate-500 text-sm shrink-0">时</span>
-          <input
-            type="number"
-            min={0}
-            max={59}
-            value={item.intervalMinutes}
-            onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalMinutes: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
-            className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-          />
-          <span className="text-slate-500 text-sm shrink-0">分</span>
-          <input
-            type="number"
-            min={0}
-            max={59}
-            value={item.intervalSeconds ?? 0}
-            onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalSeconds: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
-            className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-          />
-          <span className="text-slate-500 text-sm shrink-0">秒</span>
-          <div ref={repeatAreaRef} className="flex items-center gap-1.5">
-            <span className="flex items-center justify-center text-slate-500 shrink-0" title="重复次数" aria-hidden>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 1l4 4-4 4" />
-                <path d="M3 11V9a4 4 0 014-4h14" />
-                <path d="M7 23l-4-4 4-4" />
-                <path d="M21 13v2a4 4 0 01-4 4H3" />
-              </svg>
-            </span>
-            <RepeatControl
-              categoryIndex={categoryIndex}
-              itemIndex={itemIndex}
-              repeatCount={item.repeatCount}
-              updateItem={updateItem}
-              repeatDropdown={repeatDropdown}
-              setRepeatDropdown={setRepeatDropdown}
-            />
-          </div>
-          </div>
-        </>
-      )}
+      {/* 第一行：提醒内容（含预设三角） */}
       <div ref={presetAreaRef} className="relative flex flex-1 min-w-0 items-center group">
         <input
           type="text"
@@ -328,6 +486,143 @@ function SubReminderRow({
           </div>
         )}
       </div>
+      {/* 时间区：固定时间有 cd 时时间与拆分在进度条上一行；无 cd 时保留第一行占位。间隔保留倒计时+重复+拆分 */}
+      {item.mode === 'fixed' ? (
+        !cd ? (
+          <>
+            <input
+              type="time"
+              value={item.time}
+              onChange={(e) => updateItem(categoryIndex, itemIndex, { time: e.target.value })}
+              className="rounded border border-slate-300 px-2 py-1 text-sm shrink-0"
+            />
+            <div ref={splitAreaRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
+                className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                title="拆分与中间休息"
+                aria-label="拆分"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
+                </svg>
+              </button>
+              {isSplitOpen && (
+                <SplitConfigPanel
+                  item={item}
+                  categoryIndex={categoryIndex}
+                  itemIndex={itemIndex}
+                  updateItem={updateItem}
+                  onClose={() => setSplitPanelOpen(null)}
+                  segmentMaxSeconds={24 * 3600}
+                />
+              )}
+            </div>
+          </>
+        ) : null
+      ) : (
+        <>
+          <div className="flex items-center gap-2 shrink-0 ml-2">
+            <span className="text-slate-500 text-sm shrink-0">倒计时</span>
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={item.intervalHours ?? 0}
+              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalHours: Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)) })}
+              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
+            />
+            <span className="text-slate-500 text-sm shrink-0">时</span>
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={item.intervalMinutes}
+              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalMinutes: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
+              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
+            />
+            <span className="text-slate-500 text-sm shrink-0">分</span>
+            <input
+              type="number"
+              min={0}
+              max={59}
+              value={item.intervalSeconds ?? 0}
+              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalSeconds: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
+              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
+            />
+            <span className="text-slate-500 text-sm shrink-0">秒</span>
+            <div ref={repeatAreaRef} className="flex items-center gap-1.5">
+              <span className="flex items-center justify-center text-slate-500 shrink-0" title="重复次数" aria-hidden>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M17 1l4 4-4 4" />
+                  <path d="M3 11V9a4 4 0 014-4h14" />
+                  <path d="M7 23l-4-4 4-4" />
+                  <path d="M21 13v2a4 4 0 01-4 4H3" />
+                </svg>
+              </span>
+              <RepeatControl
+                categoryIndex={categoryIndex}
+                itemIndex={itemIndex}
+                repeatCount={item.repeatCount}
+                updateItem={updateItem}
+                repeatDropdown={repeatDropdown}
+                setRepeatDropdown={setRepeatDropdown}
+              />
+            </div>
+            <div ref={splitAreaRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
+                className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                title="拆分与中间休息"
+                aria-label="拆分"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
+                </svg>
+              </button>
+              {isSplitOpen && (
+                <SplitConfigPanel
+                  item={item}
+                  categoryIndex={categoryIndex}
+                  itemIndex={itemIndex}
+                  updateItem={updateItem}
+                  onClose={() => setSplitPanelOpen(null)}
+                  segmentMaxSeconds={segmentMaxSeconds}
+                />
+              )}
+            </div>
+          </div>
+        </>
+      )}
+      {(item.mode === 'interval' || item.mode === 'fixed') && (
+        <button
+          type="button"
+          onClick={() => {
+            if (item.mode === 'interval') {
+              const payload = {
+                categoryName,
+                content: item.content,
+                intervalHours: item.intervalHours,
+                intervalMinutes: item.intervalMinutes,
+                intervalSeconds: item.intervalSeconds,
+                repeatCount: item.repeatCount,
+                splitCount: item.splitCount,
+                restDurationSeconds: item.restDurationSeconds,
+                restContent: item.restContent,
+              }
+              getApi()?.resetReminderProgress?.(countdownKey, payload)?.then(() => refreshCountdowns?.())
+            } else if (item.mode === 'fixed') {
+              getApi()?.setFixedTimeCountdownOverride?.(countdownKey, item.time)?.then(() => refreshCountdowns?.())
+            }
+          }}
+          className="text-slate-600 hover:text-slate-800 text-sm shrink-0"
+          title={item.mode === 'interval' ? '重置进度，从当前时刻重新倒计时（使用当前界面上的时间与拆分配置）' : '按当前设定时间从此刻开始倒计时'}
+        >
+          重置
+        </button>
+      )}
       <button type="button" onClick={() => removeItem(categoryIndex, itemIndex)} className="text-red-600 hover:text-red-700 text-sm shrink-0">
         删除
       </button>
@@ -349,20 +644,118 @@ function SubReminderRow({
       </div>
       {cd && (
         <div className="flex flex-col gap-1 pl-8 min-w-0 w-full">
-          {/* 第二行：倒计时时间，位置随进度条边界实时移动 */}
-          <div className="relative h-6 w-full">
+          {/* 进度条上一行：左侧起始时间，右侧结束时间；固定时间在右侧还有时间设置与拆分 */}
+          {(() => {
+            const startTimeLabel = cd.type === 'fixed'
+              ? formatTimeHHmm(Date.now())
+              : (cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? formatTimeHHmm(cd.nextAt - cd.cycleTotalMs) : '—')
+            const endTimeLabel = cd.type === 'fixed' ? (cd.time ?? '—') : formatTimeHHmm(cd.nextAt)
+            return (
+              <div className="flex items-center justify-between gap-2 w-full">
+                <span className="text-slate-500 text-sm shrink-0">{startTimeLabel}</span>
+                <div className="flex items-center gap-2 shrink-0 ml-auto">
+                  {item.mode === 'fixed' && (
+                    <>
+                      <input
+                        type="time"
+                        value={item.time}
+                        onChange={(e) => updateItem(categoryIndex, itemIndex, { time: e.target.value })}
+                        className="rounded border border-slate-300 px-2 py-1 text-sm shrink-0"
+                      />
+                      <div ref={splitAreaRef} className="relative shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
+                          className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                          title="拆分与中间休息"
+                          aria-label="拆分"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
+                          </svg>
+                        </button>
+                        {isSplitOpen && (
+                          <SplitConfigPanel
+                            item={item}
+                            categoryIndex={categoryIndex}
+                            itemIndex={itemIndex}
+                            updateItem={updateItem}
+                            onClose={() => setSplitPanelOpen(null)}
+                            segmentMaxSeconds={24 * 3600}
+                          />
+                        )}
+                      </div>
+                    </>
+                  )}
+                  <span className="text-slate-500 text-sm shrink-0">{endTimeLabel}</span>
+                </div>
+              </div>
+            )
+          })()}
+          {/* 同一行上多个独立进度条（每段工作/休息各一条） */}
+          <div className="w-full flex items-center gap-1.5 flex-wrap">
+            {(() => {
+              const splitN = item.splitCount ?? 1
+              const restSec = item.restDurationSeconds ?? 0
+              const restMs = restSec * 1000
+              const totalWorkMs = item.mode === 'interval'
+                ? ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
+                : (cd.remainingMs > 0 ? cd.remainingMs : 0)
+              const segmentDurationMs = splitN > 1 && totalWorkMs > 0 ? Math.floor(totalWorkMs / splitN) : totalWorkMs
+              const cycleTotalMs = splitN > 1 && totalWorkMs > 0
+                ? segmentDurationMs * splitN + restMs * (splitN - 1)
+                : totalWorkMs
+              const useSplit = splitN > 1 && cycleTotalMs > 0
+              const elapsedInCycle = (cd.cycleTotalMs != null && cd.cycleTotalMs > 0)
+                ? Math.max(0, Math.min(cycleTotalMs, cycleTotalMs - cd.remainingMs))
+                : Math.max(0, Math.min(cycleTotalMs, totalWorkMs - cd.remainingMs))
+
+              if (useSplit) {
+                const segments: { type: 'work' | 'rest'; durationMs: number }[] = []
+                for (let i = 0; i < splitN; i++) {
+                  segments.push({ type: 'work', durationMs: segmentDurationMs })
+                  if (i < splitN - 1 && restMs > 0) segments.push({ type: 'rest', durationMs: restMs })
+                }
+                let offset = 0
+                return segments.map((seg, i) => {
+                  const start = offset
+                  offset += seg.durationMs
+                  const end = offset
+                  let elapsedInSeg: number
+                  if (elapsedInCycle >= end) elapsedInSeg = seg.durationMs
+                  else if (elapsedInCycle <= start) elapsedInSeg = 0
+                  else elapsedInSeg = elapsedInCycle - start
+                  const ratio = seg.durationMs > 0 ? elapsedInSeg / seg.durationMs : 0
+                  const fillColor = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
+                  return (
+                    <div
+                      key={i}
+                      className="h-2 rounded-full overflow-hidden flex min-w-0 bg-slate-200"
+                      style={{ flex: `${seg.durationMs} 1 0`, minWidth: '6px' }}
+                    >
+                      <div className="bg-slate-200 h-full transition-[width] duration-200 ease-out shrink-0" style={{ width: `${ratio * 100}%` }} />
+                      <div className={`h-full flex-1 min-w-0 transition-[width] duration-200 ease-out ${fillColor}`} style={{ width: `${(1 - ratio) * 100}%` }} />
+                    </div>
+                  )
+                })
+              }
+              return (
+                <div className="w-full h-2 rounded-full overflow-hidden flex bg-slate-200">
+                  <div className="bg-slate-200 h-full transition-[width] duration-300 ease-out" style={{ width: `${(1 - progressRatio) * 100}%` }} />
+                  <div className="bg-green-500 h-full flex-1 min-w-0 transition-[width] duration-300 ease-out" style={{ width: `${progressRatio * 100}%` }} />
+                </div>
+              )
+            })()}
+          </div>
+          {/* 进度条下方：沙漏与倒计时随进度条位置移动 */}
+          <div className="relative w-full h-6">
             <div
               className="absolute flex items-center gap-1.5 text-slate-600 text-sm whitespace-nowrap transition-[left] duration-300 ease-out -translate-x-1/2"
               style={{ left: `${(1 - progressRatio) * 100}%` }}
             >
               <HourglassIcon className="shrink-0 text-slate-500" />
-              <span>{formatRemaining(cd.remainingMs)}</span>
+              <span>{formatRemaining(cd.workRemainingMs ?? cd.remainingMs)}</span>
             </div>
-          </div>
-          {/* 第三行：仅进度条 */}
-          <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden flex">
-            <div className="bg-slate-200 transition-[width] duration-300 ease-out h-full" style={{ width: `${(1 - progressRatio) * 100}%` }} />
-            <div className="bg-green-500 transition-[width] duration-300 ease-out shrink-0 h-full" style={{ width: `${progressRatio * 100}%` }} />
           </div>
         </div>
       )}
@@ -389,11 +782,14 @@ type CategoryCardProps = {
   setPresetDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
+  splitPanelOpen: { categoryIndex: number; itemIndex: number } | null
+  setSplitPanelOpen: (v: { categoryIndex: number; itemIndex: number } | null) => void
   hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
   setHoverItemHandle: (v: { ci: number; ii: number; side: 'left' | 'right' } | null) => void
   hoverCategoryHandle: { ci: number; side: 'left' | 'right' } | null
   setHoverCategoryHandle: (v: { ci: number; side: 'left' | 'right' } | null) => void
   countdowns: CountdownItem[]
+  refreshCountdowns?: () => void
 }
 
 function CategoryCard(props: CategoryCardProps) {
@@ -416,11 +812,14 @@ function CategoryCard(props: CategoryCardProps) {
     setPresetDropdown,
     repeatDropdown,
     setRepeatDropdown,
+    splitPanelOpen,
+    setSplitPanelOpen,
     hoverItemHandle,
     setHoverItemHandle,
     hoverCategoryHandle,
     setHoverCategoryHandle,
     countdowns,
+    refreshCountdowns,
   } = props
   const controls = useDragControls()
   const [isChildDragging, setIsChildDragging] = useState(false)
@@ -502,6 +901,7 @@ function CategoryCard(props: CategoryCardProps) {
                 categoryIndex={realCi}
                 itemIndex={itemIndex}
                 categoryId={cat.id}
+                categoryName={cat.name}
                 countdowns={countdowns}
                 updateItem={updateItem}
                 removeItem={removeItem}
@@ -511,12 +911,15 @@ function CategoryCard(props: CategoryCardProps) {
                 setPresetDropdown={setPresetDropdown}
                 repeatDropdown={repeatDropdown}
                 setRepeatDropdown={setRepeatDropdown}
+                splitPanelOpen={splitPanelOpen}
+                setSplitPanelOpen={setSplitPanelOpen}
                 setPresetModal={setPresetModal}
                 hoverItemHandle={hoverItemHandle}
                 setHoverItemHandle={setHoverItemHandle}
                 dragConstraintsRef={listRef}
                 onDragStart={() => setIsChildDragging(true)}
                 onDragEnd={() => setIsChildDragging(false)}
+                refreshCountdowns={refreshCountdowns}
               />
             ))}
           </Reorder.Group>
@@ -547,6 +950,7 @@ export function Settings() {
   const [presetModal, setPresetModal] = useState<{ categoryIndex: number; itemIndex: number | null } | null>(null)
   const [presetDropdown, setPresetDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [repeatDropdown, setRepeatDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
+  const [splitPanelOpen, setSplitPanelOpen] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [editingPresetIndex, setEditingPresetIndex] = useState<number | null>(null)
   const [editingPresetValue, setEditingPresetValue] = useState('')
   const [newPresetValue, setNewPresetValue] = useState('')
@@ -620,6 +1024,8 @@ export function Settings() {
     if (presetDropdown && presetDropdown.categoryIndex > categoryIndex) setPresetDropdown({ ...presetDropdown, categoryIndex: presetDropdown.categoryIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex) setRepeatDropdown(null)
     if (repeatDropdown && repeatDropdown.categoryIndex > categoryIndex) setRepeatDropdown({ ...repeatDropdown, categoryIndex: repeatDropdown.categoryIndex - 1 })
+    if (splitPanelOpen?.categoryIndex === categoryIndex) setSplitPanelOpen(null)
+    if (splitPanelOpen && splitPanelOpen.categoryIndex > categoryIndex) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: splitPanelOpen.categoryIndex - 1 })
   }
 
   const moveCategory = (fromIndex: number, toIndex: number) => {
@@ -646,6 +1052,12 @@ export function Settings() {
       else if (fromIndex < idx && toIndex >= idx) setRepeatDropdown({ ...repeatDropdown, categoryIndex: idx - 1 })
       else if (fromIndex > idx && toIndex <= idx) setRepeatDropdown({ ...repeatDropdown, categoryIndex: idx + 1 })
     }
+    if (splitPanelOpen !== null) {
+      const idx = splitPanelOpen.categoryIndex
+      if (idx === fromIndex) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: toIndex })
+      else if (fromIndex < idx && toIndex >= idx) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: idx - 1 })
+      else if (fromIndex > idx && toIndex <= idx) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: idx + 1 })
+    }
   }
 
   const moveItem = (categoryIndex: number, fromIndex: number, toIndex: number) => {
@@ -665,6 +1077,11 @@ export function Settings() {
       if (repeatDropdown.itemIndex === fromIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: toIndex })
       else if (fromIndex < repeatDropdown.itemIndex && toIndex >= repeatDropdown.itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
       else if (fromIndex > repeatDropdown.itemIndex && toIndex <= repeatDropdown.itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex + 1 })
+    }
+    if (splitPanelOpen?.categoryIndex === categoryIndex) {
+      if (splitPanelOpen.itemIndex === fromIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: toIndex })
+      else if (fromIndex < splitPanelOpen.itemIndex && toIndex >= splitPanelOpen.itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
+      else if (fromIndex > splitPanelOpen.itemIndex && toIndex <= splitPanelOpen.itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex + 1 })
     }
   }
 
@@ -704,6 +1121,15 @@ export function Settings() {
         setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex + 1 })
       }
     }
+    if (splitPanelOpen) {
+      if (splitPanelOpen.categoryIndex === fromCi && splitPanelOpen.itemIndex === fromIi) {
+        setSplitPanelOpen(toCi === fromCi ? { ...splitPanelOpen, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
+      } else if (splitPanelOpen.categoryIndex === fromCi && fromIi < splitPanelOpen.itemIndex) {
+        setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
+      } else if (splitPanelOpen.categoryIndex === toCi && insertAt <= splitPanelOpen.itemIndex) {
+        setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex + 1 })
+      }
+    }
     if (presetModal?.categoryIndex === fromCi && presetModal.itemIndex === fromIi) {
       setPresetModal(toCi === fromCi ? { ...presetModal, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
     } else if (presetModal?.categoryIndex === fromCi && fromIi < (presetModal.itemIndex ?? 0)) {
@@ -734,6 +1160,8 @@ export function Settings() {
     if (presetDropdown?.categoryIndex === categoryIndex && presetDropdown.itemIndex > itemIndex) setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex === itemIndex) setRepeatDropdown(null)
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex > itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
+    if (splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen.itemIndex === itemIndex) setSplitPanelOpen(null)
+    if (splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen.itemIndex > itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
   }
 
   const setCategoryPresets = (categoryIndex: number, presets: string[]) => {
@@ -746,6 +1174,7 @@ export function Settings() {
     setCategories(next)
     setPresetDropdown(null)
     setRepeatDropdown(null)
+    setSplitPanelOpen(null)
   }
 
   const getPresets = (categoryIndex: number) => settings.reminderCategories[categoryIndex]?.presets ?? []
@@ -836,7 +1265,7 @@ export function Settings() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-6 space-y-6">
-        <Reorder.Group axis="y" values={settings.reminderCategories} onReorder={(newOrder) => { setCategories(newOrder); setPresetModal(null); setPresetDropdown(null); setRepeatDropdown(null) }} as="div" className="space-y-6">
+        <Reorder.Group axis="y" values={settings.reminderCategories} onReorder={(newOrder) => { setCategories(newOrder); setPresetModal(null); setPresetDropdown(null); setRepeatDropdown(null); setSplitPanelOpen(null) }} as="div" className="space-y-6">
         {settings.reminderCategories.map((cat, realCi) => (
           <CategoryCard
             key={cat.id}
@@ -858,11 +1287,14 @@ export function Settings() {
             setPresetDropdown={setPresetDropdown}
             repeatDropdown={repeatDropdown}
             setRepeatDropdown={setRepeatDropdown}
+            splitPanelOpen={splitPanelOpen}
+            setSplitPanelOpen={setSplitPanelOpen}
             hoverItemHandle={hoverItemHandle}
             setHoverItemHandle={setHoverItemHandle}
             hoverCategoryHandle={hoverCategoryHandle}
             setHoverCategoryHandle={setHoverCategoryHandle}
             countdowns={countdowns}
+            refreshCountdowns={() => getApi()?.getReminderCountdowns?.().then(setCountdowns)}
           />
         ))}
         </Reorder.Group>

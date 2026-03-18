@@ -67,10 +67,19 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
       const i = item as Record<string, unknown>
       if (typeof i.id !== 'string' || typeof i.content !== 'string') return null
       if (i.mode === 'fixed' && typeof (i as { time: unknown }).time === 'string') {
-        return { id: i.id, mode: 'fixed' as const, time: (i as { time: string }).time, content: i.content as string }
+        const fixed = i as { time: string; splitCount?: number; restDurationSeconds?: number; restContent?: string }
+        return {
+          id: i.id,
+          mode: 'fixed' as const,
+          time: fixed.time,
+          content: i.content as string,
+          splitCount: fixed.splitCount,
+          restDurationSeconds: fixed.restDurationSeconds,
+          restContent: fixed.restContent,
+        }
       }
       if (i.mode === 'interval' && typeof (i as { intervalMinutes: unknown }).intervalMinutes === 'number') {
-        const interval = i as { intervalMinutes: number; intervalHours?: number; intervalSeconds?: number; repeatCount?: number | null }
+        const interval = i as { intervalMinutes: number; intervalHours?: number; intervalSeconds?: number; repeatCount?: number | null; splitCount?: number; restDurationSeconds?: number; restContent?: string }
         const repeatCount = interval.repeatCount === undefined || interval.repeatCount === null
           ? null
           : Math.max(1, Math.floor(Number(interval.repeatCount)))
@@ -82,6 +91,9 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
           intervalSeconds: interval.intervalSeconds,
           content: i.content as string,
           repeatCount,
+          splitCount: interval.splitCount,
+          restDurationSeconds: interval.restDurationSeconds,
+          restContent: interval.restContent,
         }
       }
       return null

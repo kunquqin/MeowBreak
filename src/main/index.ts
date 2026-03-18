@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName('workbreak')
 
 import { getSettings, setSettings, getSettingsFilePath, type AppSettings } from './settings'
-import { startReminders, restartReminders, getReminderCountdowns } from './reminders'
+import { startReminders, restartReminders, getReminderCountdowns, resetReminderProgress, setFixedTimeCountdownOverride, clearFixedTimeCountdownOverrides } from './reminders'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -101,6 +101,7 @@ ipcMain.handle('setSettings', (_e, settings: Partial<AppSettings>) => {
   console.log('[WorkBreak] setSettings 被调用，写入路径:', path)
   try {
     const next = setSettings(settings)
+    clearFixedTimeCountdownOverrides()
     restartReminders()
     console.log('[WorkBreak] 保存成功:', JSON.stringify(next))
     return { success: true as const, data: next }
@@ -112,3 +113,9 @@ ipcMain.handle('setSettings', (_e, settings: Partial<AppSettings>) => {
 })
 ipcMain.handle('showMainWindow', () => mainWindow?.show())
 ipcMain.handle('getReminderCountdowns', () => getReminderCountdowns())
+ipcMain.handle('resetReminderProgress', (_e, key: string, payload?: import('../shared/settings').ResetIntervalPayload) => {
+  resetReminderProgress(key, payload)
+})
+ipcMain.handle('setFixedTimeCountdownOverride', (_e, key: string, time: string) => {
+  setFixedTimeCountdownOverride(key, time)
+})

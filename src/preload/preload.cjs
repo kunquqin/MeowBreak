@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setSettings: (settings) => ipcRenderer.invoke('setSettings', settings),
   showMainWindow: () => ipcRenderer.invoke('showMainWindow'),
   getReminderCountdowns: () => ipcRenderer.invoke('getReminderCountdowns'),
+  resetReminderProgress: (key, payload) => ipcRenderer.invoke('resetReminderProgress', key, payload),
+  setFixedTimeCountdownOverride: (key, time) => ipcRenderer.invoke('setFixedTimeCountdownOverride', key, time),
 })
