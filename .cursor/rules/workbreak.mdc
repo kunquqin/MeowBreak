@@ -1,0 +1,9 @@
+---
+description: WorkBreak 项目约定：Electron preload 与仓库内容
+globs: ["src/main/**", "src/preload/**", ".gitignore"]
+---
+
+# WorkBreak 项目约定
+
+- **Preload**：项目为 `"type":"module"`，Electron 用 require() 加载 preload，因此 preload 必须为 CommonJS。使用手写 `src/preload/preload.cjs`，主进程开发时从源码加载 `resolve(__dirname, '../../src/preload/preload.cjs')`。不要依赖 Vite 将 preload 构建为 CJS（易产出 ESM 或错误扩展名）。
+- **版本与仓库**：大文件（如录屏、>100MB）不提交；`record/` 已加入 .gitignore。若历史提交中含大文件，用 `git rm -r --cached record/` 从跟踪中移除后提交，再推送。

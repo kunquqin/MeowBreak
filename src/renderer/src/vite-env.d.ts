@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { AppSettings } from './types'
+import type { AppSettings, CountdownItem } from './types'
 
 declare global {
   interface Window {
@@ -12,6 +12,7 @@ declare global {
         { success: true; data: AppSettings } | { success: false; error: string }
       >
       showMainWindow: () => void
+      getReminderCountdowns: () => Promise<CountdownItem[]>
     }
   }
 }

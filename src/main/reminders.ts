@@ -1,14 +1,23 @@
-import { Notification } from 'electron'
 import { getSettings } from './settings'
+import { showReminderPopup } from './reminderWindow'
 
-let activityTimer: ReturnType<typeof setInterval> | null = null
-let restWorkTimer: ReturnType<typeof setTimeout> | null = null
-let restBreakTimer: ReturnType<typeof setTimeout> | null = null
-let mealCheckInterval: ReturnType<typeof setInterval> | null = null
+let fixedMinuteTimeout: ReturnType<typeof setTimeout> | null = null
+const intervalTimerKeys: string[] = []
+const intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
+interface IntervalState {
+  startTime: number
+  firedCount: number
+  intervalMs: number
+  repeatCount: number | null
+  categoryName: string
+  content: string
+}
+const intervalState = new Map<string, IntervalState>()
 
-function showNotification(title: string, body: string) {
-  if (!Notification.isSupported()) return
-  new Notification({ title, body }).show()
+function showReminder(title: string, body: string) {
+  const now = new Date()
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  showReminderPopup({ title, body, timeStr })
 }
 
 function parseTimeHHmm(hhmm: string): { h: number; m: number } {
@@ -20,77 +29,146 @@ function isSameMinute(now: Date, h: number, m: number): boolean {
   return now.getHours() === h && now.getMinutes() === m
 }
 
-function runMealCheck() {
+/** 到整分时检查所有固定时间子提醒 */
+function runFixedTimeCheck() {
   const s = getSettings()
   const now = new Date()
-  const b = parseTimeHHmm(s.breakfastTime)
-  const l = parseTimeHHmm(s.lunchTime)
-  const d = parseTimeHHmm(s.dinnerTime)
-  if (isSameMinute(now, b.h, b.m)) showNotification('早餐时间', '记得吃早餐哦～')
-  if (isSameMinute(now, l.h, l.m)) showNotification('午餐时间', '该吃午饭啦，休息一下～')
-  if (isSameMinute(now, d.h, d.m)) showNotification('晚餐时间', '记得吃晚饭～')
-}
-
-function scheduleMealReminders() {
-  if (mealCheckInterval) clearInterval(mealCheckInterval)
-  runMealCheck() // 立即检查一次，避免错过当前这一分钟
-  mealCheckInterval = setInterval(runMealCheck, 60 * 1000)
-}
-
-function scheduleActivityReminders() {
-  if (activityTimer) clearInterval(activityTimer)
-  const s = getSettings()
-  const min = Math.max(1, s.activityIntervalMinutes)
-  activityTimer = setInterval(() => {
-    showNotification('起身活动', '坐太久啦，站起来动一动、看看远处吧～')
-  }, min * 60 * 1000)
-}
-
-function scheduleRestReminders() {
-  if (restWorkTimer) clearTimeout(restWorkTimer)
-  if (restBreakTimer) clearTimeout(restBreakTimer)
-
-  const s = getSettings()
-  const workMin = Math.max(1, s.workMinutes)
-  const breakMin = Math.max(1, s.breakMinutes)
-
-  function onWorkEnd() {
-    showNotification('休息一下', `已经工作 ${workMin} 分钟，休息 ${breakMin} 分钟吧～`)
-    restBreakTimer = setTimeout(() => {
-      restBreakTimer = null
-      scheduleRestReminders()
-    }, breakMin * 60 * 1000)
+  for (const cat of s.reminderCategories) {
+    for (const item of cat.items) {
+      if (item.mode !== 'fixed') continue
+      const { h, m } = parseTimeHHmm(item.time)
+      if (isSameMinute(now, h, m)) {
+        showReminder(cat.name, item.content || '提醒')
+      }
+    }
   }
+}
 
-  restWorkTimer = setTimeout(onWorkEnd, workMin * 60 * 1000)
+/** 单条整分对齐的 timeout 链，覆盖所有 fixed 项 */
+function scheduleFixedTimeReminders() {
+  if (fixedMinuteTimeout) {
+    clearTimeout(fixedMinuteTimeout)
+    fixedMinuteTimeout = null
+  }
+  function runAtNextMinute() {
+    const now = new Date()
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes() + 1, 0, 0)
+    const ms = next.getTime() - now.getTime()
+    fixedMinuteTimeout = setTimeout(() => {
+      runFixedTimeCheck()
+      runAtNextMinute()
+    }, Math.max(0, ms))
+  }
+  runFixedTimeCheck()
+  runAtNextMinute()
+}
+
+function scheduleIntervalReminders() {
+  for (const key of intervalTimerKeys) {
+    const t = intervalTimers.get(key)
+    if (t) clearInterval(t)
+    intervalTimers.delete(key)
+    intervalState.delete(key)
+  }
+  intervalTimerKeys.length = 0
+
+  const s = getSettings()
+  const now = Date.now()
+  for (const cat of s.reminderCategories) {
+    for (const item of cat.items) {
+      if (item.mode !== 'interval') continue
+      const min = Math.max(1, item.intervalMinutes)
+      const intervalMs = min * 60 * 1000
+      const repeatCount = item.repeatCount ?? null
+      const key = `${cat.id}_${item.id}`
+      const state: IntervalState = {
+        startTime: now,
+        firedCount: 0,
+        intervalMs,
+        repeatCount,
+        categoryName: cat.name,
+        content: item.content || '提醒',
+      }
+      intervalState.set(key, state)
+      const timer = setInterval(() => {
+        const st = intervalState.get(key)
+        if (!st) return
+        showReminder(st.categoryName, st.content)
+        st.firedCount++
+        st.startTime = Date.now()
+        if (st.repeatCount !== null && st.firedCount >= st.repeatCount) {
+          clearInterval(intervalTimers.get(key)!)
+          intervalTimers.delete(key)
+          intervalState.delete(key)
+          const i = intervalTimerKeys.indexOf(key)
+          if (i >= 0) intervalTimerKeys.splice(i, 1)
+        }
+      }, intervalMs)
+      intervalTimers.set(key, timer)
+      intervalTimerKeys.push(key)
+    }
+  }
 }
 
 export function startReminders() {
-  scheduleMealReminders()
-  scheduleActivityReminders()
-  scheduleRestReminders()
+  scheduleFixedTimeReminders()
+  scheduleIntervalReminders()
 }
 
 export function stopReminders() {
-  if (activityTimer) {
-    clearInterval(activityTimer)
-    activityTimer = null
+  if (fixedMinuteTimeout) {
+    clearTimeout(fixedMinuteTimeout)
+    fixedMinuteTimeout = null
   }
-  if (restWorkTimer) {
-    clearTimeout(restWorkTimer)
-    restWorkTimer = null
+  for (const key of intervalTimerKeys) {
+    const t = intervalTimers.get(key)
+    if (t) clearInterval(t)
   }
-  if (restBreakTimer) {
-    clearTimeout(restBreakTimer)
-    restBreakTimer = null
-  }
-  if (mealCheckInterval) {
-    clearInterval(mealCheckInterval)
-    mealCheckInterval = null
-  }
+  intervalTimers.clear()
+  intervalState.clear()
+  intervalTimerKeys.length = 0
 }
 
 export function restartReminders() {
   stopReminders()
   startReminders()
+}
+
+/** 固定时间：计算下次触发的时刻（今天或明天 HH:mm） */
+function getNextFixedTime(timeStr: string): number {
+  const { h, m } = parseTimeHHmm(timeStr)
+  const now = new Date()
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0)
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1)
+  return next.getTime()
+}
+
+import type { CountdownItem } from '../shared/settings'
+
+export type { CountdownItem }
+
+export function getReminderCountdowns(): CountdownItem[] {
+  const result: CountdownItem[] = []
+  const now = Date.now()
+  const s = getSettings()
+
+  for (const cat of s.reminderCategories) {
+    for (const item of cat.items) {
+      const key = `${cat.id}_${item.id}`
+      if (item.mode === 'fixed') {
+        const nextAt = getNextFixedTime(item.time)
+        result.push({ key, type: 'fixed', nextAt, remainingMs: Math.max(0, nextAt - now), time: item.time })
+      } else {
+        const st = intervalState.get(key)
+        if (!st) {
+          result.push({ key, type: 'interval', nextAt: now, remainingMs: 0, repeatCount: item.repeatCount, firedCount: 0 })
+          continue
+        }
+        const nextAt = st.startTime + st.intervalMs
+        const remainingMs = Math.max(0, nextAt - now)
+        result.push({ key, type: 'interval', nextAt, remainingMs, repeatCount: st.repeatCount, firedCount: st.firedCount })
+      }
+    }
+  }
+  return result
 }

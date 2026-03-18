@@ -14,10 +14,10 @@ export function createTray(mainWindow: BrowserWindow) {
   const contextMenu = Menu.buildFromTemplate([
     { label: '打开设置', click: () => mainWindow?.show() },
     { type: 'separator' },
-    { label: '退出', click: () => globalThis.workbreakQuit?.() },
+    { label: '退出', click: () => (globalThis as unknown as { workbreakQuit?: () => void }).workbreakQuit?.() },
   ])
 
-  tray.setToolTip('WorkBreak - 吃饭·活动·休息提醒')
+  tray.setToolTip('WorkBreak - 可配置提醒')
   tray.setContextMenu(contextMenu)
   tray.on('double-click', () => mainWindow?.show())
   tray.on('click', () => mainWindow?.show())

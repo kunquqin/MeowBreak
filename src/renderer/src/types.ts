@@ -1,8 +1,8 @@
-export interface AppSettings {
-  breakfastTime: string
-  lunchTime: string
-  dinnerTime: string
-  activityIntervalMinutes: number
-  workMinutes: number
-  breakMinutes: number
-}
+export type {
+  AppSettings,
+  ReminderCategory,
+  SubReminder,
+  CountdownItem,
+} from '../../shared/settings'
+
+export { getStableDefaultCategories, getDefaultReminderCategories, genId } from '../../shared/settings'

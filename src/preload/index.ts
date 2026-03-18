@@ -1,13 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export interface AppSettings {
-  breakfastTime: string
-  lunchTime: string
-  dinnerTime: string
-  activityIntervalMinutes: number
-  workMinutes: number
-  breakMinutes: number
-}
+import type { AppSettings } from '../shared/settings'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,

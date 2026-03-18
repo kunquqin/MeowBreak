@@ -9,7 +9,7 @@
 ### 1.1 名称与描述
 
 - **产品名称**：WorkBreak（工作代号，后续可改）
-- **一句话描述**：帮助长期对着电脑工作的打工人，按时收到吃饭、起身活动和休息提醒的桌面应用。
+- **一句话描述**：帮助长期对着电脑工作的打工人，按时收到可配置的多种提醒（吃饭、活动、休息等）的桌面应用。
 
 ### 1.2 目标用户与场景
 
@@ -28,11 +28,9 @@
 
 ### 2.1 要做（第一版）
 
-1. **吃饭提醒**：早/中/晚，时间可配置。
-2. **活动提醒**：每隔 X 分钟提示起身活动。
-3. **休息提醒**：番茄钟式，工作 X 分钟后提示休息。
-4. **系统托盘**：后台静默运行，托盘图标与基础菜单。
-5. **设置界面**：可调整提醒时间与间隔（简单、清晰）。
+1. **可配置提醒**：用户可新增任意提醒类型（如吃饭、活动、休息、护眼、喝水），每类型下可添加多个子提醒；子提醒支持固定时间（如 12:00）或间隔触发（如每 45 分钟）。
+2. **系统托盘**：后台静默运行，托盘图标与基础菜单。
+3. **设置界面**：可增删改提醒类型与子提醒、管理预设、持久化到本地。
 
 ### 2.2 不做（第一版）
 
@@ -72,9 +70,14 @@
 │
 ├── src/
 │   ├── main/                 # Electron 主进程
-│   │   └── index.ts          # 入口：窗口、托盘、生命周期
+│   │   ├── index.ts          # 入口：窗口、托盘、IPC、单实例锁
+│   │   ├── settings.ts       # 设置读写与持久化
+│   │   ├── reminders.ts      # 可配置提醒的定时与弹窗触发
+│   │   └── tray.ts           # 托盘图标与菜单
 │   ├── preload/              # 预加载脚本（主进程与渲染进程桥接）
-│   │   └── index.ts
+│   │   ├── index.ts          # 源码（Vite 可构建，当前未用于加载）
+│   │   └── preload.cjs       # 手写 CommonJS，供 Electron 加载（项目 "type":"module" 下 .js 会被当 ESM）
+│   ├── shared/               # 主进程与渲染进程共用类型与默认值（如 settings.ts）
 │   └── renderer/             # React 渲染进程（前端）
 │       ├── index.html
 │       └── src/
@@ -82,9 +85,10 @@
 │           ├── App.tsx       # 根组件
 │           ├── index.css     # 全局样式（Tailwind 入口）
 │           ├── vite-env.d.ts # 类型声明（含 window.electronAPI）
+│           ├── types.ts      # 类型与默认值（可引用 src/shared）
+│           ├── pages/        # 页面级组件（如 Settings.tsx）
 │           ├── components/   # 通用 UI 组件（后续添加）
-│           ├── pages/        # 页面级组件（如设置页）（后续添加）
-│           ├── stores/       # 状态（如设置、提醒状态）（后续添加）
+│           ├── stores/       # 状态（后续添加）
 │           ├── hooks/        # 自定义 Hooks（后续添加）
 │           └── utils/        # 工具函数（后续添加）
 │
@@ -114,6 +118,7 @@
 ### 4.2 跨进程通信
 
 - 仅通过 **preload** 暴露能力给渲染进程；使用 `contextBridge.exposeInMainWorld`，不直接暴露 `require('electron')`。
+- **Preload 必须为 CommonJS**：因 `package.json` 含 `"type":"module"`，Electron 用 `require()` 加载 preload，故使用手写 `src/preload/preload.cjs`；开发时主进程从源码加载 `resolve(__dirname, '../../src/preload/preload.cjs')`。
 - 在 `src/renderer/src/vite-env.d.ts` 中为 `window.electronAPI` 等扩展类型，保持类型安全。
 
 ### 4.3 平台兼容
@@ -122,8 +127,13 @@
 
 ### 4.4 状态与持久化
 
-- 设置（提醒时间、间隔等）需持久化；可选用 Electron 的 `app.getPath('userData')` + JSON 文件，或轻量存储方案，后续实现时再定具体 API。
-- 提醒计划、下次触发时间等可放在主进程或通过 preload 与渲染进程同步，以主进程为“单一事实来源”为佳。
+- **设置**：开发环境（有 `VITE_DEV_SERVER_URL`）写入项目根目录 `workbreak-settings.json`，便于排查；生产环境写入 `app.getPath('userData')/settings.json`。主进程启动时 `app.setName('workbreak')` 保证 userData 路径一致。
+- 提醒计划、定时器均在主进程 `reminders.ts`，以主进程为“单一事实来源”；设置变更后调用 `restartReminders()` 重新排程。
+
+### 4.5 单实例与启动
+
+- 使用 `app.requestSingleInstanceLock()` 保证只运行一个实例，避免重复点 bat 或 HMR 重建时多开窗口；二次启动时聚焦已有窗口。
+- 开发启动：项目根目录双击 `启动开发环境.bat` 或终端执行 `npm run dev`。
 
 ---
 

@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName('workbreak')
 
 import { getSettings, setSettings, getSettingsFilePath, type AppSettings } from './settings'
-import { startReminders, restartReminders } from './reminders'
+import { startReminders, restartReminders, getReminderCountdowns } from './reminders'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -111,3 +111,4 @@ ipcMain.handle('setSettings', (_e, settings: Partial<AppSettings>) => {
   }
 })
 ipcMain.handle('showMainWindow', () => mainWindow?.show())
+ipcMain.handle('getReminderCountdowns', () => getReminderCountdowns())

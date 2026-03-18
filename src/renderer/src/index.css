@@ -1,3 +1,8 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* 拖拽时轻微柔和阴影 */
+.shadow-drag {
+  box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.08);
+}
