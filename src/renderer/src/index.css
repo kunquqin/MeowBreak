@@ -2,7 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 长设置页 + 动态增高（如秒表打点）时，避免浏览器滚动锚定把视口「往上顶」 */
+html {
+  overflow-anchor: none;
+}
+
 /* 拖拽时轻微柔和阴影 */
 .shadow-drag {
   box-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.08);
 }
+

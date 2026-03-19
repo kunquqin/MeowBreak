@@ -1,5 +1,6 @@
 export type {
   AppSettings,
+  CategoryKind,
   ReminderCategory,
   SubReminder,
   CountdownItem,

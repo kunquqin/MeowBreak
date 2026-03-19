@@ -10,7 +10,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 app.setName('workbreak')
 
 import { getSettings, setSettings, getSettingsFilePath, type AppSettings } from './settings'
-import { startReminders, restartReminders, getReminderCountdowns, resetReminderProgress, setFixedTimeCountdownOverride, clearFixedTimeCountdownOverrides } from './reminders'
+import {
+  startReminders,
+  getReminderCountdowns,
+  resetReminderProgress,
+  setFixedTimeCountdownOverride,
+  resetAllReminderProgress,
+  restartReminders,
+  syncIntervalTimersAfterSettingsChange,
+} from './reminders'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -100,9 +108,11 @@ ipcMain.handle('setSettings', (_e, settings: Partial<AppSettings>) => {
   const path = getSettingsFilePath()
   console.log('[WorkBreak] setSettings 被调用，写入路径:', path)
   try {
+    const prev = getSettings()
     const next = setSettings(settings)
-    clearFixedTimeCountdownOverrides()
-    restartReminders()
+    if (settings.reminderCategories !== undefined) {
+      syncIntervalTimersAfterSettingsChange(prev.reminderCategories, next.reminderCategories)
+    }
     console.log('[WorkBreak] 保存成功:', JSON.stringify(next))
     return { success: true as const, data: next }
   } catch (err) {
@@ -119,3 +129,7 @@ ipcMain.handle('resetReminderProgress', (_e, key: string, payload?: import('../s
 ipcMain.handle('setFixedTimeCountdownOverride', (_e, key: string, time: string) => {
   setFixedTimeCountdownOverride(key, time)
 })
+ipcMain.handle('resetAllReminderProgress', () => {
+  resetAllReminderProgress()
+})
+ipcMain.handle('restartReminders', () => restartReminders())

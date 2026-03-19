@@ -1,7 +1,29 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { motion, Reorder, useDragControls } from 'framer-motion'
-import type { AppSettings, ReminderCategory, SubReminder, CountdownItem } from '../types'
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react'
+import {
+  DndContext,
+  type DragEndEvent,
+  type DraggableSyntheticListeners,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import type { Transform } from '@dnd-kit/utilities'
+import { Reorder, useDragControls } from 'framer-motion'
+import type { AppSettings, CategoryKind, ReminderCategory, SubReminder, CountdownItem } from '../types'
 import { getStableDefaultCategories, genId } from '../types'
+import { AddSubReminderModal, type AddSubReminderPayload } from '../components/AddSubReminderModal'
+import { SplitSegmentProgressBar, SingleCycleProgressBar } from '../components/SegmentProgressBars'
+import {
+  emptyStopwatch,
+  formatStopwatchDisplay,
+  getStopwatchElapsedMs,
+  stopwatchLap,
+  stopwatchRemoveLap,
+  stopwatchToggleRunning,
+  type StopwatchRuntime,
+} from '../utils/stopwatchUtils'
 
 /** 每次使用时读取，避免模块加载时 preload 尚未注入 */
 function getApi() {
@@ -10,6 +32,28 @@ function getApi() {
 
 const defaultSettings: AppSettings = {
   reminderCategories: getStableDefaultCategories(),
+}
+
+/** 列表筛选：全部 / 仅闹钟大类 / 仅倒计时大类 */
+type CategoryListFilter = 'all' | 'alarm' | 'countdown' | 'stopwatch'
+
+/**
+ * dnd-kit sortable 在「布局动画」时会用 useDerivedTransform 加 scaleX/scaleY（旧包围盒/新包围盒），
+ * 可变高度子项在拖过另一行时会被纵向拉长或压扁；只保留平移即可保持卡片固有高度。
+ */
+function sortableTranslateOnly(t: Transform | null): string | undefined {
+  if (!t) return undefined
+  const x = t.x ?? 0
+  const y = t.y ?? 0
+  if (x === 0 && y === 0) return undefined
+  return `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`
+}
+
+/** 在「非全部」筛选下拖拽大类后，把可见顺序合并回完整列表（保持被隐藏大类的相对位置） */
+function mergeVisibleCategoryOrder(full: ReminderCategory[], newVisibleOrder: ReminderCategory[]): ReminderCategory[] {
+  const visibleIds = new Set(newVisibleOrder.map((c) => c.id))
+  let vi = 0
+  return full.map((item) => (visibleIds.has(item.id) ? newVisibleOrder[vi++]! : item))
 }
 
 function formatRemaining(remainingMs: number): string {
@@ -27,6 +71,26 @@ function formatTimeHHmm(ts: number | Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+/** 间隔项显示为 H:MM:SS */
+function formatIntervalHms(item: SubReminder & { mode: 'interval' }): string {
+  const h = item.intervalHours ?? 0
+  const m = item.intervalMinutes
+  const s = item.intervalSeconds ?? 0
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+/** 子项左侧大号时间：闹钟为下次响铃时刻（HH:mm），倒计时尚未启动时为周期 H:MM:SS，运行中为实时剩余 */
+function getSubReminderLargeTimeMain(item: SubReminder, cd: CountdownItem | undefined): string {
+  if (item.mode === 'stopwatch') return '—'
+  if (item.mode === 'fixed') {
+    if (!cd) return item.time
+    return formatTimeHHmm(cd.nextAt)
+  }
+  const iv = item as SubReminder & { mode: 'interval' }
+  if (!cd) return formatIntervalHms(iv)
+  return formatRemaining(cd.workRemainingMs ?? cd.remainingMs)
+}
+
 /** 时间漏斗图标，用于倒计时区域 */
 function HourglassIcon({ className }: { className?: string }) {
   return (
@@ -36,17 +100,74 @@ function HourglassIcon({ className }: { className?: string }) {
   )
 }
 
-/** 秒数 ↔ 时/分/秒 */
-function secondsToHms(sec: number): { h: number; m: number; s: number } {
-  const s = Math.max(0, Math.floor(sec))
-  return { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60), s: s % 60 }
-}
-function hmsToSeconds(h: number, m: number, s: number): number {
-  return Math.max(0, h * 3600 + m * 60 + s)
+/**
+ * 沙漏+文字跟随进度锚点横向移动；锚点在中间时用 translate 居中对齐进度点，
+ * 靠近左右端时夹紧在进度条容器内，避免与左侧时间列重叠或超出右边界。
+ */
+function ClampedProgressFloater({
+  anchorPercent,
+  label,
+}: {
+  anchorPercent: number
+  label: string
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const floaterRef = useRef<HTMLDivElement>(null)
+  const [leftPx, setLeftPx] = useState<number | null>(null)
+
+  const updatePosition = useCallback(() => {
+    const c = containerRef.current
+    const f = floaterRef.current
+    if (!c || !f) return
+    const cw = c.getBoundingClientRect().width
+    const fw = f.getBoundingClientRect().width
+    if (cw <= 0 || fw <= 0) return
+    const p = Math.max(0, Math.min(100, anchorPercent))
+    const idealCenterPx = (p / 100) * cw
+    if (fw >= cw) {
+      setLeftPx(cw / 2)
+      return
+    }
+    const half = fw / 2
+    setLeftPx(Math.max(half, Math.min(idealCenterPx, cw - half)))
+  }, [anchorPercent])
+
+  useLayoutEffect(() => {
+    updatePosition()
+  }, [updatePosition, label])
+
+  useEffect(() => {
+    const c = containerRef.current
+    if (!c) return
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(() => updatePosition())
+    })
+    ro.observe(c)
+    const f = floaterRef.current
+    if (f) ro.observe(f)
+    return () => ro.disconnect()
+  }, [updatePosition])
+
+  return (
+    <div ref={containerRef} className="relative h-6 min-h-[1.5rem] w-full">
+      <div
+        ref={floaterRef}
+        className="absolute top-0 flex items-center gap-1.5 whitespace-nowrap text-sm text-slate-600 transition-[left] duration-300 ease-out"
+        style={{
+          left: leftPx != null ? `${leftPx}px` : `${Math.max(0, Math.min(100, anchorPercent))}%`,
+          transform: 'translateX(-50%)',
+        }}
+      >
+        <HourglassIcon className="shrink-0 text-slate-500" />
+        <span className="tabular-nums">{label}</span>
+      </div>
+    </div>
+  )
 }
 
 type SubReminderRowProps = {
   item: SubReminder
+  category: ReminderCategory
   categoryIndex: number
   itemIndex: number
   categoryId: string
@@ -61,185 +182,209 @@ type SubReminderRowProps = {
   setPresetModal: (v: { categoryIndex: number; itemIndex: number | null } | null) => void
   hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
   setHoverItemHandle: (v: { ci: number; ii: number; side: 'left' | 'right' } | null) => void
-  dragConstraintsRef: React.RefObject<HTMLElement | null>
-  onDragStart?: () => void
-  onDragEnd?: () => void
+  /** @dnd-kit/sortable：仅手柄上 spread，避免 Framer Reorder 在可变高度下与鼠标错位 */
+  sortableListeners: DraggableSyntheticListeners
+  isSortableDragging: boolean
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
-  splitPanelOpen: { categoryIndex: number; itemIndex: number } | null
-  setSplitPanelOpen: (v: { categoryIndex: number; itemIndex: number } | null) => void
   /** 重置后立即刷新倒计时列表，使界面马上更新 */
   refreshCountdowns?: () => void
+  /** 点击时钟/间隔：展开或收起与新建一致的内联表单 */
+  expandedEditSub: { categoryId: string; itemId: string } | null
+  toggleExpandedEditSub: (categoryId: string, itemId: string) => void
+  onConfirmEmbeddedEdit: (categoryId: string, itemId: string, payload: AddSubReminderPayload) => void | Promise<void>
+  /** 内联编辑里改大类预设 */
+  onCategoryPresetsChange: (presets: string[]) => void
 }
 
-/** 拆分配置面板：份数、中间休息（时/分/秒），输入时实时写回 item，进度条随动；确认关闭，取消恢复初值 */
-function SplitConfigPanel({
-  item,
+/** 秒表子项：状态仅在各自组件内，避免全局 Map 键冲突导致多表互相清空 */
+function StopwatchReminderRow({
+  item: _item,
   categoryIndex,
   itemIndex,
-  updateItem,
-  onClose,
-  segmentMaxSeconds,
+  hoverItemHandle,
+  setHoverItemHandle,
+  sortableListeners,
+  isSortableDragging,
+  removeItem,
 }: {
-  item: SubReminder
+  item: SubReminder & { mode: 'stopwatch' }
   categoryIndex: number
   itemIndex: number
-  updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
-  onClose: () => void
-  segmentMaxSeconds: number
+  hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
+  setHoverItemHandle: (v: { ci: number; ii: number; side: 'left' | 'right' } | null) => void
+  sortableListeners: DraggableSyntheticListeners
+  isSortableDragging: boolean
+  removeItem: (ci: number, ii: number) => void
 }) {
-  const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
-  const restSec = item.restDurationSeconds ?? 0
-  const { h: rh, m: rm, s: rs } = secondsToHms(restSec)
-  const [showRestH, setShowRestH] = useState(rh > 0)
-  const [showRestS, setShowRestS] = useState(rs > 0)
-  const [n, setN] = useState(splitCount)
-  const [restH, setRestH] = useState(rh)
-  const [restM, setRestM] = useState(rm)
-  const [restS, setRestS] = useState(rs)
-  const [restContent, setRestContent] = useState(item.restContent ?? '休息一下')
-  const [err, setErr] = useState<string | null>(null)
-  const initialRef = useRef({ splitCount, restSec, restContent: item.restContent ?? '休息一下' })
-  useEffect(() => { initialRef.current = { splitCount, restSec, restContent: item.restContent ?? '休息一下' } }, [splitCount, restSec, item.restContent])
+  const [swState, setSwState] = useState<StopwatchRuntime>(() => emptyStopwatch())
+  const [, setDisplayTick] = useState(0)
+  useEffect(() => {
+    if (!swState.running) return
+    const id = window.setInterval(() => setDisplayTick((n) => n + 1), 50)
+    return () => window.clearInterval(id)
+  }, [swState.running])
 
-  const applyRest = (h: number, m: number, s: number) => {
-    const totalRestSec = hmsToSeconds(h, m, s)
-    if (segmentMaxSeconds > 0 && totalRestSec > segmentMaxSeconds) {
-      setErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
-      return
-    }
-    setErr(null)
-    updateItem(categoryIndex, itemIndex, { restDurationSeconds: totalRestSec })
-  }
-
-  const handleConfirm = () => {
-    const totalRestSec = hmsToSeconds(restH, restM, restS)
-    if (segmentMaxSeconds > 0 && totalRestSec > segmentMaxSeconds) {
-      setErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
-      return
-    }
-    setErr(null)
-    updateItem(categoryIndex, itemIndex, {
-      splitCount: Math.max(1, Math.min(10, n)),
-      restDurationSeconds: totalRestSec,
-      restContent: restContent.trim() || undefined,
-    })
-    onClose()
-  }
-
-  const handleCancel = () => {
-    const init = initialRef.current
-    updateItem(categoryIndex, itemIndex, {
-      splitCount: init.splitCount,
-      restDurationSeconds: init.restSec,
-      restContent: init.restContent || undefined,
-    })
-    setErr(null)
-    onClose()
-  }
+  const elapsedMs = getStopwatchElapsedMs(swState)
+  const canReset = !swState.running && (swState.accumulatedMs > 0 || swState.laps.length > 0)
+  /** 新打点插在列表顶部，保持滚条在顶以看到最新一条；避免浏览器在内层滚动容器上算锚点牵连整页 */
+  const lapsScrollRef = useRef<HTMLUListElement>(null)
+  const lapsLen = swState.laps.length
+  useLayoutEffect(() => {
+    if (lapsLen === 0) return
+    const el = lapsScrollRef.current
+    if (el) el.scrollTop = 0
+  }, [lapsLen])
 
   return (
-    <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg p-3 min-w-[220px] space-y-2">
-      <div className="flex items-center gap-2">
-        <span className="text-slate-600 text-sm shrink-0">拆分</span>
-        <input
-          type="number"
-          min={1}
-          max={10}
-          value={n}
-          onChange={(e) => {
-            const v = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))
-            setN(v)
-            updateItem(categoryIndex, itemIndex, { splitCount: v })
-          }}
-          className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-        />
-        <span className="text-slate-600 text-sm shrink-0">份</span>
+    <div
+      className={`flex min-h-0 min-w-0 flex-col gap-3 rounded-lg bg-slate-50 p-3 transition-[box-shadow,transform] ${
+        isSortableDragging
+          ? 'scale-[1.02] shadow-[0_4px_16px_-2px_rgba(0,0,0,0.08)] bg-[rgb(241_245_249)]'
+          : ''
+      }`}
+    >
+      <div className="grid w-full min-w-0 grid-cols-[1fr_auto_1fr] items-center gap-x-2 py-4 sm:py-5">
+        <div className="flex min-w-0 justify-end">
+          <div
+            className="flex h-10 w-8 min-w-[2rem] shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
+            style={{ touchAction: 'none' }}
+            {...sortableListeners}
+            onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'left' })}
+            onMouseLeave={() => setHoverItemHandle(null)}
+            title="拖动调整子项顺序"
+          >
+            <span
+              className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'left' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+              aria-hidden
+            >
+              ⋮⋮
+            </span>
+          </div>
+        </div>
+        <div
+          className="flex shrink-0 justify-center px-2 sm:px-3"
+          aria-label={`秒表 ${formatStopwatchDisplay(elapsedMs)}`}
+        >
+          <span className="text-center text-4xl font-bold tabular-nums leading-none tracking-tight text-slate-900 sm:text-5xl md:text-6xl">
+            {formatStopwatchDisplay(elapsedMs)}
+          </span>
+        </div>
+        <div className="flex w-full min-w-0 items-center justify-end gap-0.5">
+          <button
+            type="button"
+            onClick={() => removeItem(categoryIndex, itemIndex)}
+            className="text-sm text-red-600 hover:text-red-700 whitespace-nowrap"
+          >
+            删除
+          </button>
+          <div
+            className="flex h-10 w-8 min-w-[2rem] flex-shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
+            style={{ touchAction: 'none' }}
+            {...sortableListeners}
+            onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'right' })}
+            onMouseLeave={() => setHoverItemHandle(null)}
+            title="拖动调整子项顺序"
+          >
+            <span
+              className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'right' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+              aria-hidden
+            >
+              ⋮⋮
+            </span>
+          </div>
+        </div>
       </div>
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-slate-600 text-sm shrink-0 w-full">中间休息</span>
-        {showRestH && (
-          <>
-            <input
-              type="number"
-              min={0}
-              max={23}
-              value={restH}
-              onChange={(e) => {
-                const v = Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0))
-                setRestH(v)
-                applyRest(v, restM, restS)
-              }}
-              className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
-            />
-            <span className="text-slate-500 text-sm">时</span>
-          </>
-        )}
-        {!showRestH && (
-          <button type="button" onClick={() => setShowRestH(true)} className="text-slate-400 hover:text-slate-600 text-sm border border-dashed border-slate-300 rounded px-1 py-0.5">
-            +时
+      <div className="flex w-full flex-wrap items-center justify-center gap-3 pt-2 sm:pt-3">
+        <button
+          type="button"
+          onClick={() => setSwState((s) => stopwatchToggleRunning(s))}
+          className="min-w-[5.5rem] rounded-lg bg-slate-800 px-5 py-2 text-sm font-medium text-white hover:bg-slate-700"
+        >
+          {swState.running ? '停止' : '启动'}
+        </button>
+        {swState.running ? (
+          <button
+            type="button"
+            onClick={() => setSwState((s) => stopwatchLap(s))}
+            className="min-w-[5.5rem] rounded-lg border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            打点
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={!canReset}
+            onClick={() => setSwState(emptyStopwatch())}
+            className="min-w-[5.5rem] rounded-lg border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            复位
           </button>
         )}
-        <input
-          type="number"
-          min={0}
-          max={59}
-          value={restM}
-          onChange={(e) => {
-            const v = Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0))
-            setRestM(v)
-            applyRest(restH, v, restS)
-          }}
-          className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
-        />
-        <span className="text-slate-500 text-sm">分</span>
-        {showRestS && (
-          <>
-            <input
-              type="number"
-              min={0}
-              max={59}
-              value={restS}
-              onChange={(e) => {
-                const v = Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0))
-                setRestS(v)
-                applyRest(restH, restM, v)
-              }}
-              className="w-10 rounded border border-slate-300 px-1 py-1 text-sm text-right"
-            />
-            <span className="text-slate-500 text-sm">秒</span>
-          </>
-        )}
-        {!showRestS && (
-          <button type="button" onClick={() => setShowRestS(true)} className="text-slate-400 hover:text-slate-600 text-sm border border-dashed border-slate-300 rounded px-1 py-0.5">
-            +秒
-          </button>
-        )}
       </div>
-      <div>
-        <span className="text-slate-600 text-sm block mb-0.5">休息弹窗文案</span>
-        <input
-          type="text"
-          value={restContent}
-          onChange={(e) => {
-            const v = e.target.value
-            setRestContent(v)
-            updateItem(categoryIndex, itemIndex, { restContent: v.trim() || undefined })
-          }}
-          placeholder="休息时提示语"
-          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-        />
-      </div>
-      {err && <p className="text-red-600 text-xs">{err}</p>}
-      <div className="flex justify-end gap-1">
-        <button type="button" onClick={handleCancel} className="rounded border border-slate-300 px-2 py-1 text-sm">取消</button>
-        <button type="button" onClick={handleConfirm} className="rounded bg-slate-700 text-white px-2 py-1 text-sm">确认</button>
+      <div className="mt-1 flex min-w-0 flex-col gap-2 sm:mt-2">
+        {swState.laps.length > 0 ? (
+          <div
+            className={`min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white text-xs ${isSortableDragging ? 'pointer-events-none' : ''}`}
+          >
+            <div className="grid grid-cols-[2.25rem_1fr_1fr_2rem] items-center gap-2 border-b border-slate-100 bg-slate-50 px-2 py-1.5 font-medium text-slate-500 tabular-nums">
+              <span>计次</span>
+              <span>分段</span>
+              <span>累计</span>
+              <span className="sr-only">删除</span>
+            </div>
+            {/* 约 10 条打点可见（max-h-80 ≈ 20rem），超出内部滚动；overflow-anchor 避免牵动外层页面 */}
+            <ul
+              ref={lapsScrollRef}
+              className="max-h-80 min-h-0 overflow-y-auto overflow-x-hidden [overflow-anchor:none]"
+            >
+              {swState.laps.map((lap) => (
+                <li
+                  key={lap.id}
+                  className="group grid grid-cols-[2.25rem_1fr_1fr_2rem] items-center gap-2 border-b border-slate-100 px-2 py-1.5 tabular-nums text-slate-800 last:border-b-0"
+                >
+                  <span>{lap.lapIndex}</span>
+                  <span>{formatStopwatchDisplay(lap.splitMs)}</span>
+                  <span>{formatStopwatchDisplay(lap.totalMs)}</span>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      aria-label="删除此条打点"
+                      title="删除此条打点"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-500 text-sm font-semibold leading-none text-white shadow-sm opacity-0 transition-opacity hover:bg-red-600 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-1"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setSwState((s) => stopwatchRemoveLap(s, lap.id))
+                      }}
+                    >
+                      <span aria-hidden className="-mt-px block select-none">
+                        −
+                      </span>
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     </div>
   )
 }
 
-/** 重复次数控件：输入框（∞ 或数字）+ 加减 + 右侧三角下拉（hover 显），选项为 自定义 / ∞ */
+/** 重复图标：圆形双箭头循环，置于输入框内左侧 */
+function RepeatArrowsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M8 16H3v5" />
+    </svg>
+  )
+}
+
+/** 重复次数：一体化边框，左图标 / 中次数 / 右下拉（hover 显）；默认无限(∞)，点击输入框可改数字；下拉为 ∞、1–10 快捷 */
 function RepeatControl({
   categoryIndex,
   itemIndex,
@@ -255,55 +400,120 @@ function RepeatControl({
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
 }) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [repeatInputFocused, setRepeatInputFocused] = useState(false)
+  const [repeatDraft, setRepeatDraft] = useState('')
   const isRepeatOpen = repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown?.itemIndex === itemIndex
+
+  useEffect(() => {
+    if (!isRepeatOpen) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setRepeatDropdown(null)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [isRepeatOpen, setRepeatDropdown])
+
+  /** 从下拉等外部变更时，若仍聚焦在输入框，同步草稿 */
+  useEffect(() => {
+    if (!repeatInputFocused) return
+    setRepeatDraft(repeatCount === null ? '' : String(repeatCount))
+  }, [repeatCount, repeatInputFocused])
+
+  const close = () => setRepeatDropdown(null)
+
+  const repeatDisplayValue = repeatInputFocused
+    ? repeatDraft
+    : repeatCount === null
+      ? '∞'
+      : String(repeatCount)
+
+  const commitRepeatFromDraft = (rawDigits: string) => {
+    if (rawDigits === '') {
+      updateItem(categoryIndex, itemIndex, { repeatCount: null })
+      return
+    }
+    const n = Math.max(1, Math.min(999, parseInt(rawDigits, 10) || 1))
+    updateItem(categoryIndex, itemIndex, { repeatCount: n })
+  }
+
   return (
-    <div className="relative flex items-center group flex-shrink-0">
-      {repeatCount === null ? (
-        <input
-          type="text"
-          readOnly
-          value="∞"
-          className="w-10 rounded border border-slate-300 px-1.5 py-1 text-sm text-center bg-white"
-          aria-label="重复次数"
-        />
-      ) : (
-        <input
-          type="number"
-          min={1}
-          max={999}
-          value={repeatCount}
-          onChange={(e) => updateItem(categoryIndex, itemIndex, { repeatCount: Math.max(1, Math.min(999, parseInt(e.target.value, 10) || 1)) })}
-          className="w-10 rounded border border-slate-300 px-1.5 py-1 text-sm text-center"
-          aria-label="重复次数"
-        />
-      )}
-      <button
-        type="button"
-        onClick={() => setRepeatDropdown(isRepeatOpen ? null : { categoryIndex, itemIndex })}
-        className={`flex items-center justify-center rounded p-0.5 text-slate-400 transition-opacity duration-200 ease-out hover:text-slate-600 focus:outline-none ${isRepeatOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-        title="重复"
-        aria-label="重复选项"
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transition-transform duration-200 ${isRepeatOpen ? 'rotate-180' : ''}`}>
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </button>
+    <div ref={wrapRef} className="relative flex shrink-0 group">
+      {/* 总宽固定：左图标 + 中间定宽数字区 + 右三角，避免换数字时宽度跳动 */}
+      <div className="flex h-8 w-[5.25rem] shrink-0 items-stretch rounded border border-slate-300 bg-white">
+        <span className="flex w-6 shrink-0 items-center justify-center text-slate-500 pointer-events-none" title="重复次数">
+          <RepeatArrowsIcon className="scale-90" />
+        </span>
+        <div className="flex w-9 shrink-0 items-center justify-center overflow-hidden px-0.5">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={3}
+            readOnly={!repeatInputFocused && repeatCount === null}
+            title={repeatCount === null && !repeatInputFocused ? '点击输入数字；无限重复' : '重复次数'}
+            value={repeatDisplayValue}
+            onFocus={() => {
+              setRepeatInputFocused(true)
+              setRepeatDraft(repeatCount === null ? '' : String(repeatCount))
+            }}
+            onBlur={(e) => {
+              setRepeatInputFocused(false)
+              const raw = (e.target as HTMLInputElement).value.replace(/\D/g, '')
+              commitRepeatFromDraft(raw)
+              setRepeatDraft('')
+            }}
+            onChange={(e) => {
+              const raw = e.target.value.replace(/\D/g, '')
+              setRepeatDraft(raw)
+              commitRepeatFromDraft(raw)
+            }}
+            className="box-border h-full w-full cursor-text border-0 bg-transparent py-0 text-center text-sm tabular-nums outline-none ring-0 focus:ring-0"
+            aria-label="重复次数"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => setRepeatDropdown(isRepeatOpen ? null : { categoryIndex, itemIndex })}
+          className={`flex w-6 shrink-0 items-center justify-center text-slate-400 transition-opacity duration-200 ease-out hover:text-slate-600 focus:outline-none ${isRepeatOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+          title="重复选项"
+          aria-label="重复选项"
+          aria-expanded={isRepeatOpen}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transition-transform duration-200 ${isRepeatOpen ? 'rotate-180' : ''}`}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+      </div>
       {isRepeatOpen && (
-        <div className="absolute top-full right-0 mt-1 z-10 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-[100px]">
+        <div className="absolute left-0 top-full z-20 mt-1 flex min-w-full w-max flex-col rounded-lg border border-slate-200 bg-white py-1 shadow-lg">
           <button
             type="button"
-            className="w-full text-left px-3 py-1.5 text-sm hover:bg-slate-100"
-            onClick={() => { updateItem(categoryIndex, itemIndex, { repeatCount: repeatCount ?? 1 }); setRepeatDropdown(null) }}
-          >
-            自定义
-          </button>
-          <button
-            type="button"
-            className="w-full text-left px-3 py-1.5 text-sm hover:bg-slate-100"
-            onClick={() => { updateItem(categoryIndex, itemIndex, { repeatCount: null }); setRepeatDropdown(null) }}
+            className="block w-full px-3 py-1.5 text-left text-base leading-none hover:bg-slate-100"
+            onClick={() => {
+              updateItem(categoryIndex, itemIndex, { repeatCount: null })
+              close()
+            }}
+            aria-label="无限重复"
+            title="无限重复"
           >
             ∞
           </button>
+          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+            <button
+              key={n}
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-sm tabular-nums hover:bg-slate-100"
+              onClick={() => {
+                updateItem(categoryIndex, itemIndex, { repeatCount: n })
+                close()
+              }}
+            >
+              {n}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -312,6 +522,7 @@ function RepeatControl({
 
 function SubReminderRow({
   item,
+  category,
   categoryIndex,
   itemIndex,
   categoryId,
@@ -326,32 +537,64 @@ function SubReminderRow({
   setPresetModal,
   hoverItemHandle,
   setHoverItemHandle,
-  dragConstraintsRef,
-  onDragStart,
-  onDragEnd,
+  sortableListeners,
+  isSortableDragging,
   repeatDropdown,
   setRepeatDropdown,
-  splitPanelOpen,
-  setSplitPanelOpen,
   refreshCountdowns,
+  expandedEditSub,
+  toggleExpandedEditSub,
+  onConfirmEmbeddedEdit,
+  onCategoryPresetsChange,
 }: SubReminderRowProps) {
-  const controls = useDragControls()
   const presetAreaRef = useRef<HTMLDivElement>(null)
-  const repeatAreaRef = useRef<HTMLDivElement>(null)
-  const splitAreaRef = useRef<HTMLDivElement>(null)
   const countdownKey = `${categoryId}_${item.id}`
   const cd = countdowns.find((c) => c.key === countdownKey)
   const isPresetOpen = presetDropdown?.categoryIndex === categoryIndex && presetDropdown?.itemIndex === itemIndex
-  const isRepeatOpen = repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown?.itemIndex === itemIndex
+  const isTimeSettingsExpanded =
+    expandedEditSub?.categoryId === categoryId && expandedEditSub?.itemId === item.id
+  const largeTimeMain = getSubReminderLargeTimeMain(item, cd)
 
-  /** 进度条剩余比例 0~1；结束/暂停/重置时为 1（全绿）。拆分配置下：主进程已重启则用 cd.cycleTotalMs + cd.remainingMs；未重启则用间隔已过时间推算周期内位置 */
+  useEffect(() => {
+    if (!isPresetOpen) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (presetAreaRef.current && !presetAreaRef.current.contains(e.target as Node)) {
+        setPresetDropdown(null)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [isPresetOpen, setPresetDropdown])
+
+  if (item.mode === 'stopwatch') {
+    return (
+      <StopwatchReminderRow
+        item={item}
+        categoryIndex={categoryIndex}
+        itemIndex={itemIndex}
+        hoverItemHandle={hoverItemHandle}
+        setHoverItemHandle={setHoverItemHandle}
+        sortableListeners={sortableListeners}
+        isSortableDragging={isSortableDragging}
+        removeItem={removeItem}
+      />
+    )
+  }
+
+  /** 进度条剩余比例 0~1；结束/暂停/重置时为 1（全绿）。固定时间重置后以 cycleStartAt 为起点算本周期 */
   const progressRatio = (() => {
     if (!cd) return 1
     if (cd.type === 'fixed') {
-      const totalMs = 24 * 3600 * 1000
       if (cd.remainingMs <= 0) return 1
+      if (cd.cycleStartAt != null) {
+        const cycleTotalMs = cd.remainingMs + (Date.now() - cd.cycleStartAt)
+        if (cycleTotalMs <= 0) return 1
+        return Math.min(1, cd.remainingMs / cycleTotalMs)
+      }
+      const totalMs = 24 * 3600 * 1000
       return Math.min(1, cd.remainingMs / totalMs)
     }
+    if (item.mode !== 'interval') return 1
     const splitN = item.splitCount ?? 1
     const totalWorkMs = ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
     const cycleTotalMs = splitN > 1 && totalWorkMs > 0
@@ -369,70 +612,88 @@ function SubReminderRow({
     return Math.min(1, (cycleTotalMs - elapsedInCycle) / cycleTotalMs)
   })()
 
-  useEffect(() => {
-    if (!isPresetOpen) return
-    const onMouseDown = (e: MouseEvent) => {
-      if (presetAreaRef.current && !presetAreaRef.current.contains(e.target as Node)) {
-        setPresetDropdown(null)
-      }
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [isPresetOpen, setPresetDropdown])
-
-  useEffect(() => {
-    if (!isRepeatOpen) return
-    const onMouseDown = (e: MouseEvent) => {
-      if (repeatAreaRef.current && !repeatAreaRef.current.contains(e.target as Node)) {
-        setRepeatDropdown(null)
-      }
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [isRepeatOpen, setRepeatDropdown])
-
-  const isSplitOpen = splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen?.itemIndex === itemIndex
-  useEffect(() => {
-    if (!isSplitOpen) return
-    const onMouseDown = (e: MouseEvent) => {
-      if (splitAreaRef.current && !splitAreaRef.current.contains(e.target as Node)) {
-        setSplitPanelOpen(null)
-      }
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [isSplitOpen, setSplitPanelOpen])
-
-  const segmentMaxSeconds = item.mode === 'interval'
-    ? Math.floor(((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) / Math.max(1, (item.splitCount ?? 1)))
-    : 0
-
   return (
-    <Reorder.Item
-      value={item}
-      as="div"
-      dragListener={false}
-      dragControls={controls}
-      dragConstraints={dragConstraintsRef}
-      dragElastic={0}
-      transition={{ type: 'tween', ease: [0.32, 0.72, 0, 1], duration: 0.12 }}
-      dragTransition={{ bounceStiffness: 400, bounceDamping: 40 }}
-      style={{ position: 'relative' }}
-      className="flex flex-col gap-1.5 p-3 rounded-lg bg-slate-50 transition-colors"
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      whileDrag={{
-        scale: 1.02,
-        boxShadow: '0 4px 16px -2px rgba(0,0,0,0.08)',
-        backgroundColor: 'rgb(241 245 249)',
-        zIndex: 9999,
-      }}
+    <div
+      className={`relative flex flex-col gap-1.5 rounded-lg bg-slate-50 p-3 transition-[box-shadow,transform] ${
+        isSortableDragging
+          ? 'scale-[1.02] shadow-[0_4px_16px_-2px_rgba(0,0,0,0.08)] bg-[rgb(241_245_249)]'
+          : ''
+      }`}
     >
-      <div className="flex flex-nowrap items-center gap-2">
+      {isTimeSettingsExpanded ? (
+        <div className="flex w-full min-w-0 flex-col gap-2">
+          <div className="flex flex-nowrap items-center justify-center gap-4">
+            <div
+              className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+              style={{ touchAction: 'none' }}
+              {...sortableListeners}
+              onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'left' })}
+              onMouseLeave={() => setHoverItemHandle(null)}
+              title="拖动调整子项顺序"
+            >
+              <span
+                className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'left' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+                aria-hidden
+              >
+                ⋮⋮
+              </span>
+            </div>
+            <button type="button" onClick={() => removeItem(categoryIndex, itemIndex)} className="text-red-600 hover:text-red-700 text-sm shrink-0">
+              删除
+            </button>
+            <div
+              className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+              style={{ touchAction: 'none' }}
+              {...sortableListeners}
+              onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'right' })}
+              onMouseLeave={() => setHoverItemHandle(null)}
+              title="拖动调整子项顺序"
+            >
+              <span
+                className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'right' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+                aria-hidden
+              >
+                ⋮⋮
+              </span>
+            </div>
+          </div>
+          {item.mode === 'interval' && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-0.5 pb-2">
+              <span className="text-xs text-slate-500 shrink-0">重复次数</span>
+              <RepeatControl
+                categoryIndex={categoryIndex}
+                itemIndex={itemIndex}
+                repeatCount={item.repeatCount}
+                updateItem={updateItem}
+                repeatDropdown={repeatDropdown}
+                setRepeatDropdown={setRepeatDropdown}
+              />
+            </div>
+          )}
+          <AddSubReminderModal
+            open
+            layout="embedded"
+            formInstanceKey={`edit-embedded-${item.id}`}
+            variant="edit"
+            mode={item.mode}
+            sourceItem={item}
+            category={category}
+            categoryIndex={categoryIndex}
+            onClose={() => toggleExpandedEditSub(categoryId, item.id)}
+            onConfirm={(payload) => {
+              void onConfirmEmbeddedEdit(categoryId, item.id, payload)
+            }}
+            onPresetsChange={onCategoryPresetsChange}
+          />
+        </div>
+      ) : (
+      <>
+      <div className="flex w-full min-w-0 items-stretch gap-4">
+      <div className="flex shrink-0 items-stretch gap-2">
       <div
-        className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+        className="flex w-6 min-w-[1.5rem] shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
         style={{ touchAction: 'none' }}
-        onPointerDown={(e) => controls.start(e)}
+        {...sortableListeners}
         onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'left' })}
         onMouseLeave={() => setHoverItemHandle(null)}
         title="拖动调整子项顺序"
@@ -444,7 +705,28 @@ function SubReminderRow({
           ⋮⋮
         </span>
       </div>
-      {/* 第一行：提醒内容（含预设三角） */}
+      {/* 左侧时间独占一列，高度与右侧整块对齐；闹钟为响铃时刻，倒计时为剩余 */}
+      <button
+        type="button"
+        onClick={() => toggleExpandedEditSub(categoryId, item.id)}
+        className={`flex min-w-[5.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-white px-2 py-2 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 ${
+          item.mode === 'fixed' ? 'sm:min-w-[6.25rem]' : 'sm:min-w-[6.75rem]'
+        }`}
+        title="编辑时间与拆分"
+        aria-label={`编辑时间，${largeTimeMain}`}
+      >
+        <span
+          className={`text-center font-bold tabular-nums leading-none tracking-tight text-slate-900 ${
+            item.mode === 'fixed' ? 'text-3xl sm:text-4xl' : 'text-2xl sm:text-3xl'
+          }`}
+        >
+          {largeTimeMain}
+        </span>
+      </button>
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      <div className="flex min-w-0 flex-nowrap items-center gap-2">
+      {/* 提醒内容（含预设三角） */}
       <div ref={presetAreaRef} className="relative flex flex-1 min-w-0 items-center group">
         <input
           type="text"
@@ -486,115 +768,15 @@ function SubReminderRow({
           </div>
         )}
       </div>
-      {/* 时间区：固定时间有 cd 时时间与拆分在进度条上一行；无 cd 时保留第一行占位。间隔保留倒计时+重复+拆分 */}
-      {item.mode === 'fixed' ? (
-        !cd ? (
-          <>
-            <input
-              type="time"
-              value={item.time}
-              onChange={(e) => updateItem(categoryIndex, itemIndex, { time: e.target.value })}
-              className="rounded border border-slate-300 px-2 py-1 text-sm shrink-0"
-            />
-            <div ref={splitAreaRef} className="relative shrink-0">
-              <button
-                type="button"
-                onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
-                className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
-                title="拆分与中间休息"
-                aria-label="拆分"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
-                </svg>
-              </button>
-              {isSplitOpen && (
-                <SplitConfigPanel
-                  item={item}
-                  categoryIndex={categoryIndex}
-                  itemIndex={itemIndex}
-                  updateItem={updateItem}
-                  onClose={() => setSplitPanelOpen(null)}
-                  segmentMaxSeconds={24 * 3600}
-                />
-              )}
-            </div>
-          </>
-        ) : null
-      ) : (
-        <>
-          <div className="flex items-center gap-2 shrink-0 ml-2">
-            <span className="text-slate-500 text-sm shrink-0">倒计时</span>
-            <input
-              type="number"
-              min={0}
-              max={23}
-              value={item.intervalHours ?? 0}
-              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalHours: Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)) })}
-              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-            />
-            <span className="text-slate-500 text-sm shrink-0">时</span>
-            <input
-              type="number"
-              min={0}
-              max={59}
-              value={item.intervalMinutes}
-              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalMinutes: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
-              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-            />
-            <span className="text-slate-500 text-sm shrink-0">分</span>
-            <input
-              type="number"
-              min={0}
-              max={59}
-              value={item.intervalSeconds ?? 0}
-              onChange={(e) => updateItem(categoryIndex, itemIndex, { intervalSeconds: Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)) })}
-              className="w-12 rounded border border-slate-300 px-1.5 py-1 text-sm text-right"
-            />
-            <span className="text-slate-500 text-sm shrink-0">秒</span>
-            <div ref={repeatAreaRef} className="flex items-center gap-1.5">
-              <span className="flex items-center justify-center text-slate-500 shrink-0" title="重复次数" aria-hidden>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 1l4 4-4 4" />
-                  <path d="M3 11V9a4 4 0 014-4h14" />
-                  <path d="M7 23l-4-4 4-4" />
-                  <path d="M21 13v2a4 4 0 01-4 4H3" />
-                </svg>
-              </span>
-              <RepeatControl
-                categoryIndex={categoryIndex}
-                itemIndex={itemIndex}
-                repeatCount={item.repeatCount}
-                updateItem={updateItem}
-                repeatDropdown={repeatDropdown}
-                setRepeatDropdown={setRepeatDropdown}
-              />
-            </div>
-            <div ref={splitAreaRef} className="relative shrink-0">
-              <button
-                type="button"
-                onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
-                className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
-                title="拆分与中间休息"
-                aria-label="拆分"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
-                </svg>
-              </button>
-              {isSplitOpen && (
-                <SplitConfigPanel
-                  item={item}
-                  categoryIndex={categoryIndex}
-                  itemIndex={itemIndex}
-                  updateItem={updateItem}
-                  onClose={() => setSplitPanelOpen(null)}
-                  segmentMaxSeconds={segmentMaxSeconds}
-                />
-              )}
-            </div>
-          </div>
-        </>
+      {item.mode === 'interval' && (
+        <RepeatControl
+          categoryIndex={categoryIndex}
+          itemIndex={itemIndex}
+          repeatCount={item.repeatCount}
+          updateItem={updateItem}
+          repeatDropdown={repeatDropdown}
+          setRepeatDropdown={setRepeatDropdown}
+        />
       )}
       {(item.mode === 'interval' || item.mode === 'fixed') && (
         <button
@@ -614,11 +796,13 @@ function SubReminderRow({
               }
               getApi()?.resetReminderProgress?.(countdownKey, payload)?.then(() => refreshCountdowns?.())
             } else if (item.mode === 'fixed') {
-              getApi()?.setFixedTimeCountdownOverride?.(countdownKey, item.time)?.then(() => refreshCountdowns?.())
+              getApi()?.setFixedTimeCountdownOverride?.(countdownKey, item.time)?.then(() => {
+                return refreshCountdowns?.() ?? Promise.resolve()
+              })
             }
           }}
           className="text-slate-600 hover:text-slate-800 text-sm shrink-0"
-          title={item.mode === 'interval' ? '重置进度，从当前时刻重新倒计时（使用当前界面上的时间与拆分配置）' : '按当前设定时间从此刻开始倒计时'}
+          title={item.mode === 'interval' ? '重置进度，从当前时刻重新倒计时（使用当前界面上的时间与拆分配置）' : '按当前闹钟时间从此刻开始倒计时'}
         >
           重置
         </button>
@@ -627,9 +811,9 @@ function SubReminderRow({
         删除
       </button>
       <div
-        className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+        className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none self-center"
         style={{ touchAction: 'none' }}
-        onPointerDown={(e) => controls.start(e)}
+        {...sortableListeners}
         onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'right' })}
         onMouseLeave={() => setHoverItemHandle(null)}
         title="拖动调整子项顺序"
@@ -643,52 +827,17 @@ function SubReminderRow({
       </div>
       </div>
       {cd && (
-        <div className="flex flex-col gap-1 pl-8 min-w-0 w-full">
-          {/* 进度条上一行：左侧起始时间，右侧结束时间；固定时间在右侧还有时间设置与拆分 */}
+        <div className="flex min-w-0 w-full flex-col gap-1">
+          {/* 进度条上一行：左起始、右结束，均为普通文字（不进入编辑） */}
           {(() => {
             const startTimeLabel = cd.type === 'fixed'
-              ? formatTimeHHmm(Date.now())
+              ? (cd.cycleStartAt != null ? formatTimeHHmm(cd.cycleStartAt) : (cd.time ?? '—'))
               : (cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? formatTimeHHmm(cd.nextAt - cd.cycleTotalMs) : '—')
-            const endTimeLabel = cd.type === 'fixed' ? (cd.time ?? '—') : formatTimeHHmm(cd.nextAt)
+            const endTimeLabel = formatTimeHHmm(cd.nextAt)
             return (
-              <div className="flex items-center justify-between gap-2 w-full">
-                <span className="text-slate-500 text-sm shrink-0">{startTimeLabel}</span>
-                <div className="flex items-center gap-2 shrink-0 ml-auto">
-                  {item.mode === 'fixed' && (
-                    <>
-                      <input
-                        type="time"
-                        value={item.time}
-                        onChange={(e) => updateItem(categoryIndex, itemIndex, { time: e.target.value })}
-                        className="rounded border border-slate-300 px-2 py-1 text-sm shrink-0"
-                      />
-                      <div ref={splitAreaRef} className="relative shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => setSplitPanelOpen(isSplitOpen ? null : { categoryIndex, itemIndex })}
-                          className="rounded p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100"
-                          title="拆分与中间休息"
-                          aria-label="拆分"
-                        >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M5 4v16l7-8-7-8zM12 4v16M19 4v16" />
-                          </svg>
-                        </button>
-                        {isSplitOpen && (
-                          <SplitConfigPanel
-                            item={item}
-                            categoryIndex={categoryIndex}
-                            itemIndex={itemIndex}
-                            updateItem={updateItem}
-                            onClose={() => setSplitPanelOpen(null)}
-                            segmentMaxSeconds={24 * 3600}
-                          />
-                        )}
-                      </div>
-                    </>
-                  )}
-                  <span className="text-slate-500 text-sm shrink-0">{endTimeLabel}</span>
-                </div>
+              <div className="flex w-full items-center justify-between gap-2">
+                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{startTimeLabel}</span>
+                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{endTimeLabel}</span>
               </div>
             )
           })()}
@@ -698,17 +847,31 @@ function SubReminderRow({
               const splitN = item.splitCount ?? 1
               const restSec = item.restDurationSeconds ?? 0
               const restMs = restSec * 1000
+              const DAY_MS = 24 * 3600 * 1000
+              const now = Date.now()
               const totalWorkMs = item.mode === 'interval'
                 ? ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
-                : (cd.remainingMs > 0 ? cd.remainingMs : 0)
+                : (cd.type === 'fixed'
+                    ? (cd.cycleStartAt != null ? cd.remainingMs + (now - cd.cycleStartAt) : DAY_MS)
+                    : (cd.remainingMs > 0 ? cd.remainingMs : 0))
               const segmentDurationMs = splitN > 1 && totalWorkMs > 0 ? Math.floor(totalWorkMs / splitN) : totalWorkMs
               const cycleTotalMs = splitN > 1 && totalWorkMs > 0
                 ? segmentDurationMs * splitN + restMs * (splitN - 1)
                 : totalWorkMs
               const useSplit = splitN > 1 && cycleTotalMs > 0
-              const elapsedInCycle = (cd.cycleTotalMs != null && cd.cycleTotalMs > 0)
-                ? Math.max(0, Math.min(cycleTotalMs, cycleTotalMs - cd.remainingMs))
-                : Math.max(0, Math.min(cycleTotalMs, totalWorkMs - cd.remainingMs))
+              const elapsedInCycle = (() => {
+                if (cd.type === 'fixed' && splitN > 1) {
+                  if (cd.cycleStartAt != null) {
+                    return Math.max(0, Math.min(cycleTotalMs, now - cd.cycleStartAt))
+                  }
+                  const elapsedInDay = Math.max(0, DAY_MS - cd.remainingMs)
+                  return Math.max(0, Math.min(cycleTotalMs, elapsedInDay))
+                }
+                if (cd.cycleTotalMs != null && cd.cycleTotalMs > 0) {
+                  return Math.max(0, Math.min(cycleTotalMs, cycleTotalMs - cd.remainingMs))
+                }
+                return Math.max(0, Math.min(cycleTotalMs, totalWorkMs - cd.remainingMs))
+              })()
 
               if (useSplit) {
                 const segments: { type: 'work' | 'rest'; durationMs: number }[] = []
@@ -726,40 +889,105 @@ function SubReminderRow({
                   else if (elapsedInCycle <= start) elapsedInSeg = 0
                   else elapsedInSeg = elapsedInCycle - start
                   const ratio = seg.durationMs > 0 ? elapsedInSeg / seg.durationMs : 0
-                  const fillColor = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
+                  const fillClass = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
                   return (
-                    <div
+                    <SplitSegmentProgressBar
                       key={i}
-                      className="h-2 rounded-full overflow-hidden flex min-w-0 bg-slate-200"
-                      style={{ flex: `${seg.durationMs} 1 0`, minWidth: '6px' }}
-                    >
-                      <div className="bg-slate-200 h-full transition-[width] duration-200 ease-out shrink-0" style={{ width: `${ratio * 100}%` }} />
-                      <div className={`h-full flex-1 min-w-0 transition-[width] duration-200 ease-out ${fillColor}`} style={{ width: `${(1 - ratio) * 100}%` }} />
-                    </div>
+                      durationMs={seg.durationMs}
+                      elapsedRatio={ratio}
+                      fillClass={fillClass}
+                    />
                   )
                 })
               }
-              return (
-                <div className="w-full h-2 rounded-full overflow-hidden flex bg-slate-200">
-                  <div className="bg-slate-200 h-full transition-[width] duration-300 ease-out" style={{ width: `${(1 - progressRatio) * 100}%` }} />
-                  <div className="bg-green-500 h-full flex-1 min-w-0 transition-[width] duration-300 ease-out" style={{ width: `${progressRatio * 100}%` }} />
-                </div>
-              )
+              return <SingleCycleProgressBar totalDurationMs={totalWorkMs} remainingRatio={progressRatio} />
             })()}
           </div>
-          {/* 进度条下方：沙漏与倒计时随进度条位置移动 */}
-          <div className="relative w-full h-6">
-            <div
-              className="absolute flex items-center gap-1.5 text-slate-600 text-sm whitespace-nowrap transition-[left] duration-300 ease-out -translate-x-1/2"
-              style={{ left: `${(1 - progressRatio) * 100}%` }}
-            >
-              <HourglassIcon className="shrink-0 text-slate-500" />
-              <span>{formatRemaining(cd.workRemainingMs ?? cd.remainingMs)}</span>
-            </div>
-          </div>
+          {/* 进度条下方：沙漏与倒计时随锚点移动，左右夹紧在进度条宽度内，避免与时间列重叠 */}
+          {(() => {
+            const splitN = item.splitCount ?? 1
+            const DAY_MS = 24 * 3600 * 1000
+            const now = Date.now()
+            const hourglassLeftPercent = cd.type === 'fixed' && splitN > 1 && cd.remainingMs > 0
+              ? (() => {
+                  const restMs = (item.restDurationSeconds ?? 0) * 1000
+                  if (cd.cycleStartAt != null) {
+                    const totalWorkMs = cd.remainingMs + (now - cd.cycleStartAt)
+                    const segmentDurationMs = Math.floor(totalWorkMs / splitN)
+                    const cycleTotalMs = segmentDurationMs * splitN + restMs * (splitN - 1)
+                    const elapsedInCycle = Math.max(0, Math.min(cycleTotalMs, now - cd.cycleStartAt))
+                    return cycleTotalMs > 0 ? (elapsedInCycle / cycleTotalMs) * 100 : 0
+                  }
+                  const segmentDurationMs = Math.floor(DAY_MS / splitN)
+                  const cycleTotalMs = segmentDurationMs * splitN + restMs * (splitN - 1)
+                  const elapsedInCycle = Math.max(0, Math.min(cycleTotalMs, DAY_MS - cd.remainingMs))
+                  return cycleTotalMs > 0 ? (elapsedInCycle / cycleTotalMs) * 100 : 0
+                })()
+              : (1 - progressRatio) * 100
+            return (
+              <ClampedProgressFloater
+                anchorPercent={hourglassLeftPercent}
+                label={formatRemaining(cd.workRemainingMs ?? cd.remainingMs)}
+              />
+            )
+          })()}
         </div>
       )}
-    </Reorder.Item>
+      </div>
+      </div>
+      </>
+      )}
+    </div>
+  )
+}
+
+/** 子项排序用 dnd-kit（可变高度下与鼠标一致）；Framer Reorder 在交换 DOM 时易与 drag 偏移错位 */
+function SortableSubReminderItem({
+  id,
+  item,
+  itemIndex,
+  cat,
+  realCi,
+  ...rowProps
+}: {
+  id: string
+  item: SubReminder
+  itemIndex: number
+  cat: ReminderCategory
+  realCi: number
+} & Omit<
+  SubReminderRowProps,
+  'item' | 'itemIndex' | 'category' | 'categoryIndex' | 'categoryId' | 'categoryName' | 'sortableListeners' | 'isSortableDragging'
+>) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+    /** 避免 useDerivedTransform 在排序过程中注入 scale，导致矮/高卡片互拖时被拉高或压扁 */
+    animateLayoutChanges: () => false,
+    transition: {
+      duration: 320,
+      easing: 'cubic-bezier(0.22, 0.65, 0.28, 1)',
+    },
+  })
+  const style: React.CSSProperties = {
+    transform: sortableTranslateOnly(transform),
+    transition,
+    position: 'relative',
+    zIndex: isDragging ? 99999 : undefined,
+  }
+  return (
+    <div ref={setNodeRef} style={style} {...attributes}>
+      <SubReminderRow
+        item={item}
+        category={cat}
+        categoryIndex={realCi}
+        itemIndex={itemIndex}
+        categoryId={cat.id}
+        categoryName={cat.name}
+        sortableListeners={listeners}
+        isSortableDragging={isDragging}
+        {...rowProps}
+      />
+    </div>
   )
 }
 
@@ -769,9 +997,12 @@ type CategoryCardProps = {
   updateCategory: (ci: number, patch: Partial<ReminderCategory>) => void
   removeCategory: (ci: number) => void
   setPresetModal: (v: { categoryIndex: number; itemIndex: number | null } | null) => void
-  addItemForCategory: number | null
-  setAddItemForCategory: (v: number | null) => void
-  addItem: (ci: number, mode: 'fixed' | 'interval') => void
+  inlineAddDraft: { categoryId: string; mode: 'fixed' | 'interval'; draftKey: string } | null
+  onOpenInlineAdd: (categoryIndex: number) => void
+  onCancelInlineAdd: (categoryId: string) => void
+  onConfirmInlineAdd: (categoryId: string, payload: AddSubReminderPayload) => void | Promise<void>
+  /** 大类列表容器，与子项一致用于拖拽范围限制 */
+  categoryDragConstraintsRef: React.RefObject<HTMLDivElement | null>
   listContainerRefsMap: React.MutableRefObject<Record<string, React.RefObject<HTMLDivElement | null>>>
   setCategoryItems: (ci: number, items: SubReminder[]) => void
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
@@ -782,14 +1013,16 @@ type CategoryCardProps = {
   setPresetDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
-  splitPanelOpen: { categoryIndex: number; itemIndex: number } | null
-  setSplitPanelOpen: (v: { categoryIndex: number; itemIndex: number } | null) => void
   hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
   setHoverItemHandle: (v: { ci: number; ii: number; side: 'left' | 'right' } | null) => void
   hoverCategoryHandle: { ci: number; side: 'left' | 'right' } | null
   setHoverCategoryHandle: (v: { ci: number; side: 'left' | 'right' } | null) => void
   countdowns: CountdownItem[]
   refreshCountdowns?: () => void
+  expandedEditSub: { categoryId: string; itemId: string } | null
+  toggleExpandedEditSub: (categoryId: string, itemId: string) => void
+  onConfirmEmbeddedEdit: (categoryId: string, itemId: string, payload: AddSubReminderPayload) => void | Promise<void>
+  addStopwatchItem: (categoryIndex: number) => void
 }
 
 function CategoryCard(props: CategoryCardProps) {
@@ -799,9 +1032,11 @@ function CategoryCard(props: CategoryCardProps) {
     updateCategory,
     removeCategory,
     setPresetModal,
-    addItemForCategory,
-    setAddItemForCategory,
-    addItem,
+    inlineAddDraft,
+    onOpenInlineAdd,
+    onCancelInlineAdd,
+    onConfirmInlineAdd,
+    categoryDragConstraintsRef,
     listContainerRefsMap,
     setCategoryItems,
     updateItem,
@@ -812,16 +1047,23 @@ function CategoryCard(props: CategoryCardProps) {
     setPresetDropdown,
     repeatDropdown,
     setRepeatDropdown,
-    splitPanelOpen,
-    setSplitPanelOpen,
     hoverItemHandle,
     setHoverItemHandle,
     hoverCategoryHandle,
     setHoverCategoryHandle,
     countdowns,
     refreshCountdowns,
+    expandedEditSub,
+    toggleExpandedEditSub,
+    onConfirmEmbeddedEdit,
+    addStopwatchItem,
   } = props
   const controls = useDragControls()
+  const subItemSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    })
+  )
   const [isChildDragging, setIsChildDragging] = useState(false)
   let listRef = listContainerRefsMap.current[cat.id]
   if (!listRef) {
@@ -832,16 +1074,20 @@ function CategoryCard(props: CategoryCardProps) {
     <Reorder.Item
       value={cat}
       as="div"
+      drag="y"
       dragListener={false}
       dragControls={controls}
+      dragConstraints={categoryDragConstraintsRef}
+      dragElastic={0}
+      dragMomentum={false}
       transition={{ type: 'tween', ease: [0.32, 0.72, 0, 1], duration: 0.12 }}
       dragTransition={{ bounceStiffness: 400, bounceDamping: 40 }}
-      style={{ position: 'relative', zIndex: isChildDragging ? 1000 : undefined }}
+      style={{ position: 'relative', zIndex: isChildDragging ? 10000 : undefined }}
       className="bg-white rounded-lg border border-slate-200 overflow-visible transition-shadow duration-200"
       whileDrag={{
         scale: 1.02,
         boxShadow: '0 4px 16px -2px rgba(0,0,0,0.08)',
-        zIndex: 1000,
+        zIndex: 10000,
       }}
     >
       <div className="p-4 border-b border-slate-100 flex items-center gap-2 flex-nowrap">
@@ -868,9 +1114,11 @@ function CategoryCard(props: CategoryCardProps) {
           placeholder="类型名称"
         />
         <div className="flex items-center gap-2 flex-shrink-0">
-          <button type="button" onClick={() => setPresetModal({ categoryIndex: realCi, itemIndex: null })} className="text-sm text-slate-600 hover:text-slate-800 whitespace-nowrap">
-            管理预设
-          </button>
+          {cat.categoryKind !== 'stopwatch' && (
+            <button type="button" onClick={() => setPresetModal({ categoryIndex: realCi, itemIndex: null })} className="text-sm text-slate-600 hover:text-slate-800 whitespace-nowrap">
+              管理预设
+            </button>
+          )}
           <button type="button" onClick={() => removeCategory(realCi)} className="text-sm text-red-600 hover:text-red-700 whitespace-nowrap">
             删除类型
           </button>
@@ -892,49 +1140,91 @@ function CategoryCard(props: CategoryCardProps) {
         </div>
       </div>
       <div className="p-4 space-y-3">
-        <div ref={listRef} className="min-h-0">
-          <Reorder.Group axis="y" values={cat.items} onReorder={(newOrder) => setCategoryItems(realCi, newOrder)} as="div" className="space-y-3">
-            {cat.items.map((item, itemIndex) => (
-              <SubReminderRow
-                key={item.id}
-                item={item}
-                categoryIndex={realCi}
-                itemIndex={itemIndex}
-                categoryId={cat.id}
-                categoryName={cat.name}
-                countdowns={countdowns}
-                updateItem={updateItem}
-                removeItem={removeItem}
-                getPresets={getPresets}
-                applyPresetToItem={applyPresetToItem}
-                presetDropdown={presetDropdown}
-                setPresetDropdown={setPresetDropdown}
-                repeatDropdown={repeatDropdown}
-                setRepeatDropdown={setRepeatDropdown}
-                splitPanelOpen={splitPanelOpen}
-                setSplitPanelOpen={setSplitPanelOpen}
-                setPresetModal={setPresetModal}
-                hoverItemHandle={hoverItemHandle}
-                setHoverItemHandle={setHoverItemHandle}
-                dragConstraintsRef={listRef}
-                onDragStart={() => setIsChildDragging(true)}
-                onDragEnd={() => setIsChildDragging(false)}
-                refreshCountdowns={refreshCountdowns}
-              />
-            ))}
-          </Reorder.Group>
+        <div ref={listRef as React.LegacyRef<HTMLDivElement>} className="min-h-0 overflow-visible">
+          <DndContext
+            sensors={subItemSensors}
+            collisionDetection={closestCenter}
+            onDragStart={() => setIsChildDragging(true)}
+            onDragEnd={(e: DragEndEvent) => {
+              setIsChildDragging(false)
+              const { active, over } = e
+              if (!over || active.id === over.id) return
+              const oldIndex = cat.items.findIndex((i) => i.id === active.id)
+              const newIndex = cat.items.findIndex((i) => i.id === over.id)
+              if (oldIndex !== -1 && newIndex !== -1) {
+                setCategoryItems(realCi, arrayMove(cat.items, oldIndex, newIndex))
+              }
+            }}
+          >
+            <SortableContext items={cat.items.map((i) => i.id)} strategy={verticalListSortingStrategy}>
+              <div className="relative space-y-3">
+                {cat.items.map((item, itemIndex) => (
+                  <SortableSubReminderItem
+                    key={`${cat.id}-${item.id}`}
+                    id={item.id}
+                    item={item}
+                    itemIndex={itemIndex}
+                    cat={cat}
+                    realCi={realCi}
+                    countdowns={countdowns}
+                    updateItem={updateItem}
+                    removeItem={removeItem}
+                    getPresets={getPresets}
+                    applyPresetToItem={applyPresetToItem}
+                    presetDropdown={presetDropdown}
+                    setPresetDropdown={setPresetDropdown}
+                    repeatDropdown={repeatDropdown}
+                    setRepeatDropdown={setRepeatDropdown}
+                    setPresetModal={setPresetModal}
+                    hoverItemHandle={hoverItemHandle}
+                    setHoverItemHandle={setHoverItemHandle}
+                    refreshCountdowns={refreshCountdowns}
+                    expandedEditSub={expandedEditSub}
+                    toggleExpandedEditSub={toggleExpandedEditSub}
+                    onConfirmEmbeddedEdit={onConfirmEmbeddedEdit}
+                    onCategoryPresetsChange={(presets) => updateCategory(realCi, { presets })}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
         </div>
-        {addItemForCategory === realCi ? (
-          <div className="flex gap-2 p-2 bg-slate-100 rounded">
-            <button type="button" onClick={() => addItem(realCi, 'fixed')} className="rounded border border-slate-300 px-3 py-1 text-sm">固定时间</button>
-            <button type="button" onClick={() => addItem(realCi, 'interval')} className="rounded border border-slate-300 px-3 py-1 text-sm">间隔</button>
-            <button type="button" onClick={() => setAddItemForCategory(null)} className="text-slate-500 text-sm">取消</button>
+        {inlineAddDraft?.categoryId === cat.id && cat.categoryKind !== 'stopwatch' && (
+          <div className="mt-3 min-w-0">
+            <AddSubReminderModal
+              key={inlineAddDraft.draftKey}
+              open
+              layout="embedded"
+              formInstanceKey={inlineAddDraft.draftKey}
+              mode={inlineAddDraft.mode}
+              category={cat}
+              categoryIndex={realCi}
+              onClose={() => onCancelInlineAdd(cat.id)}
+              onConfirm={(payload) => {
+                void onConfirmInlineAdd(cat.id, payload)
+              }}
+              onPresetsChange={(presets) => updateCategory(realCi, { presets })}
+            />
           </div>
-        ) : (
-          <button type="button" onClick={() => setAddItemForCategory(realCi)} className="text-sm text-slate-600 hover:text-slate-800">
-            + 添加子提醒
-          </button>
         )}
+        {/* 与子项外层一致；大类内联新建一条 */}
+        <div className="flex w-full flex-col gap-1.5 rounded-lg bg-slate-50 p-3 transition-colors">
+          <div className="flex w-full flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                cat.categoryKind === 'stopwatch' ? addStopwatchItem(realCi) : onOpenInlineAdd(realCi)
+              }
+              className="text-sm text-slate-600 hover:text-slate-800"
+            >
+              {cat.categoryKind === 'alarm'
+                ? '+ 添加闹钟'
+                : cat.categoryKind === 'countdown'
+                  ? '+ 添加倒计时'
+                  : '+ 添加秒表'}
+            </button>
+          </div>
+        </div>
       </div>
     </Reorder.Item>
   )
@@ -950,15 +1240,76 @@ export function Settings() {
   const [presetModal, setPresetModal] = useState<{ categoryIndex: number; itemIndex: number | null } | null>(null)
   const [presetDropdown, setPresetDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [repeatDropdown, setRepeatDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
-  const [splitPanelOpen, setSplitPanelOpen] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [editingPresetIndex, setEditingPresetIndex] = useState<number | null>(null)
   const [editingPresetValue, setEditingPresetValue] = useState('')
   const [newPresetValue, setNewPresetValue] = useState('')
-  const [addItemForCategory, setAddItemForCategory] = useState<number | null>(null)
   const [countdowns, setCountdowns] = useState<CountdownItem[]>([])
   const [hoverCategoryHandle, setHoverCategoryHandle] = useState<{ ci: number; side: 'left' | 'right' } | null>(null)
   const [hoverItemHandle, setHoverItemHandle] = useState<{ ci: number; ii: number; side: 'left' | 'right' } | null>(null)
+  const [inlineAddDraft, setInlineAddDraft] = useState<{
+    categoryId: string
+    mode: 'fixed' | 'interval'
+    draftKey: string
+  } | null>(null)
+  const [expandedEditSub, setExpandedEditSub] = useState<{ categoryId: string; itemId: string } | null>(null)
+  const [categoryListFilter, setCategoryListFilter] = useState<CategoryListFilter>('all')
   const listContainerRefsMap = useRef<Record<string, React.RefObject<HTMLDivElement | null>>>({})
+  const categoryReorderContainerRef = useRef<HTMLDivElement>(null)
+  /** 与界面一致，供弹窗确认与防抖落盘读取，避免闭包/磁盘快照错位 */
+  const reminderCategoriesRef = useRef(settings.reminderCategories)
+  reminderCategoriesRef.current = settings.reminderCategories
+  const filteredReminderCategories = useMemo(() => {
+    if (categoryListFilter === 'all') return settings.reminderCategories
+    return settings.reminderCategories.filter((c) => c.categoryKind === categoryListFilter)
+  }, [settings.reminderCategories, categoryListFilter])
+
+  const applyCategoryListFilter = (f: CategoryListFilter) => {
+    setCategoryListFilter(f)
+    const cats = reminderCategoriesRef.current
+    setPresetDropdown(null)
+    setRepeatDropdown(null)
+    if (presetModal) {
+      const c = cats[presetModal.categoryIndex]
+      if (c && f !== 'all' && c.categoryKind !== f) {
+        setPresetModal(null)
+        setEditingPresetIndex(null)
+        setNewPresetValue('')
+      }
+    }
+    setInlineAddDraft((d) => {
+      if (!d) return null
+      const c = cats.find((x) => x.id === d.categoryId)
+      if (!c) return null
+      if (f !== 'all' && c.categoryKind !== f) return null
+      return d
+    })
+    setExpandedEditSub((e) => {
+      if (!e) return null
+      const c = cats.find((x) => x.id === e.categoryId)
+      if (!c) return null
+      if (f !== 'all' && c.categoryKind !== f) return null
+      return e
+    })
+  }
+  const autoSaveGen = useRef(0)
+  const skipNextAutoSave = useRef(true)
+  /** 落盘成功后 setState 会换新引用，避免再次触发自动保存 effect 形成死循环 */
+  const suppressAutoSaveAfterHydrateRef = useRef(false)
+
+  const toggleExpandedEditSub = (categoryId: string, itemId: string) => {
+    setExpandedEditSub((prev) => (prev?.categoryId === categoryId && prev?.itemId === itemId ? null : { categoryId, itemId }))
+    setInlineAddDraft(null)
+  }
+
+  /** 取消内联新建：若该大类仍无任何子项则删除大类（如底部新建的空白类型） */
+  const cancelInlineAddForCategory = (categoryId: string) => {
+    const cats = reminderCategoriesRef.current
+    const ci = cats.findIndex((c) => c.id === categoryId)
+    if (ci >= 0 && cats[ci].items.length === 0) {
+      removeCategory(ci)
+    }
+    setInlineAddDraft((d) => (d?.categoryId === categoryId ? null : d))
+  }
 
   useEffect(() => {
     const api = getApi()
@@ -976,6 +1327,43 @@ export function Settings() {
     })
     api.getSettingsFilePath().then(setSettingsPath).catch(() => setSettingsPath('(获取失败)'))
   }, [])
+
+  /** 仅在用户改列表/子项后防抖写盘；成功后 hydrate 状态不触发下一轮（见 suppressAutoSaveAfterHydrateRef） */
+  useEffect(() => {
+    if (loading) return
+    const api = getApi()
+    if (!api?.setSettings) return
+    if (suppressAutoSaveAfterHydrateRef.current) {
+      suppressAutoSaveAfterHydrateRef.current = false
+      return
+    }
+    if (skipNextAutoSave.current) {
+      skipNextAutoSave.current = false
+      return
+    }
+    autoSaveGen.current += 1
+    const gen = autoSaveGen.current
+    const t = window.setTimeout(async () => {
+      try {
+        setSaveError('')
+        const snapshot = reminderCategoriesRef.current
+        const result = await api.setSettings({ reminderCategories: snapshot })
+        if (gen !== autoSaveGen.current) return
+        if (result.success) {
+          suppressAutoSaveAfterHydrateRef.current = true
+          setSettingsState(result.data)
+        } else {
+          setSaveError(result.error)
+          setSaveStatus('error')
+        }
+      } catch (e) {
+        if (gen !== autoSaveGen.current) return
+        setSaveError(e instanceof Error ? e.message : String(e))
+        setSaveStatus('error')
+      }
+    }, 400)
+    return () => window.clearTimeout(t)
+  }, [settings.reminderCategories, loading])
 
   useEffect(() => {
     const api = getApi()
@@ -1006,17 +1394,40 @@ export function Settings() {
     setCategories(next)
   }
 
-  const addCategory = () => {
+  const addCategoryOfKind = (kind: CategoryKind) => {
+    const newId = genId()
     const newCat: ReminderCategory = {
-      id: genId(),
-      name: '新类型',
+      id: newId,
+      name: kind === 'alarm' ? '新闹钟类型' : kind === 'countdown' ? '新倒计时类型' : '新秒表类型',
+      categoryKind: kind,
       presets: [],
-      items: [],
+      /** 秒表与闹钟类似：新建大类后立刻有一条可用子项，无需再点「+ 添加秒表」 */
+      items: kind === 'stopwatch' ? [{ id: genId(), mode: 'stopwatch' }] : [],
     }
     setCategories([...settings.reminderCategories, newCat])
+    setExpandedEditSub(null)
+    setInlineAddDraft(
+      kind === 'stopwatch'
+        ? null
+        : {
+            categoryId: newId,
+            mode: kind === 'alarm' ? 'fixed' : 'interval',
+            draftKey: genId(),
+          }
+    )
+  }
+
+  const addStopwatchItem = (categoryIndex: number) => {
+    const cat = settings.reminderCategories[categoryIndex]
+    if (!cat || cat.categoryKind !== 'stopwatch') return
+    const newItem: SubReminder = { id: genId(), mode: 'stopwatch' }
+    const next = settings.reminderCategories.slice()
+    next[categoryIndex] = { ...cat, items: [...cat.items, newItem] }
+    setCategories(next)
   }
 
   const removeCategory = (categoryIndex: number) => {
+    const removedCat = settings.reminderCategories[categoryIndex]
     setCategories(settings.reminderCategories.filter((_, i) => i !== categoryIndex))
     if (presetModal?.categoryIndex === categoryIndex) setPresetModal(null)
     if (presetModal && presetModal.categoryIndex > categoryIndex) setPresetModal({ ...presetModal, categoryIndex: presetModal.categoryIndex - 1 })
@@ -1024,8 +1435,8 @@ export function Settings() {
     if (presetDropdown && presetDropdown.categoryIndex > categoryIndex) setPresetDropdown({ ...presetDropdown, categoryIndex: presetDropdown.categoryIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex) setRepeatDropdown(null)
     if (repeatDropdown && repeatDropdown.categoryIndex > categoryIndex) setRepeatDropdown({ ...repeatDropdown, categoryIndex: repeatDropdown.categoryIndex - 1 })
-    if (splitPanelOpen?.categoryIndex === categoryIndex) setSplitPanelOpen(null)
-    if (splitPanelOpen && splitPanelOpen.categoryIndex > categoryIndex) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: splitPanelOpen.categoryIndex - 1 })
+    if (removedCat && expandedEditSub?.categoryId === removedCat.id) setExpandedEditSub(null)
+    if (removedCat && inlineAddDraft?.categoryId === removedCat.id) setInlineAddDraft(null)
   }
 
   const moveCategory = (fromIndex: number, toIndex: number) => {
@@ -1052,12 +1463,6 @@ export function Settings() {
       else if (fromIndex < idx && toIndex >= idx) setRepeatDropdown({ ...repeatDropdown, categoryIndex: idx - 1 })
       else if (fromIndex > idx && toIndex <= idx) setRepeatDropdown({ ...repeatDropdown, categoryIndex: idx + 1 })
     }
-    if (splitPanelOpen !== null) {
-      const idx = splitPanelOpen.categoryIndex
-      if (idx === fromIndex) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: toIndex })
-      else if (fromIndex < idx && toIndex >= idx) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: idx - 1 })
-      else if (fromIndex > idx && toIndex <= idx) setSplitPanelOpen({ ...splitPanelOpen, categoryIndex: idx + 1 })
-    }
   }
 
   const moveItem = (categoryIndex: number, fromIndex: number, toIndex: number) => {
@@ -1078,11 +1483,6 @@ export function Settings() {
       else if (fromIndex < repeatDropdown.itemIndex && toIndex >= repeatDropdown.itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
       else if (fromIndex > repeatDropdown.itemIndex && toIndex <= repeatDropdown.itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex + 1 })
     }
-    if (splitPanelOpen?.categoryIndex === categoryIndex) {
-      if (splitPanelOpen.itemIndex === fromIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: toIndex })
-      else if (fromIndex < splitPanelOpen.itemIndex && toIndex >= splitPanelOpen.itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
-      else if (fromIndex > splitPanelOpen.itemIndex && toIndex <= splitPanelOpen.itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex + 1 })
-    }
   }
 
   /** 将子项从一个大类移动到另一个大类（可同大类，相当于 moveItem） */
@@ -1090,9 +1490,9 @@ export function Settings() {
     const next = settings.reminderCategories.slice()
     const fromCat = next[fromCi]
     if (!fromCat || fromIi < 0 || fromIi >= fromCat.items.length) return
-    const [removed] = fromCat.items.splice(fromIi, 1)
     const toCat = next[toCi]
-    if (!toCat) return
+    if (!toCat || fromCat.categoryKind !== toCat.categoryKind) return
+    const [removed] = fromCat.items.splice(fromIi, 1)
     const toItems = toCi === fromCi ? fromCat.items : toCat.items.slice()
     const insertAt = Math.max(0, Math.min(toIndex, toItems.length))
     toItems.splice(insertAt, 0, removed)
@@ -1121,14 +1521,8 @@ export function Settings() {
         setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex + 1 })
       }
     }
-    if (splitPanelOpen) {
-      if (splitPanelOpen.categoryIndex === fromCi && splitPanelOpen.itemIndex === fromIi) {
-        setSplitPanelOpen(toCi === fromCi ? { ...splitPanelOpen, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
-      } else if (splitPanelOpen.categoryIndex === fromCi && fromIi < splitPanelOpen.itemIndex) {
-        setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
-      } else if (splitPanelOpen.categoryIndex === toCi && insertAt <= splitPanelOpen.itemIndex) {
-        setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex + 1 })
-      }
+    if (expandedEditSub && removed.id === expandedEditSub.itemId) {
+      setExpandedEditSub({ categoryId: next[toCi].id, itemId: removed.id })
     }
     if (presetModal?.categoryIndex === fromCi && presetModal.itemIndex === fromIi) {
       setPresetModal(toCi === fromCi ? { ...presetModal, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
@@ -1139,19 +1533,152 @@ export function Settings() {
     }
   }
 
-  const addItem = (categoryIndex: number, mode: 'fixed' | 'interval') => {
-    const cat = settings.reminderCategories[categoryIndex]
+  const handleAddSubReminderConfirm = async (categoryId: string, payload: AddSubReminderPayload) => {
+    const api = getApi()
+    if (!api?.setSettings) return
     const newItem: SubReminder =
-      mode === 'fixed'
-        ? { id: genId(), mode: 'fixed', time: '12:00', content: '' }
-        : { id: genId(), mode: 'interval', intervalHours: 0, intervalMinutes: 30, intervalSeconds: 0, content: '', repeatCount: null }
-    const next = settings.reminderCategories.slice()
-    next[categoryIndex] = { ...cat, items: [...cat.items, newItem] }
-    setCategories(next)
-    setAddItemForCategory(null)
+      payload.mode === 'fixed'
+        ? {
+            id: genId(),
+            mode: 'fixed',
+            time: payload.time ?? '12:00',
+            content: payload.content || '提醒',
+            splitCount: payload.splitCount,
+            restDurationSeconds: payload.restDurationSeconds,
+            restContent: payload.restContent,
+          }
+        : {
+            id: genId(),
+            mode: 'interval',
+            intervalHours: payload.intervalHours ?? 0,
+            intervalMinutes: payload.intervalMinutes ?? 30,
+            intervalSeconds: payload.intervalSeconds ?? 0,
+            content: payload.content || '提醒',
+            repeatCount: payload.repeatCount ?? null,
+            splitCount: payload.splitCount,
+            restDurationSeconds: payload.restDurationSeconds,
+            restContent: payload.restContent,
+          }
+    try {
+      const cats = reminderCategoriesRef.current
+      const ci = cats.findIndex((c) => c.id === categoryId)
+      if (ci < 0) return
+      const cat = cats[ci]
+      if (
+        (payload.mode === 'fixed' && cat.categoryKind !== 'alarm') ||
+        (payload.mode === 'interval' && cat.categoryKind !== 'countdown')
+      ) {
+        setInlineAddDraft(null)
+        return
+      }
+      const nextCategories = cats.map((c, i) => (i !== ci ? c : { ...c, items: [...c.items, newItem] }))
+      const result = await api.setSettings({ reminderCategories: nextCategories })
+      if (!result.success) {
+        setSaveError(result.error)
+        setSaveStatus('error')
+        return
+      }
+      suppressAutoSaveAfterHydrateRef.current = true
+      setSettingsState(result.data)
+      if (payload.mode === 'fixed') {
+        const key = `${cat.id}_${newItem.id}`
+        await api.setFixedTimeCountdownOverride?.(key, payload.time ?? '12:00')
+      } else {
+        await api.restartReminders?.()
+      }
+      const cds = await api.getReminderCountdowns?.()
+      if (cds) setCountdowns(cds)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+      setSaveStatus('error')
+    } finally {
+      setInlineAddDraft(null)
+    }
+  }
+
+  const handleEditSubReminderConfirm = async (categoryId: string, itemId: string, payload: AddSubReminderPayload) => {
+    const api = getApi()
+    if (!api?.setSettings) return
+    const splitN = Math.max(1, Math.min(10, payload.splitCount ?? 1))
+    const content = payload.content.trim() || '提醒'
+    try {
+      const cats = reminderCategoriesRef.current
+      const eci = cats.findIndex((c) => c.id === categoryId)
+      if (eci < 0) return
+      const diskCat = cats[eci]
+      const eii = diskCat.items.findIndex((it) => it.id === itemId)
+      if (eii < 0) return
+      const existing = diskCat.items[eii]
+      if (existing.mode !== payload.mode) return
+      if (
+        (payload.mode === 'fixed' && diskCat.categoryKind !== 'alarm') ||
+        (payload.mode === 'interval' && diskCat.categoryKind !== 'countdown')
+      ) {
+        return
+      }
+
+      let updated: SubReminder
+      if (payload.mode === 'fixed') {
+        const base = { id: existing.id, mode: 'fixed' as const, time: payload.time!, content }
+        updated =
+          splitN <= 1
+            ? { ...base, splitCount: 1 }
+            : {
+                ...base,
+                splitCount: splitN,
+                restDurationSeconds: payload.restDurationSeconds ?? 0,
+                restContent: payload.restContent,
+              }
+      } else {
+        const base = {
+          id: existing.id,
+          mode: 'interval' as const,
+          intervalHours: payload.intervalHours ?? 0,
+          intervalMinutes: payload.intervalMinutes ?? 30,
+          intervalSeconds: payload.intervalSeconds ?? 0,
+          content,
+          repeatCount: payload.repeatCount ?? (existing.mode === 'interval' ? existing.repeatCount : null),
+        }
+        updated =
+          splitN <= 1
+            ? { ...base, splitCount: 1 }
+            : {
+                ...base,
+                splitCount: splitN,
+                restDurationSeconds: payload.restDurationSeconds ?? 0,
+                restContent: payload.restContent,
+              }
+      }
+
+      const nextCategories = cats.map((c, ci) =>
+        ci !== eci ? c : { ...c, items: c.items.map((it, ii) => (ii === eii ? updated : it)) }
+      )
+      const result = await api.setSettings({ reminderCategories: nextCategories })
+      if (!result.success) {
+        setSaveError(result.error)
+        setSaveStatus('error')
+        return
+      }
+      suppressAutoSaveAfterHydrateRef.current = true
+      setSettingsState(result.data)
+      if (payload.mode === 'fixed') {
+        const key = `${diskCat.id}_${existing.id}`
+        await api.setFixedTimeCountdownOverride?.(key, payload.time!)
+      } else {
+        await api.restartReminders?.()
+      }
+      const cds = await api.getReminderCountdowns?.()
+      if (cds) setCountdowns(cds)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+      setSaveStatus('error')
+    } finally {
+      setExpandedEditSub(null)
+    }
   }
 
   const removeItem = (categoryIndex: number, itemIndex: number) => {
+    const removed = settings.reminderCategories[categoryIndex]?.items[itemIndex]
     const next = settings.reminderCategories.slice()
     const cat = { ...next[categoryIndex], items: next[categoryIndex].items.filter((_, i) => i !== itemIndex) }
     next[categoryIndex] = cat
@@ -1160,8 +1687,7 @@ export function Settings() {
     if (presetDropdown?.categoryIndex === categoryIndex && presetDropdown.itemIndex > itemIndex) setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex === itemIndex) setRepeatDropdown(null)
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex > itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
-    if (splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen.itemIndex === itemIndex) setSplitPanelOpen(null)
-    if (splitPanelOpen?.categoryIndex === categoryIndex && splitPanelOpen.itemIndex > itemIndex) setSplitPanelOpen({ ...splitPanelOpen, itemIndex: splitPanelOpen.itemIndex - 1 })
+    if (removed && expandedEditSub?.itemId === removed.id) setExpandedEditSub(null)
   }
 
   const setCategoryPresets = (categoryIndex: number, presets: string[]) => {
@@ -1174,11 +1700,13 @@ export function Settings() {
     setCategories(next)
     setPresetDropdown(null)
     setRepeatDropdown(null)
-    setSplitPanelOpen(null)
+    setExpandedEditSub(null)
   }
 
   const getPresets = (categoryIndex: number) => settings.reminderCategories[categoryIndex]?.presets ?? []
   const applyPresetToItem = (categoryIndex: number, itemIndex: number, text: string) => {
+    const it = settings.reminderCategories[categoryIndex]?.items[itemIndex]
+    if (it?.mode === 'stopwatch') return
     updateItem(categoryIndex, itemIndex, { content: text })
     setPresetDropdown(null)
     if (presetModal) setPresetModal(null)
@@ -1224,6 +1752,7 @@ export function Settings() {
     try {
       const result = await api.setSettings(settings)
       if (result.success) {
+        suppressAutoSaveAfterHydrateRef.current = true
         setSettingsState(result.data)
         setSaveStatus('ok')
         setTimeout(() => setSaveStatus('idle'), 3000)
@@ -1265,8 +1794,62 @@ export function Settings() {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-6 space-y-6">
-        <Reorder.Group axis="y" values={settings.reminderCategories} onReorder={(newOrder) => { setCategories(newOrder); setPresetModal(null); setPresetDropdown(null); setRepeatDropdown(null); setSplitPanelOpen(null) }} as="div" className="space-y-6">
-        {settings.reminderCategories.map((cat, realCi) => (
+        <div
+          className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+          role="tablist"
+          aria-label="提醒类型筛选"
+        >
+          {(
+            [
+              { id: 'all' as const, label: '全部' },
+              { id: 'alarm' as const, label: '闹钟' },
+              { id: 'countdown' as const, label: '倒计时' },
+              { id: 'stopwatch' as const, label: '秒表' },
+            ] as const
+          ).map(({ id, label }) => {
+            const active = categoryListFilter === id
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => applyCategoryListFilter(id)}
+                className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? 'bg-slate-800 text-white shadow-sm'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-transparent'
+                }`}
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+
+        <Reorder.Group
+          ref={categoryReorderContainerRef}
+          axis="y"
+          values={filteredReminderCategories}
+          onReorder={(newOrder) => {
+            const merged =
+              categoryListFilter === 'all'
+                ? newOrder
+                : mergeVisibleCategoryOrder(settings.reminderCategories, newOrder)
+            setCategories(merged)
+            setPresetModal(null)
+            setPresetDropdown(null)
+            setRepeatDropdown(null)
+            setExpandedEditSub(null)
+            setInlineAddDraft(null)
+          }}
+          as="div"
+          className="space-y-6"
+        >
+        {filteredReminderCategories.map((cat) => {
+          const realCi = settings.reminderCategories.findIndex((c) => c.id === cat.id)
+          if (realCi < 0) return null
+          return (
           <CategoryCard
             key={cat.id}
             cat={cat}
@@ -1274,9 +1857,20 @@ export function Settings() {
             updateCategory={updateCategory}
             removeCategory={removeCategory}
             setPresetModal={setPresetModal}
-            addItemForCategory={addItemForCategory}
-            setAddItemForCategory={setAddItemForCategory}
-            addItem={addItem}
+            inlineAddDraft={inlineAddDraft}
+            onOpenInlineAdd={(ci) => {
+              const c = settings.reminderCategories[ci]
+              if (!c || c.categoryKind === 'stopwatch') return
+              setExpandedEditSub(null)
+              setInlineAddDraft({
+                categoryId: c.id,
+                mode: c.categoryKind === 'alarm' ? 'fixed' : 'interval',
+                draftKey: genId(),
+              })
+            }}
+            onCancelInlineAdd={cancelInlineAddForCategory}
+            onConfirmInlineAdd={(cid, payload) => handleAddSubReminderConfirm(cid, payload)}
+            categoryDragConstraintsRef={categoryReorderContainerRef}
             listContainerRefsMap={listContainerRefsMap}
             setCategoryItems={setCategoryItems}
             updateItem={updateItem}
@@ -1287,34 +1881,72 @@ export function Settings() {
             setPresetDropdown={setPresetDropdown}
             repeatDropdown={repeatDropdown}
             setRepeatDropdown={setRepeatDropdown}
-            splitPanelOpen={splitPanelOpen}
-            setSplitPanelOpen={setSplitPanelOpen}
             hoverItemHandle={hoverItemHandle}
             setHoverItemHandle={setHoverItemHandle}
             hoverCategoryHandle={hoverCategoryHandle}
             setHoverCategoryHandle={setHoverCategoryHandle}
             countdowns={countdowns}
             refreshCountdowns={() => getApi()?.getReminderCountdowns?.().then(setCountdowns)}
+            expandedEditSub={expandedEditSub}
+            toggleExpandedEditSub={toggleExpandedEditSub}
+            onConfirmEmbeddedEdit={(cid, iid, payload) => handleEditSubReminderConfirm(cid, iid, payload)}
+            addStopwatchItem={addStopwatchItem}
           />
-        ))}
+          )
+        })}
         </Reorder.Group>
 
-        <button
-          type="button"
-          onClick={addCategory}
-          className="w-full rounded-lg border-2 border-dashed border-slate-300 py-3 text-slate-600 hover:border-slate-400 hover:text-slate-700 text-sm"
-        >
-          + 新增提醒类型
-        </button>
+        <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
+          {(categoryListFilter === 'all' || categoryListFilter === 'alarm') && (
+            <button
+              type="button"
+              onClick={() => addCategoryOfKind('alarm')}
+              className="flex-1 rounded-lg border-2 border-dashed border-slate-300 py-3 text-center text-sm text-slate-600 hover:border-slate-400 hover:text-slate-700"
+            >
+              + 闹钟类型
+            </button>
+          )}
+          {(categoryListFilter === 'all' || categoryListFilter === 'countdown') && (
+            <button
+              type="button"
+              onClick={() => addCategoryOfKind('countdown')}
+              className="flex-1 rounded-lg border-2 border-dashed border-slate-300 py-3 text-center text-sm text-slate-600 hover:border-slate-400 hover:text-slate-700"
+            >
+              + 倒计时类型
+            </button>
+          )}
+          {(categoryListFilter === 'all' || categoryListFilter === 'stopwatch') && (
+            <button
+              type="button"
+              onClick={() => addCategoryOfKind('stopwatch')}
+              className="flex-1 rounded-lg border-2 border-dashed border-slate-300 py-3 text-center text-sm text-slate-600 hover:border-slate-400 hover:text-slate-700"
+            >
+              + 秒表类型
+            </button>
+          )}
+        </div>
 
         <div className="space-y-3">
+          <p className="text-xs text-slate-500 leading-relaxed">
+            有修改后约 0.4 秒内会在后台<strong className="text-slate-600">自动写入</strong>本地文件（静默，不闪状态）。下方「立即保存」用于马上落盘；旁边的<strong className="text-slate-600">「已保存」</strong>仅在该按钮成功时出现。
+          </p>
           <div className="flex items-center gap-3 flex-wrap">
             <button
               onClick={save}
               disabled={saveStatus === 'saving'}
               className="rounded-lg bg-slate-800 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
             >
-              {saveStatus === 'saving' ? '保存中…' : '保存设置'}
+              {saveStatus === 'saving' ? '保存中…' : '立即保存'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                getApi()?.resetAllReminderProgress?.().then(() => getApi()?.getReminderCountdowns?.().then(setCountdowns))
+              }}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              title="将所有提醒的起始点与进度更新为当前时刻"
+            >
+              全部重置
             </button>
             {saveStatus === 'ok' && <span className="text-sm font-medium text-green-600">已保存</span>}
             {saveStatus === 'error' && <span className="text-sm font-medium text-red-600">保存失败</span>}

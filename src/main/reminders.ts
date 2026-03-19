@@ -1,5 +1,12 @@
 import { getSettings } from './settings'
+import type { ReminderCategory, SubReminder } from './settings'
+import type { ResetIntervalPayload } from '../shared/settings'
 import { showReminderPopup } from './reminderWindow'
+
+const REMINDER_LOG = true
+function reminderLog(...args: unknown[]) {
+  if (REMINDER_LOG) console.log('[WorkBreak][Reminder]', ...args)
+}
 
 let fixedMinuteTimeout: ReturnType<typeof setTimeout> | null = null
 const intervalTimerKeys: string[] = []
@@ -30,10 +37,13 @@ const intervalState = new Map<string, IntervalState>()
 
 /** 固定时间倒计时覆盖：key -> HH:mm，用于「重置」后按界面当前时间倒计时，保存后清除 */
 const fixedTimeCountdownOverride = new Map<string, string>()
+/** 固定时间重置时的周期起点时间戳（key -> 重置那一刻的 Date.now()），返回给前端用于起始时间与进度，不随每次 getReminderCountdowns 的 now 变化 */
+const fixedTimeCycleStartAt = new Map<string, number>()
 
 function showReminder(title: string, body: string) {
   const now = new Date()
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  reminderLog('弹窗', { title, bodyPreview: (body || '').slice(0, 40), timeStr })
   showReminderPopup({ title, body, timeStr })
 }
 
@@ -46,15 +56,18 @@ function isSameMinute(now: Date, h: number, m: number): boolean {
   return now.getHours() === h && now.getMinutes() === m
 }
 
-/** 到整分时检查所有固定时间子提醒 */
+/** 到整分时检查所有固定时间子提醒（须与 getReminderCountdowns 一致：优先 fixedTimeCountdownOverride） */
 function runFixedTimeCheck() {
   const s = getSettings()
   const now = new Date()
   for (const cat of s.reminderCategories) {
     for (const item of cat.items) {
       if (item.mode !== 'fixed') continue
-      const { h, m } = parseTimeHHmm(item.time)
+      const key = `${cat.id}_${item.id}`
+      const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
+      const { h, m } = parseTimeHHmm(timeStr)
       if (isSameMinute(now, h, m)) {
+        reminderLog('固定时间整分触发', { key, timeStr, cat: cat.name })
         showReminder(cat.name, item.content || '提醒')
       }
     }
@@ -89,6 +102,7 @@ function scheduleNextPhase(key: string) {
     if (st.phaseIndex < st.splitCount - 1) {
       // 本段工作结束，进入休息（若休息>0）
       if (st.restDurationMs > 0) {
+        reminderLog('间隔·休息段弹窗', { key, phaseIndex: st.phaseIndex })
         showReminder(st.categoryName, st.restContent || '休息一下')
         st.phase = 'rest'
         st.phaseStartTime = now
@@ -103,6 +117,12 @@ function scheduleNextPhase(key: string) {
       return
     }
     // 最后一段工作结束 → 主提醒，新一轮
+    reminderLog('间隔·主提醒', {
+      key,
+      firedCount: st.firedCount + 1,
+      nextSegmentMs: st.segmentDurationMs,
+      intervalMs: st.intervalMs,
+    })
     showReminder(st.categoryName, st.content)
     st.firedCount++
     st.startTime = now
@@ -147,7 +167,6 @@ function placeElapsedInNewCycle(
   splitCount: number,
   now: number
 ): { phase: 'work' | 'rest'; phaseIndex: number; phaseStartTime: number; remainingInPhaseMs: number } {
-  const segmentTotal = segmentDurationMs + restDurationMs
   let acc = 0
   for (let i = 0; i < splitCount; i++) {
     if (elapsedMs < acc + segmentDurationMs) {
@@ -269,16 +288,95 @@ export function restartReminders() {
   startReminders()
 }
 
-/** 重置指定间隔提醒的进度（仅此一条）。若传入 payload 则用当前界面配置，否则从磁盘 getSettings 读取 */
-export function resetReminderProgress(key: string, payload?: import('../shared/settings').ResetIntervalPayload): void {
+function removeIntervalTimerByKey(key: string): void {
   const t = intervalTimeouts.get(key)
-  if (t) {
-    clearTimeout(t)
-    intervalTimeouts.delete(key)
-    const i = intervalTimerKeys.indexOf(key)
-    if (i >= 0) intervalTimerKeys.splice(i, 1)
-  }
+  if (t) clearTimeout(t)
+  intervalTimeouts.delete(key)
   intervalState.delete(key)
+  const i = intervalTimerKeys.indexOf(key)
+  if (i >= 0) intervalTimerKeys.splice(i, 1)
+}
+
+function buildIntervalPayload(cat: ReminderCategory, item: SubReminder & { mode: 'interval' }): ResetIntervalPayload {
+  return {
+    categoryName: cat.name,
+    content: item.content || '提醒',
+    intervalHours: item.intervalHours,
+    intervalMinutes: item.intervalMinutes,
+    intervalSeconds: item.intervalSeconds,
+    repeatCount: item.repeatCount ?? null,
+    splitCount: item.splitCount,
+    restDurationSeconds: item.restDurationSeconds,
+    restContent: item.restContent,
+  }
+}
+
+/** 与「仅改文案」区分：这些变了必须按新配置重排 setTimeout */
+function intervalTimingSignature(item: SubReminder & { mode: 'interval' }): string {
+  const h = item.intervalHours ?? 0
+  const m = item.intervalMinutes ?? 0
+  const s = item.intervalSeconds ?? 0
+  const split = Math.max(1, Math.min(10, item.splitCount ?? 1))
+  const rest = Math.max(0, item.restDurationSeconds ?? 0)
+  return `${h}|${m}|${s}|${split}|${rest}`
+}
+
+/**
+ * setSettings 写入磁盘后调用：让内存中的倒计时候选与配置一致。
+ * 自动保存不会调 restartReminders；若用户已把间隔从 1 分钟改成 15 分钟，此处会 reset 该条，避免仍按旧间隔每分钟弹窗。
+ */
+export function syncIntervalTimersAfterSettingsChange(
+  prevCategories: ReminderCategory[],
+  nextCategories: ReminderCategory[],
+): void {
+  const prevMap = new Map<string, { cat: ReminderCategory; item: SubReminder & { mode: 'interval' } }>()
+  for (const cat of prevCategories) {
+    for (const item of cat.items) {
+      if (item.mode !== 'interval') continue
+      prevMap.set(`${cat.id}_${item.id}`, { cat, item: item as SubReminder & { mode: 'interval' } })
+    }
+  }
+  const nextKeys = new Set<string>()
+  for (const cat of nextCategories) {
+    for (const item of cat.items) {
+      if (item.mode !== 'interval') continue
+      const iv = item as SubReminder & { mode: 'interval' }
+      const key = `${cat.id}_${item.id}`
+      nextKeys.add(key)
+      const prevEntry = prevMap.get(key)
+      if (!prevEntry) {
+        reminderLog('syncInterval: 新子项', { key })
+        resetReminderProgress(key, buildIntervalPayload(cat, iv))
+        continue
+      }
+      if (intervalTimingSignature(prevEntry.item) !== intervalTimingSignature(iv)) {
+        reminderLog('syncInterval: 时长/拆分变更，重排', {
+          key,
+          prev: intervalTimingSignature(prevEntry.item),
+          next: intervalTimingSignature(iv),
+        })
+        resetReminderProgress(key, buildIntervalPayload(cat, iv))
+        continue
+      }
+      const st = intervalState.get(key)
+      if (st) {
+        st.content = iv.content || '提醒'
+        st.categoryName = cat.name
+        st.repeatCount = iv.repeatCount ?? null
+        st.restContent = iv.restContent ?? '休息一下'
+      }
+    }
+  }
+  for (const key of [...intervalTimerKeys]) {
+    if (nextKeys.has(key)) continue
+    reminderLog('syncInterval: 删除子项，清定时器', { key })
+    removeIntervalTimerByKey(key)
+  }
+}
+
+/** 重置指定间隔提醒的进度（仅此一条）。若传入 payload 则用当前界面配置，否则从磁盘 getSettings 读取 */
+export function resetReminderProgress(key: string, payload?: ResetIntervalPayload): void {
+  removeIntervalTimerByKey(key)
 
   let h: number, m: number, sec: number, repeatCount: number | null, categoryName: string, content: string, splitCount: number, restSec: number, restContent: string
   if (payload) {
@@ -358,14 +456,43 @@ import type { CountdownItem } from '../shared/settings'
 
 export type { CountdownItem }
 
-/** 固定时间「重置」：按界面当前设定时间从当前时刻倒计时；time 为 HH:mm */
+/** 固定时间「重置」：按界面当前设定时间从当前时刻倒计时；time 为 HH:mm，并记录周期起点供起始时间显示 */
 export function setFixedTimeCountdownOverride(key: string, time: string): void {
+  const now = Date.now()
   fixedTimeCountdownOverride.set(key, time)
+  fixedTimeCycleStartAt.set(key, now)
 }
 
-/** 保存设置后清除固定时间倒计时覆盖，使倒计时使用已保存时间 */
+/** 保存设置后清除固定时间倒计时覆盖（仅在被调用时执行，保存设置不再自动调用） */
 export function clearFixedTimeCountdownOverrides(): void {
   fixedTimeCountdownOverride.clear()
+  fixedTimeCycleStartAt.clear()
+}
+
+/** 全部重置：将所有固定时间的周期起点与所有间隔的进度更新为「从当前时刻开始」，使用当前 getSettings 的配置 */
+export function resetAllReminderProgress(): void {
+  const s = getSettings()
+  for (const cat of s.reminderCategories) {
+    for (const item of cat.items) {
+      const key = `${cat.id}_${item.id}`
+      if (item.mode === 'fixed') {
+        setFixedTimeCountdownOverride(key, item.time)
+      } else if (item.mode === 'interval') {
+        const payload: ResetIntervalPayload = {
+          categoryName: cat.name,
+          content: item.content || '提醒',
+          intervalHours: item.intervalHours,
+          intervalMinutes: item.intervalMinutes,
+          intervalSeconds: item.intervalSeconds,
+          repeatCount: item.repeatCount ?? null,
+          splitCount: item.splitCount,
+          restDurationSeconds: item.restDurationSeconds,
+          restContent: item.restContent,
+        }
+        resetReminderProgress(key, payload)
+      }
+    }
+  }
 }
 
 export function getReminderCountdowns(): CountdownItem[] {
@@ -380,10 +507,18 @@ export function getReminderCountdowns(): CountdownItem[] {
         const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
         const nextAt = getNextFixedTime(timeStr)
         const remainingMs = Math.max(0, nextAt - now)
-        const base: CountdownItem = { key, type: 'fixed', nextAt, remainingMs, time: timeStr }
-        // 固定时间拆分暂不在此实现 phase，仅先返回剩余时间；后续可加固定时间 phase 逻辑
+        const hasOverride = fixedTimeCountdownOverride.has(key)
+        const cycleStartAt = hasOverride ? (fixedTimeCycleStartAt.get(key) ?? now) : undefined
+        const base: CountdownItem = {
+          key,
+          type: 'fixed',
+          nextAt,
+          remainingMs,
+          time: timeStr,
+          ...(cycleStartAt !== undefined ? { cycleStartAt } : {}),
+        }
         result.push(base)
-      } else {
+      } else if (item.mode === 'interval') {
         const st = intervalState.get(key)
         if (!st) {
           result.push({ key, type: 'interval', nextAt: now, remainingMs: 0, repeatCount: item.repeatCount, firedCount: 0 })
@@ -430,6 +565,7 @@ export function getReminderCountdowns(): CountdownItem[] {
           cycleTotalMs,
         })
       }
+      /* mode === 'stopwatch'：无倒计时、无弹窗 */
     }
   }
   return result

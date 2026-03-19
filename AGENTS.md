@@ -28,9 +28,9 @@
 
 ### 2.1 要做（第一版）
 
-1. **可配置提醒**：用户可新增任意提醒类型（如吃饭、活动、休息、护眼、喝水），每类型下可添加多个子提醒；子提醒支持固定时间（如 12:00）或间隔触发（如每 45 分钟）。
+1. **可配置提醒**：用户可新增**闹钟**、**倒计时**或**秒表**大类。闹钟/倒计时规则不变：`categoryKind` 为 `alarm` | `countdown`，子项分别为 `mode: 'fixed'` 与 `mode: 'interval'`。**秒表**大类 `categoryKind: 'stopwatch'`，子项为 `mode: 'stopwatch'`（无提醒文案、无弹窗、不参与主进程定时器）；运行态与打点列表仅存设置页内存，不落盘。旧配置无 `categoryKind` 时由主进程归一化推断。
 2. **系统托盘**：后台静默运行，托盘图标与基础菜单。
-3. **设置界面**：可增删改提醒类型与子提醒、管理预设、持久化到本地。
+3. **设置界面**：可增删改大类与子提醒、管理预设、持久化到本地。
 
 ### 2.2 不做（第一版）
 
@@ -128,19 +128,29 @@
 ### 4.4 状态与持久化
 
 - **设置**：开发环境（有 `VITE_DEV_SERVER_URL`）写入项目根目录 `workbreak-settings.json`，便于排查；生产环境写入 `app.getPath('userData')/settings.json`。主进程启动时 `app.setName('workbreak')` 保证 userData 路径一致。
-- 提醒计划、定时器均在主进程 `reminders.ts`，以主进程为“单一事实来源”；设置变更后调用 `restartReminders()` 重新排程。
+- **保存设置**：仅将当前配置写入磁盘（`setSettings`），**不**调用 `restartReminders()`、**不**清除闹钟（fixed）override，因此不会重置任何提醒的起始点或进度。
+- **全部重置**：设置页提供「全部重置」按钮，调用主进程 `resetAllReminderProgress()`，将所有**闹钟**子项设为“从当前时刻开始”、所有**倒计时**子项从当前时刻重新排程；使用当前已保存的配置（`getSettings()`）。
+- 提醒计划、定时器均在主进程 `reminders.ts`，以主进程为“单一事实来源”；应用启动时由 `startReminders()` 排程。
 
-### 4.5 单实例与启动
+### 4.5 闹钟（mode: fixed）「重置」与起始时间
+
+- **重置**：用户对某条**闹钟**子项点击「重置」时，主进程 `setFixedTimeCountdownOverride(key, item.time)` 会记录该时刻为周期起点（`fixedTimeCycleStartAt.set(key, Date.now())`），并在后续每次 `getReminderCountdowns()` 中返回该**时间戳**作为 `cycleStartAt`（不可用“当前时间”覆盖，否则起始时间会跟着时钟变）。
+- **起始时间显示**：列表视图进度条左侧「起始时间」= 该周期的真实起点：有 `cycleStartAt` 时用其格式化为 HH:mm，否则用设定时间 `cd.time`（如 20:00）。不要用 `Date.now()` 作为闹钟子项的起始时间标签。
+- **保存后**：保存设置**不**清除 override；仅「全部重置」会按需更新。若需“保存后恢复为按上次设定时间”的语义，再考虑在保存时调用 `clearFixedTimeCountdownOverrides()`（当前未采用）。
+
+### 4.6 单实例与启动
 
 - 使用 `app.requestSingleInstanceLock()` 保证只运行一个实例，避免重复点 bat 或 HMR 重建时多开窗口；二次启动时聚焦已有窗口。
 - 开发启动：项目根目录双击 `启动开发环境.bat` 或终端执行 `npm run dev`。
 
-### 4.6 设置页拖拽与排序
+### 4.7 设置页拖拽与排序
 
 - **统一用 framer-motion Reorder**：大类列表与子项列表均使用 `Reorder.Group` + `Reorder.Item` + `useDragControls`（手柄拖拽），不再使用 HTML5 拖拽 API 做排序。
 - **大类**：主列表为 `Reorder.Group`，每项为 `CategoryCard`（内为 `Reorder.Item`）；`onReorder` 调用 `setCategories`，同时 `setPresetModal(null)`、`setPresetDropdown(null)` 避免重排后索引错位。
-- **子项**：每个大类内容区内为 `Reorder.Group`，每行为 `SubReminderRow`（`Reorder.Item`）；子项拖拽约束用 `dragConstraintsRef` 指向该大类列表容器。
-- **拖拽时始终在最上层**：子项拖拽时会被下方大类盖住（层叠上下文），因此由父级提升整卡 z-index。`CategoryCard` 用状态 `isChildDragging`，在子项 `onDragStart`/`onDragEnd` 时置 true/false，根 `Reorder.Item` 的 `style.zIndex` 在 `isChildDragging` 时为 1000；大类/子项 `whileDrag` 的 `zIndex` 分别为 1000、9999。
+- **子项排序**：大类内容区内使用 **`@dnd-kit/sortable`**（`DndContext` + `SortableContext` + `useSortable`），每行外包一层 `SortableSubReminderItem`，手柄上挂 `listeners`；**不再**用 Framer `Reorder` 排子项。原因：Framer Reorder 在交换 DOM 顺序时，可变高度子项易出现「让位瞬间被拖卡片相对鼠标跳约一行高」的错位；dnd-kit 用 `transform` 跟指针一致。大类列表仍用 Framer `Reorder`。
+- **dnd-kit 可变高度**：`useSortable` 默认的 layout 动画会用 `useDerivedTransform` 注入 **scaleY**（旧/新测量框高度比），拖过另一行时矮卡片会被拉高、高卡片会被压扁；子项侧已设 **`animateLayoutChanges: () => false`**，且样式 **`transform` 只用 `translate3d`**，不写 `scale`，避免内容被拉伸。
+- **子项 UI**：内层仍为 `SubReminderRow` / `StopwatchReminderRow`（秒表状态仍行内 `useState`）。大类分 `categoryKind`（闹钟 / 倒计时 / 秒表），子项不得跨 kind 移动（`moveItemToCategory` 需同 kind）。
+- **拖拽时始终在最上层**：`CategoryCard` 用 `isChildDragging`，在子项 `DndContext` 的 `onDragStart`/`onDragEnd` 与 Framer 大类拖拽一致思路；根大类 `Reorder.Item` 的 `zIndex` 在 `isChildDragging` 时为 10000；子项列表容器 `overflow-visible`，避免裁剪。
 
 ---
 

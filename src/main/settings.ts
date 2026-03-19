@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import type { AppSettings, ReminderCategory, SubReminder } from '../shared/settings'
+import type { AppSettings, CategoryKind, ReminderCategory, SubReminder } from '../shared/settings'
 import { getStableDefaultCategories } from '../shared/settings'
 
 export type { AppSettings, ReminderCategory, SubReminder } from '../shared/settings'
@@ -42,19 +42,51 @@ function migrateFromLegacy(legacy: LegacySettings): ReminderCategory[] {
   const meal = cats[0]
   const activity = cats[1]
   const rest = cats[2]
-  if (legacy.breakfastTime != null) meal.items[0] = { ...meal.items[0], mode: 'fixed', time: legacy.breakfastTime, content: legacy.breakfastContent ?? meal.items[0].content }
-  if (legacy.lunchTime != null) meal.items[1] = { ...meal.items[1], mode: 'fixed', time: legacy.lunchTime, content: legacy.lunchContent ?? meal.items[1].content }
-  if (legacy.dinnerTime != null) meal.items[2] = { ...meal.items[2], mode: 'fixed', time: legacy.dinnerTime, content: legacy.dinnerContent ?? meal.items[2].content }
+  type FixedItem = Extract<SubReminder, { mode: 'fixed' }>
+  type IntervalItem = Extract<SubReminder, { mode: 'interval' }>
+  if (legacy.breakfastTime != null) {
+    const cur = meal.items[0] as FixedItem
+    meal.items[0] = { ...cur, mode: 'fixed', time: legacy.breakfastTime, content: legacy.breakfastContent ?? cur.content }
+  }
+  if (legacy.lunchTime != null) {
+    const cur = meal.items[1] as FixedItem
+    meal.items[1] = { ...cur, mode: 'fixed', time: legacy.lunchTime, content: legacy.lunchContent ?? cur.content }
+  }
+  if (legacy.dinnerTime != null) {
+    const cur = meal.items[2] as FixedItem
+    meal.items[2] = { ...cur, mode: 'fixed', time: legacy.dinnerTime, content: legacy.dinnerContent ?? cur.content }
+  }
   if (Array.isArray(legacy.mealPresets)) meal.presets = legacy.mealPresets
-  if (typeof legacy.activityIntervalMinutes === 'number') activity.items[0] = { ...activity.items[0], mode: 'interval', intervalMinutes: Math.max(1, legacy.activityIntervalMinutes), content: legacy.activityContent ?? activity.items[0].content, repeatCount: null }
+  if (typeof legacy.activityIntervalMinutes === 'number') {
+    const cur = activity.items[0] as IntervalItem
+    activity.items[0] = {
+      ...cur,
+      mode: 'interval',
+      intervalMinutes: Math.max(1, legacy.activityIntervalMinutes),
+      content: legacy.activityContent ?? cur.content,
+      repeatCount: null,
+    }
+  }
   if (Array.isArray(legacy.activityPresets)) activity.presets = legacy.activityPresets
-  if (typeof legacy.workMinutes === 'number') rest.items[0] = { ...rest.items[0], mode: 'interval', intervalMinutes: Math.max(1, legacy.workMinutes), content: legacy.restContent ?? rest.items[0].content, repeatCount: null }
+  if (typeof legacy.workMinutes === 'number') {
+    const cur = rest.items[0] as IntervalItem
+    rest.items[0] = {
+      ...cur,
+      mode: 'interval',
+      intervalMinutes: Math.max(1, legacy.workMinutes),
+      content: legacy.restContent ?? cur.content,
+      repeatCount: null,
+    }
+  }
   if (Array.isArray(legacy.restPresets)) rest.presets = legacy.restPresets
   return cats
 }
 
 function normalizeCategories(cats: unknown): ReminderCategory[] {
-  if (!Array.isArray(cats) || cats.length === 0) return defaultCategories
+  // 缺字段或非数组：按「尚无有效配置」处理，用内置默认（首次安装等）
+  if (!Array.isArray(cats)) return defaultCategories
+  // 明确传空数组：允许用户清空所有类型，不得替换成默认（否则删光后会「秒恢复」模板）
+  if (cats.length === 0) return []
   return cats.map((c) => {
     if (!c || typeof c !== 'object') return defaultCategories[0]
     const o = c as Record<string, unknown>
@@ -62,10 +94,15 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
     const name = typeof o.name === 'string' ? o.name : '未命名'
     const presets = Array.isArray(o.presets) ? o.presets.filter((p): p is string => typeof p === 'string') : []
     const rawItems = Array.isArray(o.items) ? (o.items as unknown[]) : []
-    const items: SubReminder[] = rawItems.map((item) => {
+    const items: SubReminder[] = rawItems
+      .map((item): SubReminder | null => {
       if (!item || typeof item !== 'object') return null
       const i = item as Record<string, unknown>
-      if (typeof i.id !== 'string' || typeof i.content !== 'string') return null
+      if (typeof i.id !== 'string') return null
+      if (i.mode === 'stopwatch') {
+        return { id: i.id, mode: 'stopwatch' as const }
+      }
+      if (typeof i.content !== 'string') return null
       if (i.mode === 'fixed' && typeof (i as { time: unknown }).time === 'string') {
         const fixed = i as { time: string; splitCount?: number; restDurationSeconds?: number; restContent?: string }
         return {
@@ -97,8 +134,34 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
         }
       }
       return null
-    }).filter((x): x is SubReminder => x !== null)
-    return { id, name, presets, items }
+    })
+      .filter((x): x is SubReminder => x !== null)
+
+    let categoryKind: CategoryKind =
+      o.categoryKind === 'countdown'
+        ? 'countdown'
+        : o.categoryKind === 'stopwatch'
+          ? 'stopwatch'
+          : o.categoryKind === 'alarm'
+            ? 'alarm'
+            : 'alarm'
+    if (o.categoryKind !== 'alarm' && o.categoryKind !== 'countdown' && o.categoryKind !== 'stopwatch') {
+      const hasStopwatch = items.some((i) => i.mode === 'stopwatch')
+      const hasInterval = items.some((i) => i.mode === 'interval')
+      const hasFixed = items.some((i) => i.mode === 'fixed')
+      if (hasStopwatch && !hasInterval && !hasFixed) categoryKind = 'stopwatch'
+      else if (hasInterval && !hasFixed) categoryKind = 'countdown'
+      else if (hasFixed && !hasInterval) categoryKind = 'alarm'
+      else if (hasInterval && hasFixed) categoryKind = items[0]?.mode === 'interval' ? 'countdown' : 'alarm'
+    }
+    const filteredItems = items.filter((i) =>
+      categoryKind === 'alarm'
+        ? i.mode === 'fixed'
+        : categoryKind === 'countdown'
+          ? i.mode === 'interval'
+          : i.mode === 'stopwatch'
+    )
+    return { id, name, categoryKind, presets, items: filteredItems }
   })
 }
 

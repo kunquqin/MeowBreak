@@ -1,0 +1,11 @@
+---
+description: WorkBreak 保存设置 vs 全部重置、固定时间起始时间与 cycleStartAt，避免误用“当前时间”或保存时重置
+globs: ["src/main/**", "src/renderer/src/pages/Settings.tsx"]
+---
+
+# 保存设置与全部重置、固定时间起始时间
+
+- **保存设置**：仅持久化配置到磁盘（主进程 `setSettings`）。**不要**在保存时调用 `restartReminders()`（会清空 intervalState、重置所有间隔进度），**不要**在保存时调用 `clearFixedTimeCountdownOverrides()`。用户期望“保存”只写配置，不改变当前进度与起始点。
+- **全部重置**：由「全部重置」按钮触发，调用 `resetAllReminderProgress()`，统一把所有固定时间设为“从当前时刻开始”、所有间隔从当前时刻重新排程。
+- **固定时间起始时间**：列表视图进度条左侧“起始时间”必须表示**周期起点**。有 `cycleStartAt` 时用 `formatTimeHHmm(cd.cycleStartAt)`，否则用设定时间 `cd.time`。**不要**用 `Date.now()` 或“当前时间”作为固定时间的起始时间标签，否则会跟着时钟走、用户会认为错误。
+- **cycleStartAt 只记录一次**：用户点击某条固定时间的「重置」时，主进程在 `setFixedTimeCountdownOverride` 里把**该时刻**写入 `fixedTimeCycleStartAt.set(key, now)`；在 `getReminderCountdowns()` 中返回 `cycleStartAt: fixedTimeCycleStartAt.get(key)`，**不要**用当次调用时的 `Date.now()` 作为 cycleStartAt，否则每次拉取倒计时都会更新“起始时间”。

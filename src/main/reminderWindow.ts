@@ -1,8 +1,5 @@
 import { BrowserWindow, screen } from 'electron'
 
-/** 弹窗占屏幕面积约 1/5：宽高各为屏的 1/sqrt(5) */
-const SIZE_FACTOR = 1 / Math.sqrt(5)
-
 export interface ReminderPopupOptions {
   title: string
   body: string
@@ -18,35 +15,13 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;')
 }
 
-export function showReminderPopup(options: ReminderPopupOptions) {
+function buildReminderHtml(options: ReminderPopupOptions): string {
   const { title, body, timeStr } = options
-  const primary = screen.getPrimaryDisplay()
-  const { width: sw, height: sh } = primary.workAreaSize
-  const w = Math.max(320, Math.floor(sw * SIZE_FACTOR))
-  const h = Math.max(240, Math.floor(sh * SIZE_FACTOR))
-  const x = Math.floor(primary.workArea.x + (sw - w) / 2)
-  const y = Math.floor(primary.workArea.y + (sh - h) / 2)
-
-  const win = new BrowserWindow({
-    width: w,
-    height: h,
-    x,
-    y,
-    frame: true,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-  })
-
   const titleEsc = escapeHtml(title)
   const bodyEsc = escapeHtml(body)
   const timeEsc = escapeHtml(timeStr)
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -54,10 +29,10 @@ export function showReminderPopup(options: ReminderPopupOptions) {
   <title>${titleEsc}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; background: #000; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
-    .line1 { font-size: clamp(18px, 4vw, 28px); text-align: center; line-height: 1.4; margin-bottom: 12px; }
-    .line2 { font-size: clamp(9px, 2vw, 14px); opacity: 0.9; text-align: center; margin-bottom: 24px; }
-    .btn { background: #22c55e; color: #fff; border: none; padding: 12px 32px; border-radius: 9999px; font-size: 16px; cursor: pointer; font-weight: 500; }
+    html, body { width: 100%; height: 100%; background: #000; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: min(5vw, 48px); }
+    .line1 { font-size: clamp(28px, 6vw, 72px); text-align: center; line-height: 1.35; margin-bottom: clamp(16px, 3vw, 40px); font-weight: 600; max-width: 96vw; }
+    .line2 { font-size: clamp(16px, 3vw, 36px); opacity: 0.9; text-align: center; margin-bottom: clamp(32px, 5vw, 64px); }
+    .btn { background: #22c55e; color: #fff; border: none; padding: clamp(14px, 2vw, 24px) clamp(40px, 8vw, 96px); border-radius: 9999px; font-size: clamp(18px, 2.5vw, 32px); cursor: pointer; font-weight: 500; }
     .btn:hover { background: #16a34a; }
   </style>
 </head>
@@ -70,8 +45,76 @@ export function showReminderPopup(options: ReminderPopupOptions) {
   </script>
 </body>
 </html>`
+}
 
-  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+/** 全局唯一提醒弹窗：新提醒覆盖当前内容，不叠多个窗口 */
+let reminderPopupWindow: BrowserWindow | null = null
+
+function applyDisplayBounds(win: BrowserWindow) {
+  const primary = screen.getPrimaryDisplay()
+  const { x, y, width, height } = primary.bounds
+  win.setBounds({ x, y, width, height })
+}
+
+function presentReminderWindow(win: BrowserWindow) {
+  if (win.isDestroyed()) return
+  win.show()
+  win.focus()
   win.setAlwaysOnTop(true, 'screen-saver')
-  win.on('closed', () => { win.destroy() })
+}
+
+/** 到点提醒：铺满当前主显示器（含任务栏区域，与任务栏重叠） */
+export function showReminderPopup(options: ReminderPopupOptions) {
+  const html = buildReminderHtml(options)
+  const url = 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+
+  if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
+    applyDisplayBounds(reminderPopupWindow)
+    void reminderPopupWindow.loadURL(url).then(() => {
+      const w = reminderPopupWindow
+      if (w && !w.isDestroyed()) presentReminderWindow(w)
+    }).catch(() => {
+      /* ignore load errors */
+    })
+    return
+  }
+
+  const primary = screen.getPrimaryDisplay()
+  const { x, y, width, height } = primary.bounds
+
+  reminderPopupWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    fullscreenable: true,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  })
+
+  reminderPopupWindow.on('closed', () => {
+    reminderPopupWindow = null
+  })
+
+  void reminderPopupWindow.loadURL(url).then(() => {
+    const w = reminderPopupWindow
+    if (w && !w.isDestroyed()) presentReminderWindow(w)
+  }).catch(() => {
+    /* ignore load errors */
+  })
+}
+
+/** 若存在提醒弹窗则关闭（例如应用退出前可选调用） */
+export function closeReminderPopupIfAny() {
+  if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
+    reminderPopupWindow.close()
+    reminderPopupWindow = null
+  }
 }

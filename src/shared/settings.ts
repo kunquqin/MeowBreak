@@ -2,7 +2,10 @@
  * 提醒相关类型与默认值，主进程与渲染进程共用。
  */
 
-/** 拆分与中间休息（固定时间、间隔均可选） */
+/** 大类下仅允许一种子项：闹钟 / 倒计时 / 秒表（无提醒弹窗，仅界面计时） */
+export type CategoryKind = 'alarm' | 'countdown' | 'stopwatch'
+
+/** 拆分与中间休息（闹钟、倒计时均可选） */
 export interface SplitRestOptions {
   /** 拆成几份，默认 1 表示不拆分 */
   splitCount?: number
@@ -12,15 +15,18 @@ export interface SplitRestOptions {
   restContent?: string
 }
 
-/** 子提醒：固定时间（HH:mm）或间隔（时/分/秒）。间隔可设重复次数，null=无限。均可选拆分+中间休息。 */
+/** 子提醒：闹钟 / 倒计时 / 秒表（无 content、无提醒） */
 export type SubReminder =
   | ({ id: string; mode: 'fixed'; time: string; content: string } & SplitRestOptions)
   | ({ id: string; mode: 'interval'; intervalHours?: number; intervalMinutes: number; intervalSeconds?: number; content: string; repeatCount: number | null } & SplitRestOptions)
+  | { id: string; mode: 'stopwatch' }
 
-/** 提醒类型（用户可增删），下含多个子提醒 */
+/** 提醒类型（用户可增删），下含多个子提醒；categoryKind 决定仅闹钟或仅倒计时子项 */
 export interface ReminderCategory {
   id: string
   name: string
+  /** 闹钟仅 fixed；倒计时仅 interval；秒表仅 stopwatch */
+  categoryKind: CategoryKind
   presets: string[]
   items: SubReminder[]
 }
@@ -69,6 +75,8 @@ export interface CountdownItem {
   cycleTotalMs?: number
   /** 仅工作段剩余时间（毫秒），不含休息；用于倒计时显示，与用户设置的「倒计时」一致 */
   workRemainingMs?: number
+  /** 本周期起始时间戳；固定时间在「重置」后由主进程设为当前时刻，用于进度条/沙漏从新起点计算 */
+  cycleStartAt?: number
 }
 
 function genId(): string {
@@ -85,6 +93,7 @@ export function getDefaultReminderCategories(): ReminderCategory[] {
     {
       id: genId(),
       name: '吃饭',
+      categoryKind: 'alarm',
       presets: [...defaultMealPresets],
       items: [
         { id: genId(), mode: 'fixed', time: '08:00', content: defaultMealPresets[0] },
@@ -95,6 +104,7 @@ export function getDefaultReminderCategories(): ReminderCategory[] {
     {
       id: genId(),
       name: '活动',
+      categoryKind: 'countdown',
       presets: [...defaultActivityPresets],
       items: [
         { id: genId(), mode: 'interval', intervalMinutes: 45, content: defaultActivityPresets[0], repeatCount: null },
@@ -103,6 +113,7 @@ export function getDefaultReminderCategories(): ReminderCategory[] {
     {
       id: genId(),
       name: '休息',
+      categoryKind: 'countdown',
       presets: [...defaultRestPresets],
       items: [
         { id: genId(), mode: 'interval', intervalMinutes: 25, content: defaultRestPresets[0], repeatCount: null },
@@ -117,6 +128,7 @@ export function getStableDefaultCategories(): ReminderCategory[] {
     {
       id: 'cat_meal',
       name: '吃饭',
+      categoryKind: 'alarm',
       presets: [...defaultMealPresets],
       items: [
         { id: 'meal_breakfast', mode: 'fixed', time: '08:00', content: defaultMealPresets[0] },
@@ -127,6 +139,7 @@ export function getStableDefaultCategories(): ReminderCategory[] {
     {
       id: 'cat_activity',
       name: '活动',
+      categoryKind: 'countdown',
       presets: [...defaultActivityPresets],
       items: [
         { id: 'activity_1', mode: 'interval', intervalMinutes: 45, content: defaultActivityPresets[0], repeatCount: null },
@@ -135,6 +148,7 @@ export function getStableDefaultCategories(): ReminderCategory[] {
     {
       id: 'cat_rest',
       name: '休息',
+      categoryKind: 'countdown',
       presets: [...defaultRestPresets],
       items: [
         { id: 'rest_1', mode: 'interval', intervalMinutes: 25, content: defaultRestPresets[0], repeatCount: null },
