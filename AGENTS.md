@@ -87,10 +87,10 @@
 │           ├── vite-env.d.ts # 类型声明（含 window.electronAPI）
 │           ├── types.ts      # 类型与默认值（可引用 src/shared）
 │           ├── pages/        # 页面级组件（如 Settings.tsx）
-│           ├── components/   # 通用 UI 组件（后续添加）
+│           ├── components/   # 通用 UI（如 AddSubReminderModal、SegmentProgressBars）
 │           ├── stores/       # 状态（后续添加）
 │           ├── hooks/        # 自定义 Hooks（后续添加）
-│           └── utils/        # 工具函数（后续添加）
+│           └── utils/        # 工具（如 durationFormat、stopwatchUtils）
 │
 └── out/                      # 构建产物（git 忽略）
     ├── main/
@@ -145,12 +145,23 @@
 
 ### 4.7 设置页拖拽与排序
 
-- **统一用 framer-motion Reorder**：大类列表与子项列表均使用 `Reorder.Group` + `Reorder.Item` + `useDragControls`（手柄拖拽），不再使用 HTML5 拖拽 API 做排序。
-- **大类**：主列表为 `Reorder.Group`，每项为 `CategoryCard`（内为 `Reorder.Item`）；`onReorder` 调用 `setCategories`，同时 `setPresetModal(null)`、`setPresetDropdown(null)` 避免重排后索引错位。
+- **大类用 Framer Motion Reorder**：主列表为 `Reorder.Group`，每项为 `CategoryCard`（内为 `Reorder.Item` + `useDragControls`）；`onReorder` 调用 `setCategories`，同时 `setPresetModal(null)`、`setPresetDropdown(null)` 避免重排后索引错位。**子项不用 Framer Reorder**（见下条）。
 - **子项排序**：大类内容区内使用 **`@dnd-kit/sortable`**（`DndContext` + `SortableContext` + `useSortable`），每行外包一层 `SortableSubReminderItem`，手柄上挂 `listeners`；**不再**用 Framer `Reorder` 排子项。原因：Framer Reorder 在交换 DOM 顺序时，可变高度子项易出现「让位瞬间被拖卡片相对鼠标跳约一行高」的错位；dnd-kit 用 `transform` 跟指针一致。大类列表仍用 Framer `Reorder`。
 - **dnd-kit 可变高度**：`useSortable` 默认的 layout 动画会用 `useDerivedTransform` 注入 **scaleY**（旧/新测量框高度比），拖过另一行时矮卡片会被拉高、高卡片会被压扁；子项侧已设 **`animateLayoutChanges: () => false`**，且样式 **`transform` 只用 `translate3d`**，不写 `scale`，避免内容被拉伸。
 - **子项 UI**：内层仍为 `SubReminderRow` / `StopwatchReminderRow`（秒表状态仍行内 `useState`）。大类分 `categoryKind`（闹钟 / 倒计时 / 秒表），子项不得跨 kind 移动（`moveItemToCategory` 需同 kind）。
 - **拖拽时始终在最上层**：`CategoryCard` 用 `isChildDragging`，在子项 `DndContext` 的 `onDragStart`/`onDragEnd` 与 Framer 大类拖拽一致思路；根大类 `Reorder.Item` 的 `zIndex` 在 `isChildDragging` 时为 10000；子项列表容器 `overflow-visible`，避免裁剪。
+
+### 4.8 秒表（设置页）
+
+- **状态**：每条秒表子项在 **`StopwatchReminderRow`** 内用 **`useState`** 存 `StopwatchRuntime`，**不要**用全局 `Record<key, …>` 映射多条秒表（易因 id/键冲突或 React 复用导致「复位一条清空多条」）。运行中显示可用 `setInterval` ~50ms，仅在该行 `running` 时启用。
+- **逻辑**：`src/renderer/src/utils/stopwatchUtils.ts`（`emptyStopwatch`、`stopwatchLap`、`stopwatchRemoveLap`、显示格式化等）；删除单条打点后按时间重算计次与分段。
+- **打点列表**：约 10 条可见用 `max-h-80` + 内部滚动；**dnd-kit 拖拽**时对内层滚动区可在 **`isSortableDragging`** 下 **`pointer-events-none`**，避免抢指针。长页可在 `index.css` 等对根滚动设 **`overflow-anchor: none`**，减轻动态增高时的视口跳动。
+
+### 4.9 倒计时进度条上的时段文案（SegmentProgressBars）
+
+- **组件**：`src/renderer/src/components/SegmentProgressBars.tsx`（`SplitSegmentProgressBar`、`SingleCycleProgressBar` 及弹窗内静态预览条）。
+- **截断与气泡**：条上标签使用 `truncate`；若测量为 **`scrollWidth > clientWidth`**（`ResizeObserver`），hover **整条**进度条时在**水平居中、条上方**显示与条同色（**绿**/工作、**蓝**/休息）的**白字气泡**，尖角朝下指向条；**未截断则不显示气泡**。
+- **结构**：气泡父级与带 `overflow-hidden` 的圆角条**分层**（外层 `group`、内层条形容器），避免气泡被裁切；**不要**对 sortable 包裹误用会引入 **scaleY** 的整段 `transform`（参见 4.7 dnd-kit 条）。
 
 ---
 

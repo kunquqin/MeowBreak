@@ -17,9 +17,16 @@ export interface SplitRestOptions {
 
 /** 子提醒：闹钟 / 倒计时 / 秒表（无 content、无提醒） */
 export type SubReminder =
-  | ({ id: string; mode: 'fixed'; time: string; content: string } & SplitRestOptions)
+  | ({
+      id: string
+      mode: 'fixed'
+      time: string
+      content: string
+      /** 与 Date.getDay() 一致：0=周日…6=周六；缺省表示每天均重复（兼容旧配置） */
+      weekdaysEnabled?: boolean[]
+    } & SplitRestOptions)
   | ({ id: string; mode: 'interval'; intervalHours?: number; intervalMinutes: number; intervalSeconds?: number; content: string; repeatCount: number | null } & SplitRestOptions)
-  | { id: string; mode: 'stopwatch' }
+  | { id: string; mode: 'stopwatch'; content?: string }
 
 /** 提醒类型（用户可增删），下含多个子提醒；categoryKind 决定仅闹钟或仅倒计时子项 */
 export interface ReminderCategory {

@@ -100,11 +100,21 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
       const i = item as Record<string, unknown>
       if (typeof i.id !== 'string') return null
       if (i.mode === 'stopwatch') {
-        return { id: i.id, mode: 'stopwatch' as const }
+        return { id: i.id, mode: 'stopwatch' as const, ...(typeof i.content === 'string' && i.content ? { content: i.content } : {}) }
       }
       if (typeof i.content !== 'string') return null
       if (i.mode === 'fixed' && typeof (i as { time: unknown }).time === 'string') {
-        const fixed = i as { time: string; splitCount?: number; restDurationSeconds?: number; restContent?: string }
+        const fixed = i as {
+          time: string
+          splitCount?: number
+          restDurationSeconds?: number
+          restContent?: string
+          weekdaysEnabled?: unknown
+        }
+        let weekdaysEnabled: boolean[] | undefined
+        if (Array.isArray(fixed.weekdaysEnabled) && fixed.weekdaysEnabled.length === 7) {
+          weekdaysEnabled = fixed.weekdaysEnabled.map((x) => Boolean(x))
+        }
         return {
           id: i.id,
           mode: 'fixed' as const,
@@ -113,6 +123,7 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
           splitCount: fixed.splitCount,
           restDurationSeconds: fixed.restDurationSeconds,
           restContent: fixed.restContent,
+          ...(weekdaysEnabled ? { weekdaysEnabled } : {}),
         }
       }
       if (i.mode === 'interval' && typeof (i as { intervalMinutes: unknown }).intervalMinutes === 'number') {

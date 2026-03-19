@@ -40,6 +40,15 @@ const fixedTimeCountdownOverride = new Map<string, string>()
 /** 固定时间重置时的周期起点时间戳（key -> 重置那一刻的 Date.now()），返回给前端用于起始时间与进度，不随每次 getReminderCountdowns 的 now 变化 */
 const fixedTimeCycleStartAt = new Map<string, number>()
 
+/**
+ * fixed 单次触发（weekdaysEnabled 全 false）状态
+ * 语义：允许触发“下一次”一次后自动停止，不再进入下一周期。
+ */
+const fixedSingleShotState = new Map<
+  string,
+  { signature: string; fired: boolean; stoppedAtMs: number | null }
+>()
+
 function showReminder(title: string, body: string) {
   const now = new Date()
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
@@ -56,6 +65,31 @@ function isSameMinute(now: Date, h: number, m: number): boolean {
   return now.getHours() === h && now.getMinutes() === m
 }
 
+/** weekdaysEnabled 与 Date.getDay() 对齐；缺省或非 7 项 = 每天；全 false 不响铃 */
+function shouldFireFixedOnWeekday(weekdaysEnabled: boolean[] | undefined, day: number): boolean {
+  if (!weekdaysEnabled || weekdaysEnabled.length !== 7) return true
+  if (!weekdaysEnabled.some(Boolean)) return false
+  return Boolean(weekdaysEnabled[day])
+}
+
+/** 下次在 HH:mm 且（若配置了星期）落在允许星期上的时刻 */
+function getNextFixedOccurrenceMs(timeStr: string, weekdaysEnabled: boolean[] | undefined, nowMs: number): number {
+  const { h, m } = parseTimeHHmm(timeStr)
+  const now = new Date(nowMs)
+  const hasMask = Array.isArray(weekdaysEnabled) && weekdaysEnabled.length === 7
+  const anyOn = hasMask && weekdaysEnabled.some(Boolean)
+  // weekdays 全关由调用方按「单次触发」语义处理；这里作为兜底返回下一次 HH:mm。
+  if (hasMask && !anyOn) return getNextFixedTime(timeStr)
+
+  for (let dayOffset = 0; dayOffset < 370; dayOffset++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, h, m, 0, 0)
+    if (d.getTime() <= nowMs) continue
+    if (!hasMask) return d.getTime()
+    if (weekdaysEnabled![d.getDay()]) return d.getTime()
+  }
+  return getNextFixedTime(timeStr)
+}
+
 /** 到整分时检查所有固定时间子提醒（须与 getReminderCountdowns 一致：优先 fixedTimeCountdownOverride） */
 function runFixedTimeCheck() {
   const s = getSettings()
@@ -65,11 +99,30 @@ function runFixedTimeCheck() {
       if (item.mode !== 'fixed') continue
       const key = `${cat.id}_${item.id}`
       const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
+      const wd = item.weekdaysEnabled
+      const hasMask = Array.isArray(wd) && wd.length === 7
+      const anyOn = hasMask ? wd!.some(Boolean) : false
+      const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
+      const singleShotSignature = `single|${timeStr}|${maskKey}`
       const { h, m } = parseTimeHHmm(timeStr)
-      if (isSameMinute(now, h, m)) {
-        reminderLog('固定时间整分触发', { key, timeStr, cat: cat.name })
+      if (!isSameMinute(now, h, m)) continue
+      if (hasMask && !anyOn) {
+        // 单次触发：触发一次后停止
+        const st = fixedSingleShotState.get(key)
+        if (!st || st.signature !== singleShotSignature) {
+          fixedSingleShotState.set(key, { signature: singleShotSignature, fired: false, stoppedAtMs: null })
+        }
+        const cur = fixedSingleShotState.get(key)!
+        if (cur.fired) continue
+        reminderLog('固定时间（单次）整分触发', { key, timeStr, cat: cat.name })
         showReminder(cat.name, item.content || '提醒')
+        fixedSingleShotState.set(key, { ...cur, fired: true, stoppedAtMs: now.getTime() })
+        continue
       }
+
+      if (!shouldFireFixedOnWeekday(item.weekdaysEnabled, now.getDay())) continue
+      reminderLog('固定时间整分触发', { key, timeStr, cat: cat.name })
+      showReminder(cat.name, item.content || '提醒')
     }
   }
 }
@@ -505,8 +558,35 @@ export function getReminderCountdowns(): CountdownItem[] {
       const key = `${cat.id}_${item.id}`
       if (item.mode === 'fixed') {
         const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
-        const nextAt = getNextFixedTime(timeStr)
-        const remainingMs = Math.max(0, nextAt - now)
+        const wd = item.weekdaysEnabled
+        const hasMask = Array.isArray(wd) && wd.length === 7
+        const anyOn = hasMask ? wd!.some(Boolean) : false
+        const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
+        const singleShotSignature = `single|${timeStr}|${maskKey}`
+
+        const { h, m } = parseTimeHHmm(timeStr)
+        const isTriggerMinute = isSameMinute(new Date(now), h, m)
+
+        let nextAt: number
+        let remainingMs: number
+        const singleShot = hasMask && !anyOn
+        if (singleShot) {
+          const st = fixedSingleShotState.get(key)
+          if (st && st.signature === singleShotSignature && st.fired) {
+            nextAt = st.stoppedAtMs ?? now
+            remainingMs = 0
+          } else {
+            // 未触发前：下一次仍按 HH:mm 的最近触发点计算；命中触发分钟时 nextAt = now
+            nextAt = isTriggerMinute ? now : getNextFixedTime(timeStr)
+            remainingMs = Math.max(0, nextAt - now)
+          }
+        } else {
+          // 周期触发：若正好在触发分钟，则 remaining=0
+          nextAt = isTriggerMinute && shouldFireFixedOnWeekday(item.weekdaysEnabled, new Date(now).getDay())
+            ? now
+            : getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, now)
+          remainingMs = Math.max(0, nextAt - now)
+        }
         const hasOverride = fixedTimeCountdownOverride.has(key)
         const cycleStartAt = hasOverride ? (fixedTimeCycleStartAt.get(key) ?? now) : undefined
         const base: CountdownItem = {

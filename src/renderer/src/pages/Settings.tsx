@@ -10,10 +10,14 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import type { Transform } from '@dnd-kit/utilities'
-import { Reorder, useDragControls } from 'framer-motion'
+// Framer Motion Reorder 已移除——其 layout 投影系统在混合类型列表中
+// 会导致兄弟卡片位置不随内容高度变化而更新（秒表打点后下方卡重叠）。
+// 大类排序现统一使用 @dnd-kit/sortable。
 import type { AppSettings, CategoryKind, ReminderCategory, SubReminder, CountdownItem } from '../types'
 import { getStableDefaultCategories, genId } from '../types'
 import { AddSubReminderModal, type AddSubReminderPayload } from '../components/AddSubReminderModal'
+import { PresetTextField } from '../components/PresetTextField'
+import { WeekdayRepeatControl } from '../components/WeekdayRepeatControl'
 import { SplitSegmentProgressBar, SingleCycleProgressBar } from '../components/SegmentProgressBars'
 import {
   emptyStopwatch,
@@ -176,10 +180,6 @@ type SubReminderRowProps = {
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
   removeItem: (ci: number, ii: number) => void
   getPresets: (ci: number) => string[]
-  applyPresetToItem: (ci: number, ii: number, text: string) => void
-  presetDropdown: { categoryIndex: number; itemIndex: number } | null
-  setPresetDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
-  setPresetModal: (v: { categoryIndex: number; itemIndex: number | null } | null) => void
   hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
   setHoverItemHandle: (v: { ci: number; ii: number; side: 'left' | 'right' } | null) => void
   /** @dnd-kit/sortable：仅手柄上 spread，避免 Framer Reorder 在可变高度下与鼠标错位 */
@@ -199,7 +199,7 @@ type SubReminderRowProps = {
 
 /** 秒表子项：状态仅在各自组件内，避免全局 Map 键冲突导致多表互相清空 */
 function StopwatchReminderRow({
-  item: _item,
+  item,
   categoryIndex,
   itemIndex,
   hoverItemHandle,
@@ -207,6 +207,9 @@ function StopwatchReminderRow({
   sortableListeners,
   isSortableDragging,
   removeItem,
+  updateItem,
+  getPresets,
+  onCategoryPresetsChange,
 }: {
   item: SubReminder & { mode: 'stopwatch' }
   categoryIndex: number
@@ -216,8 +219,28 @@ function StopwatchReminderRow({
   sortableListeners: DraggableSyntheticListeners
   isSortableDragging: boolean
   removeItem: (ci: number, ii: number) => void
+  updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
+  getPresets: (ci: number) => string[]
+  onCategoryPresetsChange: (presets: string[]) => void
 }) {
   const [swState, setSwState] = useState<StopwatchRuntime>(() => emptyStopwatch())
+  const [editingTitle, setEditingTitle] = useState(false)
+  const titleEditRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!editingTitle) return
+    const onDown = (e: MouseEvent) => {
+      if (titleEditRef.current && !titleEditRef.current.contains(e.target as Node)) {
+        setEditingTitle(false)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [editingTitle])
+  useEffect(() => {
+    if (!editingTitle) return
+    const el = titleEditRef.current?.querySelector('input')
+    if (el) el.focus()
+  }, [editingTitle])
   const [, setDisplayTick] = useState(0)
   useEffect(() => {
     if (!swState.running) return
@@ -244,56 +267,85 @@ function StopwatchReminderRow({
           : ''
       }`}
     >
-      <div className="grid w-full min-w-0 grid-cols-[1fr_auto_1fr] items-center gap-x-2 py-4 sm:py-5">
-        <div className="flex min-w-0 justify-end">
-          <div
-            className="flex h-10 w-8 min-w-[2rem] shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
-            style={{ touchAction: 'none' }}
-            {...sortableListeners}
-            onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'left' })}
-            onMouseLeave={() => setHoverItemHandle(null)}
-            title="拖动调整子项顺序"
-          >
-            <span
-              className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'left' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
-              aria-hidden
-            >
-              ⋮⋮
-            </span>
-          </div>
-        </div>
+      {/* 标题行：左拖拽手柄 | 标题输入框 | 删除 | 右拖拽手柄 */}
+      <div className="flex w-full min-w-0 items-center gap-2">
         <div
-          className="flex shrink-0 justify-center px-2 sm:px-3"
-          aria-label={`秒表 ${formatStopwatchDisplay(elapsedMs)}`}
+          className="flex w-6 min-w-[1.5rem] shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
+          style={{ touchAction: 'none' }}
+          {...sortableListeners}
+          onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'left' })}
+          onMouseLeave={() => setHoverItemHandle(null)}
+          title="拖动调整子项顺序"
         >
-          <span className="text-center text-4xl font-bold tabular-nums leading-none tracking-tight text-slate-900 sm:text-5xl md:text-6xl">
-            {formatStopwatchDisplay(elapsedMs)}
+          <span
+            className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'left' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+            aria-hidden
+          >
+            ⋮⋮
           </span>
         </div>
-        <div className="flex w-full min-w-0 items-center justify-end gap-0.5">
-          <button
-            type="button"
-            onClick={() => removeItem(categoryIndex, itemIndex)}
-            className="text-sm text-red-600 hover:text-red-700 whitespace-nowrap"
-          >
-            删除
-          </button>
-          <div
-            className="flex h-10 w-8 min-w-[2rem] flex-shrink-0 cursor-grab touch-none select-none items-center justify-center active:cursor-grabbing"
-            style={{ touchAction: 'none' }}
-            {...sortableListeners}
-            onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'right' })}
-            onMouseLeave={() => setHoverItemHandle(null)}
-            title="拖动调整子项顺序"
-          >
-            <span
-              className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'right' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
-              aria-hidden
+        <div className="relative flex min-w-0 flex-1">
+          {editingTitle ? (
+            <div
+              ref={titleEditRef}
+              className="w-full"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && e.target === titleEditRef.current?.querySelector('input')) {
+                  setEditingTitle(false)
+                }
+              }}
             >
-              ⋮⋮
-            </span>
-          </div>
+              <PresetTextField
+                resetKey={`row-sw-${item.id}`}
+                value={item.content ?? ''}
+                onChange={(v) => updateItem(categoryIndex, itemIndex, { content: v })}
+                presets={getPresets(categoryIndex)}
+                onPresetsChange={onCategoryPresetsChange}
+                mainPlaceholder="请输入秒表标题"
+                inputClassName="text-center"
+              />
+            </div>
+          ) : (
+            <div
+              className="flex h-9 w-full cursor-text items-center justify-center rounded pl-2 pr-9 text-sm hover:bg-slate-100"
+              onClick={() => setEditingTitle(true)}
+              title="点击编辑标题"
+            >
+              {item.content ? (
+                <span className="truncate text-slate-700">{item.content}</span>
+              ) : (
+                <span className="truncate text-slate-300">点击输入标题</span>
+              )}
+            </div>
+          )}
         </div>
+        <button type="button" onClick={() => removeItem(categoryIndex, itemIndex)} className="text-red-600 hover:text-red-700 text-sm shrink-0">
+          删除
+        </button>
+        <div
+          className="min-w-[1.5rem] w-6 flex-shrink-0 flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+          style={{ touchAction: 'none' }}
+          {...sortableListeners}
+          onMouseEnter={() => setHoverItemHandle({ ci: categoryIndex, ii: itemIndex, side: 'right' })}
+          onMouseLeave={() => setHoverItemHandle(null)}
+          title="拖动调整子项顺序"
+        >
+          <span
+            className={`select-none touch-none transition-opacity ${hoverItemHandle?.ci === categoryIndex && hoverItemHandle?.ii === itemIndex && hoverItemHandle?.side === 'right' ? 'opacity-100 text-slate-500' : 'opacity-0 text-slate-400'}`}
+            aria-hidden
+          >
+            ⋮⋮
+          </span>
+        </div>
+      </div>
+      {/* 时间显示 */}
+      <div
+        className="flex w-full justify-center py-4 sm:py-5"
+        aria-label={`秒表 ${formatStopwatchDisplay(elapsedMs)}`}
+      >
+        <span className="text-center text-4xl font-bold tabular-nums leading-none tracking-tight text-slate-900 sm:text-5xl md:text-6xl">
+          {formatStopwatchDisplay(elapsedMs)}
+        </span>
       </div>
       <div className="flex w-full flex-wrap items-center justify-center gap-3 pt-2 sm:pt-3">
         <button
@@ -442,7 +494,7 @@ function RepeatControl({
   return (
     <div ref={wrapRef} className="relative flex shrink-0 group">
       {/* 总宽固定：左图标 + 中间定宽数字区 + 右三角，避免换数字时宽度跳动 */}
-      <div className="flex h-8 w-[5.25rem] shrink-0 items-stretch rounded border border-slate-300 bg-white">
+      <div className="flex h-9 w-[5.25rem] shrink-0 items-stretch rounded border border-slate-300 bg-white">
         <span className="flex w-6 shrink-0 items-center justify-center text-slate-500 pointer-events-none" title="重复次数">
           <RepeatArrowsIcon className="scale-90" />
         </span>
@@ -531,10 +583,6 @@ function SubReminderRow({
   updateItem,
   removeItem,
   getPresets,
-  applyPresetToItem,
-  presetDropdown,
-  setPresetDropdown,
-  setPresetModal,
   hoverItemHandle,
   setHoverItemHandle,
   sortableListeners,
@@ -547,24 +595,11 @@ function SubReminderRow({
   onConfirmEmbeddedEdit,
   onCategoryPresetsChange,
 }: SubReminderRowProps) {
-  const presetAreaRef = useRef<HTMLDivElement>(null)
   const countdownKey = `${categoryId}_${item.id}`
   const cd = countdowns.find((c) => c.key === countdownKey)
-  const isPresetOpen = presetDropdown?.categoryIndex === categoryIndex && presetDropdown?.itemIndex === itemIndex
   const isTimeSettingsExpanded =
     expandedEditSub?.categoryId === categoryId && expandedEditSub?.itemId === item.id
   const largeTimeMain = getSubReminderLargeTimeMain(item, cd)
-
-  useEffect(() => {
-    if (!isPresetOpen) return
-    const onMouseDown = (e: MouseEvent) => {
-      if (presetAreaRef.current && !presetAreaRef.current.contains(e.target as Node)) {
-        setPresetDropdown(null)
-      }
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [isPresetOpen, setPresetDropdown])
 
   if (item.mode === 'stopwatch') {
     return (
@@ -577,6 +612,9 @@ function SubReminderRow({
         sortableListeners={sortableListeners}
         isSortableDragging={isSortableDragging}
         removeItem={removeItem}
+        updateItem={updateItem}
+        getPresets={getPresets}
+        onCategoryPresetsChange={onCategoryPresetsChange}
       />
     )
   }
@@ -657,19 +695,6 @@ function SubReminderRow({
               </span>
             </div>
           </div>
-          {item.mode === 'interval' && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-0.5 pb-2">
-              <span className="text-xs text-slate-500 shrink-0">重复次数</span>
-              <RepeatControl
-                categoryIndex={categoryIndex}
-                itemIndex={itemIndex}
-                repeatCount={item.repeatCount}
-                updateItem={updateItem}
-                repeatDropdown={repeatDropdown}
-                setRepeatDropdown={setRepeatDropdown}
-              />
-            </div>
-          )}
           <AddSubReminderModal
             open
             layout="embedded"
@@ -709,15 +734,15 @@ function SubReminderRow({
       <button
         type="button"
         onClick={() => toggleExpandedEditSub(categoryId, item.id)}
-        className={`flex min-w-[5.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-white px-2 py-2 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 ${
-          item.mode === 'fixed' ? 'sm:min-w-[6.25rem]' : 'sm:min-w-[6.75rem]'
+        className={`flex min-w-[6rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-white px-4 py-2 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 ${
+          item.mode === 'fixed' ? 'sm:min-w-[6.75rem]' : 'sm:min-w-[7.25rem]'
         }`}
         title="编辑时间与拆分"
         aria-label={`编辑时间，${largeTimeMain}`}
       >
         <span
           className={`text-center font-bold tabular-nums leading-none tracking-tight text-slate-900 ${
-            item.mode === 'fixed' ? 'text-3xl sm:text-4xl' : 'text-2xl sm:text-3xl'
+            item.mode === 'fixed' ? 'text-4xl sm:text-5xl' : 'text-3xl sm:text-4xl'
           }`}
         >
           {largeTimeMain}
@@ -725,49 +750,23 @@ function SubReminderRow({
       </button>
       </div>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-      <div className="flex min-w-0 flex-nowrap items-center gap-2">
-      {/* 提醒内容（含预设三角） */}
-      <div ref={presetAreaRef} className="relative flex flex-1 min-w-0 items-center group">
-        <input
-          type="text"
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div className="relative flex min-w-0 flex-1">
+        <PresetTextField
+          resetKey={`row-${item.id}`}
           value={item.content}
-          onChange={(e) => updateItem(categoryIndex, itemIndex, { content: e.target.value })}
-          placeholder="提醒内容"
-          className="w-full min-w-0 rounded border border-slate-300 pl-2 pr-8 py-1 text-sm"
+          onChange={(v) => updateItem(categoryIndex, itemIndex, { content: v })}
+          presets={getPresets(categoryIndex)}
+          onPresetsChange={onCategoryPresetsChange}
+          mainPlaceholder="请输入提醒内容"
         />
-        <button
-          type="button"
-          onClick={() => setPresetDropdown(isPresetOpen ? null : { categoryIndex, itemIndex })}
-          className={`absolute right-1.5 flex items-center justify-center rounded p-0.5 text-slate-400 transition-opacity duration-200 ease-out hover:text-slate-600 focus:outline-none ${isPresetOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-          title="选预设"
-          aria-label="选预设"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`transition-transform duration-200 ${isPresetOpen ? 'rotate-180' : ''}`}>
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        </button>
-        {isPresetOpen && (
-          <div className="absolute top-full right-0 mt-1 z-10 bg-white border border-slate-200 rounded-lg shadow-lg py-1 max-h-48 overflow-auto min-w-[180px]">
-            {getPresets(categoryIndex).map((p, i) => (
-              <button
-                key={i}
-                type="button"
-                className="w-full text-left px-3 py-1.5 text-sm hover:bg-slate-100"
-                onClick={() => applyPresetToItem(categoryIndex, itemIndex, p)}
-              >
-                {p || '(空)'}
-              </button>
-            ))}
-            <button
-              type="button"
-              className="w-full text-left px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-100 border-t border-slate-100"
-              onClick={() => { setPresetDropdown(null); setPresetModal({ categoryIndex, itemIndex }) }}
-            >
-              管理预设…
-            </button>
-          </div>
-        )}
       </div>
+      {item.mode === 'fixed' && (
+        <WeekdayRepeatControl
+          weekdaysEnabled={item.weekdaysEnabled}
+          onChange={(next) => updateItem(categoryIndex, itemIndex, { weekdaysEnabled: next })}
+        />
+      )}
       {item.mode === 'interval' && (
         <RepeatControl
           categoryIndex={categoryIndex}
@@ -1001,16 +1000,11 @@ type CategoryCardProps = {
   onOpenInlineAdd: (categoryIndex: number) => void
   onCancelInlineAdd: (categoryId: string) => void
   onConfirmInlineAdd: (categoryId: string, payload: AddSubReminderPayload) => void | Promise<void>
-  /** 大类列表容器，与子项一致用于拖拽范围限制 */
-  categoryDragConstraintsRef: React.RefObject<HTMLDivElement | null>
   listContainerRefsMap: React.MutableRefObject<Record<string, React.RefObject<HTMLDivElement | null>>>
   setCategoryItems: (ci: number, items: SubReminder[]) => void
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
   removeItem: (ci: number, ii: number) => void
   getPresets: (ci: number) => string[]
-  applyPresetToItem: (ci: number, ii: number, text: string) => void
-  presetDropdown: { categoryIndex: number; itemIndex: number } | null
-  setPresetDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
   setRepeatDropdown: (v: { categoryIndex: number; itemIndex: number } | null) => void
   hoverItemHandle: { ci: number; ii: number; side: 'left' | 'right' } | null
@@ -1036,15 +1030,11 @@ function CategoryCard(props: CategoryCardProps) {
     onOpenInlineAdd,
     onCancelInlineAdd,
     onConfirmInlineAdd,
-    categoryDragConstraintsRef,
     listContainerRefsMap,
     setCategoryItems,
     updateItem,
     removeItem,
     getPresets,
-    applyPresetToItem,
-    presetDropdown,
-    setPresetDropdown,
     repeatDropdown,
     setRepeatDropdown,
     hoverItemHandle,
@@ -1058,7 +1048,18 @@ function CategoryCard(props: CategoryCardProps) {
     onConfirmEmbeddedEdit,
     addStopwatchItem,
   } = props
-  const controls = useDragControls()
+  const {
+    attributes: catSortAttrs,
+    listeners: catSortListeners,
+    setNodeRef: catSortRef,
+    transform: catSortTransform,
+    transition: catSortTransition,
+    isDragging: isCatDragging,
+  } = useSortable({
+    id: cat.id,
+    animateLayoutChanges: () => false,
+    transition: { duration: 200, easing: 'cubic-bezier(0.32, 0.72, 0, 1)' },
+  })
   const subItemSensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 8 },
@@ -1070,31 +1071,25 @@ function CategoryCard(props: CategoryCardProps) {
     listRef = { current: null }
     listContainerRefsMap.current[cat.id] = listRef
   }
+  const catStyle: React.CSSProperties = {
+    transform: sortableTranslateOnly(catSortTransform),
+    transition: catSortTransition,
+    position: 'relative',
+    zIndex: isCatDragging || isChildDragging ? 10000 : undefined,
+    boxShadow: isCatDragging ? '0 4px 16px -2px rgba(0,0,0,0.08)' : undefined,
+  }
   return (
-    <Reorder.Item
-      value={cat}
-      as="div"
-      drag="y"
-      dragListener={false}
-      dragControls={controls}
-      dragConstraints={categoryDragConstraintsRef}
-      dragElastic={0}
-      dragMomentum={false}
-      transition={{ type: 'tween', ease: [0.32, 0.72, 0, 1], duration: 0.12 }}
-      dragTransition={{ bounceStiffness: 400, bounceDamping: 40 }}
-      style={{ position: 'relative', zIndex: isChildDragging ? 10000 : undefined }}
-      className="bg-white rounded-lg border border-slate-200 overflow-visible transition-shadow duration-200"
-      whileDrag={{
-        scale: 1.02,
-        boxShadow: '0 4px 16px -2px rgba(0,0,0,0.08)',
-        zIndex: 10000,
-      }}
+    <div
+      ref={catSortRef}
+      style={catStyle}
+      className={`bg-white rounded-lg border border-slate-200 overflow-visible transition-shadow duration-200${isCatDragging ? ' scale-[1.02]' : ''}`}
+      {...catSortAttrs}
     >
       <div className="p-4 border-b border-slate-100 flex items-center gap-2 flex-nowrap">
         <div
           className="min-w-[2rem] w-8 flex-shrink-0 flex items-center justify-center min-h-[28px] cursor-grab active:cursor-grabbing select-none"
           style={{ touchAction: 'none' }}
-          onPointerDown={(e) => controls.start(e)}
+          {...catSortListeners}
           onMouseEnter={() => setHoverCategoryHandle({ ci: realCi, side: 'left' })}
           onMouseLeave={() => setHoverCategoryHandle(null)}
           title="拖动调整大类顺序"
@@ -1126,7 +1121,7 @@ function CategoryCard(props: CategoryCardProps) {
         <div
           className="min-w-[2rem] w-8 flex-shrink-0 flex items-center justify-center min-h-[28px] cursor-grab active:cursor-grabbing select-none"
           style={{ touchAction: 'none' }}
-          onPointerDown={(e) => controls.start(e)}
+          {...catSortListeners}
           onMouseEnter={() => setHoverCategoryHandle({ ci: realCi, side: 'right' })}
           onMouseLeave={() => setHoverCategoryHandle(null)}
           title="拖动调整大类顺序"
@@ -1170,12 +1165,8 @@ function CategoryCard(props: CategoryCardProps) {
                     updateItem={updateItem}
                     removeItem={removeItem}
                     getPresets={getPresets}
-                    applyPresetToItem={applyPresetToItem}
-                    presetDropdown={presetDropdown}
-                    setPresetDropdown={setPresetDropdown}
                     repeatDropdown={repeatDropdown}
                     setRepeatDropdown={setRepeatDropdown}
-                    setPresetModal={setPresetModal}
                     hoverItemHandle={hoverItemHandle}
                     setHoverItemHandle={setHoverItemHandle}
                     refreshCountdowns={refreshCountdowns}
@@ -1226,7 +1217,7 @@ function CategoryCard(props: CategoryCardProps) {
           </div>
         </div>
       </div>
-    </Reorder.Item>
+    </div>
   )
 }
 
@@ -1238,7 +1229,6 @@ export function Settings() {
   const [loading, setLoading] = useState(true)
   const [lastSaveClick, setLastSaveClick] = useState<string>('从未')
   const [presetModal, setPresetModal] = useState<{ categoryIndex: number; itemIndex: number | null } | null>(null)
-  const [presetDropdown, setPresetDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [repeatDropdown, setRepeatDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
   const [editingPresetIndex, setEditingPresetIndex] = useState<number | null>(null)
   const [editingPresetValue, setEditingPresetValue] = useState('')
@@ -1255,6 +1245,7 @@ export function Settings() {
   const [categoryListFilter, setCategoryListFilter] = useState<CategoryListFilter>('all')
   const listContainerRefsMap = useRef<Record<string, React.RefObject<HTMLDivElement | null>>>({})
   const categoryReorderContainerRef = useRef<HTMLDivElement>(null)
+  const categorySensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
   /** 与界面一致，供弹窗确认与防抖落盘读取，避免闭包/磁盘快照错位 */
   const reminderCategoriesRef = useRef(settings.reminderCategories)
   reminderCategoriesRef.current = settings.reminderCategories
@@ -1266,7 +1257,6 @@ export function Settings() {
   const applyCategoryListFilter = (f: CategoryListFilter) => {
     setCategoryListFilter(f)
     const cats = reminderCategoriesRef.current
-    setPresetDropdown(null)
     setRepeatDropdown(null)
     if (presetModal) {
       const c = cats[presetModal.categoryIndex]
@@ -1404,7 +1394,11 @@ export function Settings() {
       /** 秒表与闹钟类似：新建大类后立刻有一条可用子项，无需再点「+ 添加秒表」 */
       items: kind === 'stopwatch' ? [{ id: genId(), mode: 'stopwatch' }] : [],
     }
-    setCategories([...settings.reminderCategories, newCat])
+    setCategories([newCat, ...settings.reminderCategories])
+    setPresetModal((pm) => (pm ? { ...pm, categoryIndex: pm.categoryIndex + 1 } : null))
+    setRepeatDropdown((rd) => (rd ? { ...rd, categoryIndex: rd.categoryIndex + 1 } : null))
+    setHoverItemHandle((h) => (h ? { ...h, ci: h.ci + 1 } : null))
+    setHoverCategoryHandle((h) => (h ? { ...h, ci: h.ci + 1 } : null))
     setExpandedEditSub(null)
     setInlineAddDraft(
       kind === 'stopwatch'
@@ -1431,8 +1425,6 @@ export function Settings() {
     setCategories(settings.reminderCategories.filter((_, i) => i !== categoryIndex))
     if (presetModal?.categoryIndex === categoryIndex) setPresetModal(null)
     if (presetModal && presetModal.categoryIndex > categoryIndex) setPresetModal({ ...presetModal, categoryIndex: presetModal.categoryIndex - 1 })
-    if (presetDropdown?.categoryIndex === categoryIndex) setPresetDropdown(null)
-    if (presetDropdown && presetDropdown.categoryIndex > categoryIndex) setPresetDropdown({ ...presetDropdown, categoryIndex: presetDropdown.categoryIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex) setRepeatDropdown(null)
     if (repeatDropdown && repeatDropdown.categoryIndex > categoryIndex) setRepeatDropdown({ ...repeatDropdown, categoryIndex: repeatDropdown.categoryIndex - 1 })
     if (removedCat && expandedEditSub?.categoryId === removedCat.id) setExpandedEditSub(null)
@@ -1451,12 +1443,6 @@ export function Settings() {
       else if (fromIndex < idx && toIndex >= idx) setPresetModal({ ...presetModal, categoryIndex: idx - 1 })
       else if (fromIndex > idx && toIndex <= idx) setPresetModal({ ...presetModal, categoryIndex: idx + 1 })
     }
-    if (presetDropdown !== null) {
-      const idx = presetDropdown.categoryIndex
-      if (idx === fromIndex) setPresetDropdown({ ...presetDropdown, categoryIndex: toIndex })
-      else if (fromIndex < idx && toIndex >= idx) setPresetDropdown({ ...presetDropdown, categoryIndex: idx - 1 })
-      else if (fromIndex > idx && toIndex <= idx) setPresetDropdown({ ...presetDropdown, categoryIndex: idx + 1 })
-    }
     if (repeatDropdown !== null) {
       const idx = repeatDropdown.categoryIndex
       if (idx === fromIndex) setRepeatDropdown({ ...repeatDropdown, categoryIndex: toIndex })
@@ -1473,11 +1459,6 @@ export function Settings() {
     cat.items.splice(toIndex, 0, removed)
     next[categoryIndex] = cat
     setCategories(next)
-    if (presetDropdown?.categoryIndex === categoryIndex) {
-      if (presetDropdown.itemIndex === fromIndex) setPresetDropdown({ ...presetDropdown, itemIndex: toIndex })
-      else if (fromIndex < presetDropdown.itemIndex && toIndex >= presetDropdown.itemIndex) setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex - 1 })
-      else if (fromIndex > presetDropdown.itemIndex && toIndex <= presetDropdown.itemIndex) setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex + 1 })
-    }
     if (repeatDropdown?.categoryIndex === categoryIndex) {
       if (repeatDropdown.itemIndex === fromIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: toIndex })
       else if (fromIndex < repeatDropdown.itemIndex && toIndex >= repeatDropdown.itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
@@ -1503,15 +1484,6 @@ export function Settings() {
       next[toCi] = { ...toCat, items: toItems }
     }
     setCategories(next)
-    if (presetDropdown) {
-      if (presetDropdown.categoryIndex === fromCi && presetDropdown.itemIndex === fromIi) {
-        setPresetDropdown(toCi === fromCi ? { ...presetDropdown, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
-      } else if (presetDropdown.categoryIndex === fromCi && fromIi < presetDropdown.itemIndex) {
-        setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex - 1 })
-      } else if (presetDropdown.categoryIndex === toCi && insertAt <= presetDropdown.itemIndex) {
-        setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex + 1 })
-      }
-    }
     if (repeatDropdown) {
       if (repeatDropdown.categoryIndex === fromCi && repeatDropdown.itemIndex === fromIi) {
         setRepeatDropdown(toCi === fromCi ? { ...repeatDropdown, itemIndex: insertAt } : { categoryIndex: toCi, itemIndex: insertAt })
@@ -1543,6 +1515,9 @@ export function Settings() {
             mode: 'fixed',
             time: payload.time ?? '12:00',
             content: payload.content || '提醒',
+            ...(Array.isArray(payload.weekdaysEnabled) && payload.weekdaysEnabled.length === 7
+              ? { weekdaysEnabled: payload.weekdaysEnabled.map(Boolean) }
+              : {}),
             splitCount: payload.splitCount,
             restDurationSeconds: payload.restDurationSeconds,
             restContent: payload.restContent,
@@ -1583,8 +1558,6 @@ export function Settings() {
       if (payload.mode === 'fixed') {
         const key = `${cat.id}_${newItem.id}`
         await api.setFixedTimeCountdownOverride?.(key, payload.time ?? '12:00')
-      } else {
-        await api.restartReminders?.()
       }
       const cds = await api.getReminderCountdowns?.()
       if (cds) setCountdowns(cds)
@@ -1619,7 +1592,19 @@ export function Settings() {
 
       let updated: SubReminder
       if (payload.mode === 'fixed') {
-        const base = { id: existing.id, mode: 'fixed' as const, time: payload.time!, content }
+        const nextWd =
+          Array.isArray(payload.weekdaysEnabled) && payload.weekdaysEnabled.length === 7
+            ? payload.weekdaysEnabled.map(Boolean)
+            : existing.mode === 'fixed'
+              ? existing.weekdaysEnabled
+              : undefined
+        const base = {
+          id: existing.id,
+          mode: 'fixed' as const,
+          time: payload.time!,
+          content,
+          ...(nextWd !== undefined ? { weekdaysEnabled: nextWd } : {}),
+        }
         updated =
           splitN <= 1
             ? { ...base, splitCount: 1 }
@@ -1664,8 +1649,6 @@ export function Settings() {
       if (payload.mode === 'fixed') {
         const key = `${diskCat.id}_${existing.id}`
         await api.setFixedTimeCountdownOverride?.(key, payload.time!)
-      } else {
-        await api.restartReminders?.()
       }
       const cds = await api.getReminderCountdowns?.()
       if (cds) setCountdowns(cds)
@@ -1683,8 +1666,6 @@ export function Settings() {
     const cat = { ...next[categoryIndex], items: next[categoryIndex].items.filter((_, i) => i !== itemIndex) }
     next[categoryIndex] = cat
     setCategories(next)
-    if (presetDropdown?.categoryIndex === categoryIndex && presetDropdown.itemIndex === itemIndex) setPresetDropdown(null)
-    if (presetDropdown?.categoryIndex === categoryIndex && presetDropdown.itemIndex > itemIndex) setPresetDropdown({ ...presetDropdown, itemIndex: presetDropdown.itemIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex === itemIndex) setRepeatDropdown(null)
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex > itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
     if (removed && expandedEditSub?.itemId === removed.id) setExpandedEditSub(null)
@@ -1698,7 +1679,6 @@ export function Settings() {
     const next = settings.reminderCategories.slice()
     next[categoryIndex] = { ...next[categoryIndex], items }
     setCategories(next)
-    setPresetDropdown(null)
     setRepeatDropdown(null)
     setExpandedEditSub(null)
   }
@@ -1708,7 +1688,6 @@ export function Settings() {
     const it = settings.reminderCategories[categoryIndex]?.items[itemIndex]
     if (it?.mode === 'stopwatch') return
     updateItem(categoryIndex, itemIndex, { content: text })
-    setPresetDropdown(null)
     if (presetModal) setPresetModal(null)
   }
 
@@ -1827,75 +1806,6 @@ export function Settings() {
           })}
         </div>
 
-        <Reorder.Group
-          ref={categoryReorderContainerRef}
-          axis="y"
-          values={filteredReminderCategories}
-          onReorder={(newOrder) => {
-            const merged =
-              categoryListFilter === 'all'
-                ? newOrder
-                : mergeVisibleCategoryOrder(settings.reminderCategories, newOrder)
-            setCategories(merged)
-            setPresetModal(null)
-            setPresetDropdown(null)
-            setRepeatDropdown(null)
-            setExpandedEditSub(null)
-            setInlineAddDraft(null)
-          }}
-          as="div"
-          className="space-y-6"
-        >
-        {filteredReminderCategories.map((cat) => {
-          const realCi = settings.reminderCategories.findIndex((c) => c.id === cat.id)
-          if (realCi < 0) return null
-          return (
-          <CategoryCard
-            key={cat.id}
-            cat={cat}
-            realCi={realCi}
-            updateCategory={updateCategory}
-            removeCategory={removeCategory}
-            setPresetModal={setPresetModal}
-            inlineAddDraft={inlineAddDraft}
-            onOpenInlineAdd={(ci) => {
-              const c = settings.reminderCategories[ci]
-              if (!c || c.categoryKind === 'stopwatch') return
-              setExpandedEditSub(null)
-              setInlineAddDraft({
-                categoryId: c.id,
-                mode: c.categoryKind === 'alarm' ? 'fixed' : 'interval',
-                draftKey: genId(),
-              })
-            }}
-            onCancelInlineAdd={cancelInlineAddForCategory}
-            onConfirmInlineAdd={(cid, payload) => handleAddSubReminderConfirm(cid, payload)}
-            categoryDragConstraintsRef={categoryReorderContainerRef}
-            listContainerRefsMap={listContainerRefsMap}
-            setCategoryItems={setCategoryItems}
-            updateItem={updateItem}
-            removeItem={removeItem}
-            getPresets={getPresets}
-            applyPresetToItem={applyPresetToItem}
-            presetDropdown={presetDropdown}
-            setPresetDropdown={setPresetDropdown}
-            repeatDropdown={repeatDropdown}
-            setRepeatDropdown={setRepeatDropdown}
-            hoverItemHandle={hoverItemHandle}
-            setHoverItemHandle={setHoverItemHandle}
-            hoverCategoryHandle={hoverCategoryHandle}
-            setHoverCategoryHandle={setHoverCategoryHandle}
-            countdowns={countdowns}
-            refreshCountdowns={() => getApi()?.getReminderCountdowns?.().then(setCountdowns)}
-            expandedEditSub={expandedEditSub}
-            toggleExpandedEditSub={toggleExpandedEditSub}
-            onConfirmEmbeddedEdit={(cid, iid, payload) => handleEditSubReminderConfirm(cid, iid, payload)}
-            addStopwatchItem={addStopwatchItem}
-          />
-          )
-        })}
-        </Reorder.Group>
-
         <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
           {(categoryListFilter === 'all' || categoryListFilter === 'alarm') && (
             <button
@@ -1925,6 +1835,75 @@ export function Settings() {
             </button>
           )}
         </div>
+
+        <DndContext
+          sensors={categorySensors}
+          collisionDetection={closestCenter}
+          onDragEnd={(event: DragEndEvent) => {
+            const { active, over } = event
+            if (!over || active.id === over.id) return
+            const filtered = filteredReminderCategories
+            const oldIdx = filtered.findIndex((c) => c.id === active.id)
+            const newIdx = filtered.findIndex((c) => c.id === over.id)
+            if (oldIdx === -1 || newIdx === -1) return
+            const newOrder = arrayMove(filtered, oldIdx, newIdx)
+            const merged = categoryListFilter === 'all' ? newOrder : mergeVisibleCategoryOrder(settings.reminderCategories, newOrder)
+            setCategories(merged)
+            setPresetModal(null)
+            setRepeatDropdown(null)
+            setExpandedEditSub(null)
+            setInlineAddDraft(null)
+          }}
+        >
+          <SortableContext items={filteredReminderCategories.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+            <div ref={categoryReorderContainerRef} className="space-y-6">
+            {filteredReminderCategories.map((cat) => {
+              const realCi = settings.reminderCategories.findIndex((c) => c.id === cat.id)
+              if (realCi < 0) return null
+              return (
+              <CategoryCard
+                key={cat.id}
+                cat={cat}
+                realCi={realCi}
+                updateCategory={updateCategory}
+                removeCategory={removeCategory}
+                setPresetModal={setPresetModal}
+                inlineAddDraft={inlineAddDraft}
+                onOpenInlineAdd={(ci) => {
+                  const c = settings.reminderCategories[ci]
+                  if (!c || c.categoryKind === 'stopwatch') return
+                  setExpandedEditSub(null)
+                  setInlineAddDraft({
+                    categoryId: c.id,
+                    mode: c.categoryKind === 'alarm' ? 'fixed' : 'interval',
+                    draftKey: genId(),
+                  })
+                }}
+                onCancelInlineAdd={cancelInlineAddForCategory}
+                onConfirmInlineAdd={(cid, payload) => handleAddSubReminderConfirm(cid, payload)}
+                listContainerRefsMap={listContainerRefsMap}
+                setCategoryItems={setCategoryItems}
+                updateItem={updateItem}
+                removeItem={removeItem}
+                getPresets={getPresets}
+                repeatDropdown={repeatDropdown}
+                setRepeatDropdown={setRepeatDropdown}
+                hoverItemHandle={hoverItemHandle}
+                setHoverItemHandle={setHoverItemHandle}
+                hoverCategoryHandle={hoverCategoryHandle}
+                setHoverCategoryHandle={setHoverCategoryHandle}
+                countdowns={countdowns}
+                refreshCountdowns={() => getApi()?.getReminderCountdowns?.().then(setCountdowns)}
+                expandedEditSub={expandedEditSub}
+                toggleExpandedEditSub={toggleExpandedEditSub}
+                onConfirmEmbeddedEdit={(cid, iid, payload) => handleEditSubReminderConfirm(cid, iid, payload)}
+                addStopwatchItem={addStopwatchItem}
+              />
+              )
+            })}
+            </div>
+          </SortableContext>
+        </DndContext>
 
         <div className="space-y-3">
           <p className="text-xs text-slate-500 leading-relaxed">
