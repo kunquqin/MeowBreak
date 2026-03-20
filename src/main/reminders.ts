@@ -53,11 +53,6 @@ const intervalCompletedState = new Map<string, IntervalCompletedState>()
 /** 休息结束倒计时弹窗的 setTimeout 句柄，随休息段生命周期清理 */
 const restEndCountdownTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 
-/** 固定时间倒计时覆盖：key -> HH:mm，用于「重置」后按界面当前时间倒计时，保存后清除 */
-const fixedTimeCountdownOverride = new Map<string, string>()
-/** 固定时间重置时的周期起点时间戳（key -> 重置那一刻的 Date.now()），返回给前端用于起始时间与进度，不随每次 getReminderCountdowns 的 now 变化 */
-const fixedTimeCycleStartAt = new Map<string, number>()
-
 /**
  * fixed 单次触发（weekdaysEnabled 全 false）状态
  * 语义：允许触发“下一次”一次后自动停止，不再进入下一周期。
@@ -92,63 +87,200 @@ function isSameMinute(now: Date, h: number, m: number): boolean {
   return now.getHours() === h && now.getMinutes() === m
 }
 
-/** weekdaysEnabled 与 Date.getDay() 对齐；缺省或非 7 项 = 每天；全 false 不响铃 */
-function shouldFireFixedOnWeekday(weekdaysEnabled: boolean[] | undefined, day: number): boolean {
-  if (!weekdaysEnabled || weekdaysEnabled.length !== 7) return true
-  if (!weekdaysEnabled.some(Boolean)) return false
-  return Boolean(weekdaysEnabled[day])
+function isValidTimeHHmm(hhmm: string | undefined): hhmm is string {
+  if (!hhmm) return false
+  const m = /^(\d{1,2}):(\d{1,2})$/.exec(hhmm.trim())
+  if (!m) return false
+  const h = Number(m[1])
+  const mm = Number(m[2])
+  return Number.isFinite(h) && Number.isFinite(mm) && h >= 0 && h <= 23 && mm >= 0 && mm <= 59
 }
 
-/** 下次在 HH:mm 且（若配置了星期）落在允许星期上的时刻 */
-function getNextFixedOccurrenceMs(timeStr: string, weekdaysEnabled: boolean[] | undefined, nowMs: number): number {
-  const { h, m } = parseTimeHHmm(timeStr)
-  const now = new Date(nowMs)
+function getWindowDurationMs(startTime: string, endTime: string): number {
+  const s = parseTimeHHmm(startTime)
+  const e = parseTimeHHmm(endTime)
+  const sMin = s.h * 60 + s.m
+  const eMin = e.h * 60 + e.m
+  if (sMin === eMin) return 0
+  const deltaMin = eMin > sMin ? (eMin - sMin) : (24 * 60 - sMin + eMin)
+  return deltaMin * 60 * 1000
+}
+
+function getStartDayEnabled(weekdaysEnabled: boolean[] | undefined, startDay: number): boolean {
+  if (!Array.isArray(weekdaysEnabled) || weekdaysEnabled.length !== 7) return true
+  return Boolean(weekdaysEnabled[startDay])
+}
+
+function getFixedSingleShotSignature(startTime: string, endTime: string, weekdaysEnabled: boolean[] | undefined): string {
+  const wd = Array.isArray(weekdaysEnabled) && weekdaysEnabled.length === 7
+    ? weekdaysEnabled.map((x) => (x ? '1' : '0')).join('')
+    : 'no-mask'
+  return `single|${startTime}|${endTime}|${wd}`
+}
+
+type FixedWindowState = 'pending' | 'running' | 'ended'
+type FixedWindowContext = {
+  state: FixedWindowState
+  windowStartAt: number
+  windowEndAt: number
+  nextAt: number
+  remainingMs: number
+  singleShot: boolean
+}
+
+function toDayStart(ms: number): Date {
+  const d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0)
+}
+
+function getWindowStartAtByOffset(dayStartMs: number, dayOffset: number, startTime: string): number {
+  const { h, m } = parseTimeHHmm(startTime)
+  const d = new Date(dayStartMs)
+  d.setDate(d.getDate() + dayOffset)
+  d.setHours(h, m, 0, 0)
+  return d.getTime()
+}
+
+function getFixedWindowContext(
+  key: string,
+  startTime: string,
+  endTime: string,
+  weekdaysEnabled: boolean[] | undefined,
+  nowMs: number,
+): FixedWindowContext {
+  const durationMs = Math.max(1, getWindowDurationMs(startTime, endTime))
   const hasMask = Array.isArray(weekdaysEnabled) && weekdaysEnabled.length === 7
-  const anyOn = hasMask && weekdaysEnabled.some(Boolean)
-  // weekdays 全关由调用方按「单次触发」语义处理；这里作为兜底返回下一次 HH:mm。
-  if (hasMask && !anyOn) return getNextFixedTime(timeStr)
+  const anyOn = hasMask ? weekdaysEnabled.some(Boolean) : true
+  const singleShot = hasMask && !anyOn
+  const dayStart = toDayStart(nowMs).getTime()
+  const signature = getFixedSingleShotSignature(startTime, endTime, weekdaysEnabled)
+
+  if (singleShot) {
+    const st = fixedSingleShotState.get(key)
+    if (st && st.signature === signature && st.fired) {
+      const stopped = st.stoppedAtMs ?? nowMs
+      return {
+        state: 'ended',
+        windowStartAt: stopped,
+        windowEndAt: stopped,
+        nextAt: stopped,
+        remainingMs: 0,
+        singleShot: true,
+      }
+    }
+    const startToday = getWindowStartAtByOffset(dayStart, 0, startTime)
+    const startYesterday = getWindowStartAtByOffset(dayStart, -1, startTime)
+    const endToday = startToday + durationMs
+    const endYesterday = startYesterday + durationMs
+    if (nowMs >= startToday && nowMs < endToday) {
+      return {
+        state: 'running',
+        windowStartAt: startToday,
+        windowEndAt: endToday,
+        nextAt: endToday,
+        remainingMs: Math.max(0, endToday - nowMs),
+        singleShot: true,
+      }
+    }
+    if (nowMs >= startYesterday && nowMs < endYesterday) {
+      return {
+        state: 'running',
+        windowStartAt: startYesterday,
+        windowEndAt: endYesterday,
+        nextAt: endYesterday,
+        remainingMs: Math.max(0, endYesterday - nowMs),
+        singleShot: true,
+      }
+    }
+    let nextStart = startToday
+    if (nowMs >= endToday) nextStart = getWindowStartAtByOffset(dayStart, 1, startTime)
+    const nextEnd = nextStart + durationMs
+    return {
+      state: 'pending',
+      windowStartAt: nextStart,
+      windowEndAt: nextEnd,
+      nextAt: nextEnd,
+      remainingMs: Math.max(0, nextEnd - nowMs),
+      singleShot: true,
+    }
+  }
+
+  const runningCandidates = [-1, 0]
+    .map((offset) => {
+      const startAt = getWindowStartAtByOffset(dayStart, offset, startTime)
+      const day = new Date(startAt).getDay()
+      if (!getStartDayEnabled(weekdaysEnabled, day)) return null
+      const endAt = startAt + durationMs
+      if (nowMs >= startAt && nowMs < endAt) return { startAt, endAt }
+      return null
+    })
+    .filter((x): x is { startAt: number; endAt: number } => x !== null)
+    .sort((a, b) => b.startAt - a.startAt)
+  if (runningCandidates.length > 0) {
+    const cur = runningCandidates[0]
+    return {
+      state: 'running',
+      windowStartAt: cur.startAt,
+      windowEndAt: cur.endAt,
+      nextAt: cur.endAt,
+      remainingMs: Math.max(0, cur.endAt - nowMs),
+      singleShot: false,
+    }
+  }
 
   for (let dayOffset = 0; dayOffset < 370; dayOffset++) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, h, m, 0, 0)
-    if (d.getTime() <= nowMs) continue
-    if (!hasMask) return d.getTime()
-    if (weekdaysEnabled![d.getDay()]) return d.getTime()
+    const startAt = getWindowStartAtByOffset(dayStart, dayOffset, startTime)
+    if (startAt <= nowMs) continue
+    const day = new Date(startAt).getDay()
+    if (!getStartDayEnabled(weekdaysEnabled, day)) continue
+    const endAt = startAt + durationMs
+    return {
+      state: 'pending',
+      windowStartAt: startAt,
+      windowEndAt: endAt,
+      nextAt: endAt,
+      remainingMs: Math.max(0, endAt - nowMs),
+      singleShot: false,
+    }
   }
-  return getNextFixedTime(timeStr)
+
+  const fallbackStart = getWindowStartAtByOffset(dayStart, 1, startTime)
+  const fallbackEnd = fallbackStart + durationMs
+  return {
+    state: 'pending',
+    windowStartAt: fallbackStart,
+    windowEndAt: fallbackEnd,
+    nextAt: fallbackEnd,
+    remainingMs: Math.max(0, fallbackEnd - nowMs),
+    singleShot: false,
+  }
 }
 
-/** 到整分时检查所有固定时间子提醒（须与 getReminderCountdowns 一致：优先 fixedTimeCountdownOverride） */
+/** 到整分时检查所有固定时间子提醒（支持起始/结束时间窗口与跨天） */
 function runFixedTimeCheck() {
   const s = getSettings()
   const now = new Date()
   const nowMs = now.getTime()
-  const DAY_MS = 24 * 3600 * 1000
   for (const cat of s.reminderCategories) {
     for (const item of cat.items) {
       if (item.mode !== 'fixed') continue
       if (item.enabled === false) continue
       const key = `${cat.id}_${item.id}`
-      const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
-      const wd = item.weekdaysEnabled
-      const hasMask = Array.isArray(wd) && wd.length === 7
-      const anyOn = hasMask ? wd!.some(Boolean) : false
-      const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
-      const singleShotSignature = `single|${timeStr}|${maskKey}`
-      const { h, m } = parseTimeHHmm(timeStr)
+      const endTime = isValidTimeHHmm(item.time) ? item.time : '00:00'
+      const startTime = isValidTimeHHmm(item.startTime) ? item.startTime : endTime
+      const durationMs = getWindowDurationMs(startTime, endTime)
+      if (durationMs <= 0) continue
+      const context = getFixedWindowContext(key, startTime, endTime, item.weekdaysEnabled, nowMs)
 
       // fixed 拆分休息段弹窗：到达每段工作结束点时触发一次休息提示
       const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
       const restDurationMs = Math.max(0, item.restDurationSeconds ?? 0) * 1000
-      if (splitCount > 1 && restDurationMs > 0) {
-        const overrideStartAt = fixedTimeCycleStartAt.get(key)
-        const nextAtForCycle = hasMask && !anyOn
-          ? getNextFixedTime(timeStr)
-          : getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, nowMs)
-        const cycleStartAt = overrideStartAt ?? (nextAtForCycle - DAY_MS)
-        const cycleSpanMs = Math.max(1, nextAtForCycle - cycleStartAt)
+      if (context.state !== 'ended' && splitCount > 1 && restDurationMs > 0) {
+        const cycleStartAt = context.windowStartAt
+        const cycleSpanMs = Math.max(1, context.windowEndAt - context.windowStartAt)
         const plan = buildSplitSchedule(cycleSpanMs, splitCount, restDurationMs)
         if (plan.workDurationsMs.length <= 1) continue
-        const cycleSignature = `fixed-rest|${timeStr}|${splitCount}|${restDurationMs}|${cycleStartAt}`
+        const cycleSignature = `fixed-rest|${startTime}|${endTime}|${splitCount}|${restDurationMs}|${cycleStartAt}`
         const prev = fixedRestBreakState.get(key)
         if (!prev || prev.signature !== cycleSignature) {
           clearFixedRestTimersByKey(key)
@@ -227,23 +359,18 @@ function runFixedTimeCheck() {
         clearFixedRestTimersByKey(key)
       }
 
-      if (!isSameMinute(now, h, m)) continue
-      if (hasMask && !anyOn) {
-        // 单次触发：触发一次后停止
+      const endDate = new Date(context.windowEndAt)
+      if (!isSameMinute(now, endDate.getHours(), endDate.getMinutes())) continue
+      if (context.state !== 'running') continue
+      if (context.singleShot) {
+        const signature = getFixedSingleShotSignature(startTime, endTime, item.weekdaysEnabled)
         const st = fixedSingleShotState.get(key)
-        if (!st || st.signature !== singleShotSignature) {
-          fixedSingleShotState.set(key, { signature: singleShotSignature, fired: false, stoppedAtMs: null })
-        }
-        const cur = fixedSingleShotState.get(key)!
-        if (cur.fired) continue
-        reminderLog('固定时间（单次）整分触发', { key, timeStr, cat: cat.name })
-        showReminder(cat.name, item.content || '提醒')
-        fixedSingleShotState.set(key, { ...cur, fired: true, stoppedAtMs: now.getTime() })
-        continue
+        if (st?.signature === signature && st.fired) continue
+        fixedSingleShotState.set(key, { signature, fired: true, stoppedAtMs: nowMs })
+        reminderLog('固定时间（单次）整分触发', { key, startTime, endTime, cat: cat.name })
+      } else {
+        reminderLog('固定时间整分触发', { key, startTime, endTime, cat: cat.name })
       }
-
-      if (!shouldFireFixedOnWeekday(item.weekdaysEnabled, now.getDay())) continue
-      reminderLog('固定时间整分触发', { key, timeStr, cat: cat.name })
       showReminder(cat.name, item.content || '提醒')
     }
   }
@@ -715,15 +842,6 @@ export function resetReminderProgress(key: string, payload?: ResetIntervalPayloa
   intervalTimerKeys.push(key)
 }
 
-/** 固定时间：计算下次触发的时刻（今天或明天 HH:mm） */
-function getNextFixedTime(timeStr: string): number {
-  const { h, m } = parseTimeHHmm(timeStr)
-  const now = new Date()
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0)
-  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1)
-  return next.getTime()
-}
-
 import type { CountdownItem } from '../shared/settings'
 
 export type { CountdownItem }
@@ -751,25 +869,22 @@ function clearFixedRestTimersByKey(key: string): void {
   clearFixedRestEndCountdownTimeoutsByKey(key)
 }
 
-/** 固定时间「重置」：按界面当前设定时间从当前时刻倒计时；time 为 HH:mm，并记录周期起点供起始时间显示 */
-export function setFixedTimeCountdownOverride(key: string, time: string): void {
-  const now = Date.now()
-  fixedTimeCountdownOverride.set(key, time)
-  fixedTimeCycleStartAt.set(key, now)
-  // 关键：单次 fixed（weekdays 全 false）在触发后会被标记 fired=true。
-  // 点击“启动/重置”应开启新一轮，必须清理该状态，否则 getReminderCountdowns 会持续返回 ended=true。
+/** 固定时间「启动/重置」：重置单次结束态，并按当前配置重新建立窗口调度。 */
+export function setFixedTimeCountdownOverride(key: string, _time: string): void {
   fixedSingleShotState.delete(key)
-  // 重启新周期时，清理旧周期的休息段去重与倒计时句柄，避免沿用旧状态导致分段显示/弹窗异常。
   fixedRestBreakState.delete(key)
   clearFixedRestTimersByKey(key)
-  // 立即补调度 fixed 拆分休息段弹窗，不等待下一次整分检查。
   runFixedTimeCheck()
 }
 
-/** 保存设置后清除固定时间倒计时覆盖（仅在被调用时执行，保存设置不再自动调用） */
+/** 保持兼容：当前固定时间不再使用覆盖倒计时，仅清理运行态缓存。 */
 export function clearFixedTimeCountdownOverrides(): void {
-  fixedTimeCountdownOverride.clear()
-  fixedTimeCycleStartAt.clear()
+  fixedSingleShotState.clear()
+  fixedRestBreakState.clear()
+  for (const t of fixedRestBreakTimeouts.values()) clearTimeout(t)
+  fixedRestBreakTimeouts.clear()
+  for (const t of fixedRestEndCountdownTimeouts.values()) clearTimeout(t)
+  fixedRestEndCountdownTimeouts.clear()
 }
 
 /** 全部重置：将所有固定时间的周期起点与所有间隔的进度更新为「从当前时刻开始」，使用当前 getSettings 的配置 */
@@ -807,46 +922,52 @@ export function getReminderCountdowns(): CountdownItem[] {
     for (const item of cat.items) {
       const key = `${cat.id}_${item.id}`
       if (item.mode === 'fixed') {
+        const endTime = isValidTimeHHmm(item.time) ? item.time : '00:00'
+        const startTime = isValidTimeHHmm(item.startTime) ? item.startTime : endTime
+        const durationMs = getWindowDurationMs(startTime, endTime)
         if (item.enabled === false) {
-          result.push({ key, type: 'fixed', nextAt: now, remainingMs: 0, ended: true, time: item.time })
+          result.push({
+            key,
+            type: 'fixed',
+            nextAt: now,
+            remainingMs: 0,
+            ended: true,
+            fixedState: 'ended',
+            time: endTime,
+            startTime,
+            windowStartAt: now,
+            windowEndAt: now,
+          })
           continue
         }
-        const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
-        const wd = item.weekdaysEnabled
-        const hasMask = Array.isArray(wd) && wd.length === 7
-        const anyOn = hasMask ? wd!.some(Boolean) : false
-        const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
-        const singleShotSignature = `single|${timeStr}|${maskKey}`
-
-        let nextAt: number
-        let remainingMs: number
-        const singleShot = hasMask && !anyOn
-        if (singleShot) {
-          const st = fixedSingleShotState.get(key)
-          if (st && st.signature === singleShotSignature && st.fired) {
-            nextAt = st.stoppedAtMs ?? now
-            remainingMs = 0
-          } else {
-            // 未触发前：始终按“下一次 HH:mm”计算，避免在同一分钟内重启时 remaining 被误判为 0。
-            // 例如 18:24:10 点击“启动”，应直接进入到“明天 18:24”的新周期，而不是卡到 18:25:00。
-            nextAt = getNextFixedTime(timeStr)
-            remainingMs = Math.max(0, nextAt - now)
-          }
-        } else {
-          // 周期触发：始终按下一次合法触发点计算，避免同一分钟内出现“假结束”显示。
-          nextAt = getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, now)
-          remainingMs = Math.max(0, nextAt - now)
+        if (durationMs <= 0) {
+          result.push({
+            key,
+            type: 'fixed',
+            nextAt: now,
+            remainingMs: 0,
+            ended: true,
+            fixedState: 'ended',
+            time: endTime,
+            startTime,
+            windowStartAt: now,
+            windowEndAt: now,
+          })
+          continue
         }
-        const hasOverride = fixedTimeCountdownOverride.has(key)
-        const cycleStartAt = hasOverride ? (fixedTimeCycleStartAt.get(key) ?? now) : undefined
+        const context = getFixedWindowContext(key, startTime, endTime, item.weekdaysEnabled, now)
         const base: CountdownItem = {
           key,
           type: 'fixed',
-          nextAt,
-          remainingMs,
-          ended: singleShot && remainingMs <= 0,
-          time: timeStr,
-          ...(cycleStartAt !== undefined ? { cycleStartAt } : {}),
+          nextAt: context.nextAt,
+          remainingMs: context.remainingMs,
+          ended: context.state === 'ended',
+          fixedState: context.state,
+          time: endTime,
+          startTime,
+          windowStartAt: context.windowStartAt,
+          windowEndAt: context.windowEndAt,
+          cycleStartAt: context.windowStartAt,
         }
         result.push(base)
       } else if (item.mode === 'interval') {

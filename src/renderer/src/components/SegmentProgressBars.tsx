@@ -121,12 +121,14 @@ type SingleBarProps = {
   totalDurationMs: number
   /** 与 Settings 一致：剩余比例，绿条宽度 = progressRatio */
   remainingRatio: number
+  fillClass?: string
 }
 
 /** 列表子项：未拆分整段进度条 */
-export function SingleCycleProgressBar({ totalDurationMs, remainingRatio }: SingleBarProps) {
+export function SingleCycleProgressBar({ totalDurationMs, remainingRatio, fillClass = 'bg-green-500' }: SingleBarProps) {
   const pr = Math.max(0, Math.min(1, remainingRatio))
   const label = formatSegmentDurationCompact(totalDurationMs)
+  const variant = fillClassToVariant(fillClass)
   const labelRef = useRef<HTMLSpanElement>(null)
   const truncated = useTextTruncated(labelRef, label)
 
@@ -138,14 +140,14 @@ export function SingleCycleProgressBar({ totalDurationMs, remainingRatio }: Sing
           style={{ width: `${(1 - pr) * 100}%` }}
         />
         <div
-          className="bg-green-500 h-full shrink-0 min-w-0 transition-[width] duration-300 ease-out"
+          className={`${fillClass} h-full shrink-0 min-w-0 transition-[width] duration-300 ease-out`}
           style={{ width: `${pr * 100}%` }}
         />
         <span ref={labelRef} className={labelClass}>
           {label}
         </span>
       </div>
-      <ProgressBarHoverBubble show={truncated} label={label} variant="green" />
+      <ProgressBarHoverBubble show={truncated} label={label} variant={variant} />
     </div>
   )
 }

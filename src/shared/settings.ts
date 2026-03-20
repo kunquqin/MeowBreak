@@ -25,6 +25,9 @@ export type SubReminder =
       title?: string
       /** 开关状态：true=启用，false=关闭 */
       enabled?: boolean
+      /** 起始时间（HH:mm）；缺省时兼容旧配置，按旧单时间语义回退 */
+      startTime?: string
+      /** 结束时间（HH:mm） */
       time: string
       content: string
       /** 与 Date.getDay() 一致：0=周日…6=周六；缺省表示每天均重复（兼容旧配置） */
@@ -81,8 +84,16 @@ export interface CountdownItem {
   type: 'fixed' | 'interval'
   nextAt: number
   remainingMs: number
+  /** 固定时间窗口状态：未开始/运行中/已结束（单次） */
+  fixedState?: 'pending' | 'running' | 'ended'
+  /** 固定时间窗口实例起点时间戳（用于显示与进度计算） */
+  windowStartAt?: number
+  /** 固定时间窗口实例终点时间戳（用于显示与进度计算） */
+  windowEndAt?: number
   /** 当前周期已结束（如 fixed 单次已触发、interval 达到重复次数） */
   ended?: boolean
+  /** 固定时间配置起始 HH:mm（可选） */
+  startTime?: string
   time?: string
   repeatCount?: number | null
   firedCount?: number

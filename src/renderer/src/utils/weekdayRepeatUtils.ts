@@ -16,7 +16,7 @@ export function hasWeekdayMask(raw?: boolean[] | null): raw is boolean[] {
 export function formatWeekdaysSummary(days: boolean[]): string {
   if (days.length !== 7) return '每天'
   if (days.every(Boolean)) return '每天'
-  if (!days.some(Boolean)) return '永不'
+  if (!days.some(Boolean)) return '单次'
   const parts: string[] = []
   for (let i = 0; i < 7; i++) {
     if (days[i]) parts.push(WEEKDAY_LABELS_ZH[i])

@@ -137,6 +137,7 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
       if (typeof i.content !== 'string') return null
       if (i.mode === 'fixed' && typeof (i as { time: unknown }).time === 'string') {
         const fixed = i as {
+          startTime?: string
           time: string
           title?: unknown
           splitCount?: number
@@ -153,6 +154,7 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
           mode: 'fixed' as const,
           ...(typeof fixed.title === 'string' && fixed.title ? { title: fixed.title } : {}),
           ...(typeof i.enabled === 'boolean' ? { enabled: i.enabled } : { enabled: true }),
+          ...(typeof fixed.startTime === 'string' && fixed.startTime ? { startTime: fixed.startTime } : {}),
           time: fixed.time,
           content: i.content as string,
           splitCount: fixed.splitCount,

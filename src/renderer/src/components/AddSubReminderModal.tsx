@@ -8,15 +8,6 @@ import { ALL_WEEKDAYS_ENABLED } from '../utils/weekdayRepeatUtils'
 import { RepeatCountPicker } from './RepeatCountPicker'
 import { buildSplitSchedule } from '../../../shared/splitSchedule'
 
-/** 给定 HH:mm，返回下一次该时刻的时间戳（毫秒） */
-function getNextFixedTimeMs(timeStr: string): number {
-  const { h, m } = parseTimeHHmm(timeStr)
-  const now = new Date()
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0)
-  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1)
-  return next.getTime()
-}
-
 function hmsToSeconds(h: number, m: number, s: number): number {
   return Math.max(0, h * 3600 + m * 60 + s)
 }
@@ -27,22 +18,47 @@ function getLocalHoursMinutes(): { h: number; m: number } {
   return { h: d.getHours(), m: d.getMinutes() }
 }
 
-/** 首次渲染时的时分：编辑用条目时间，新建固定闹钟用本机此刻，其它回退 12:00 */
-function getInitialFixedHM(
+function addOneHour(h: number, m: number): { h: number; m: number } {
+  const total = (h * 60 + m + 60) % (24 * 60)
+  return { h: Math.floor(total / 60), m: total % 60 }
+}
+
+function addMinutes(h: number, m: number, minutes: number): { h: number; m: number } {
+  const total = (((h * 60 + m + minutes) % (24 * 60)) + (24 * 60)) % (24 * 60)
+  return { h: Math.floor(total / 60), m: total % 60 }
+}
+
+/** 首次渲染时的时分范围：编辑用条目起止，新建固定闹钟默认「当前到一小时后」 */
+function getInitialFixedRangeHM(
   variant: 'create' | 'edit',
   mode: 'fixed' | 'interval',
   sourceItem?: SubReminder
-): { h: number; m: number } {
+): { startH: number; startM: number; endH: number; endM: number } {
   if (variant === 'edit' && sourceItem?.mode === 'fixed') {
-    return parseTimeHHmm(sourceItem.time)
+    const end = parseTimeHHmm(sourceItem.time)
+    const start = sourceItem.startTime ? parseTimeHHmm(sourceItem.startTime) : end
+    return { startH: start.h, startM: start.m, endH: end.h, endM: end.m }
   }
-  if (mode === 'fixed') return getLocalHoursMinutes()
-  return { h: 12, m: 0 }
+  if (mode === 'fixed') {
+    const now = getLocalHoursMinutes()
+    const end = addOneHour(now.h, now.m)
+    return { startH: now.h, startM: now.m, endH: end.h, endM: end.m }
+  }
+  return { startH: 12, startM: 0, endH: 12, endM: 0 }
+}
+
+function getFixedWindowDurationMs(startH: number, startM: number, endH: number, endM: number): number {
+  const startMin = startH * 60 + startM
+  const endMin = endH * 60 + endM
+  if (startMin === endMin) return 0
+  const delta = endMin > startMin ? (endMin - startMin) : (24 * 60 - startMin + endMin)
+  return delta * 60 * 1000
 }
 
 export type AddSubReminderPayload = {
   mode: 'fixed' | 'interval'
   title?: string
+  startTime?: string
   time?: string
   /** 闹钟：与 Date.getDay() 一致，长度 7 */
   weekdaysEnabled?: boolean[]
@@ -97,10 +113,14 @@ export function AddSubReminderModal({
   formInstanceKey = '',
 }: AddSubReminderModalProps) {
   const getDefaultTitle = (m: 'fixed' | 'interval') => (m === 'fixed' ? '未命名闹钟' : '未命名倒计时')
-  const [h, setH] = useState(() => getInitialFixedHM(variant, mode, sourceItem).h)
-  const [m, setM] = useState(() => getInitialFixedHM(variant, mode, sourceItem).m)
-  const [hPreview, setHPreview] = useState(() => getInitialFixedHM(variant, mode, sourceItem).h)
-  const [mPreview, setMPreview] = useState(() => getInitialFixedHM(variant, mode, sourceItem).m)
+  const [startH, setStartH] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).startH)
+  const [startM, setStartM] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).startM)
+  const [endH, setEndH] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endH)
+  const [endM, setEndM] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endM)
+  const [startHPreview, setStartHPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).startH)
+  const [startMPreview, setStartMPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).startM)
+  const [endHPreview, setEndHPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endH)
+  const [endMPreview, setEndMPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endM)
 
   const [intervalHours, setIntervalHours] = useState(0)
   const [intervalMinutes, setIntervalMinutes] = useState(30)
@@ -114,6 +134,7 @@ export function AddSubReminderModal({
   const [restS, setRestS] = useState(0)
   const [restContent, setRestContent] = useState('休息一下')
   const [splitErr, setSplitErr] = useState<string | null>(null)
+  const [fixedRangeErr, setFixedRangeErr] = useState<string | null>(null)
   const [weekdaysEnabled, setWeekdaysEnabled] = useState<boolean[]>(() => Array(7).fill(false))
   const [repeatCount, setRepeatCount] = useState<number | null>(1)
 
@@ -133,11 +154,16 @@ export function AddSubReminderModal({
       setRestS(rs)
       setRestContent(sourceItem.restContent ?? '休息一下')
       if (sourceItem.mode === 'fixed') {
-        const { h: fh, m: fm } = parseTimeHHmm(sourceItem.time)
-        setH(fh)
-        setM(fm)
-        setHPreview(fh)
-        setMPreview(fm)
+        const { h: eh, m: em } = parseTimeHHmm(sourceItem.time)
+        const { h: sh, m: sm } = sourceItem.startTime ? parseTimeHHmm(sourceItem.startTime) : { h: eh, m: em }
+        setStartH(sh)
+        setStartM(sm)
+        setEndH(eh)
+        setEndM(em)
+        setStartHPreview(sh)
+        setStartMPreview(sm)
+        setEndHPreview(eh)
+        setEndMPreview(em)
         setWeekdaysEnabled(
           Array.isArray(sourceItem.weekdaysEnabled) && sourceItem.weekdaysEnabled.length === 7
             ? sourceItem.weekdaysEnabled.map(Boolean)
@@ -150,14 +176,20 @@ export function AddSubReminderModal({
         setRepeatCount(sourceItem.repeatCount ?? null)
       }
       setSplitErr(null)
+      setFixedRangeErr(null)
       return
     }
     if (mode === 'fixed') {
-      const { h: nh, m: nm } = getLocalHoursMinutes()
-      setH(nh)
-      setM(nm)
-      setHPreview(nh)
-      setMPreview(nm)
+      const now = getLocalHoursMinutes()
+      const end = addOneHour(now.h, now.m)
+      setStartH(now.h)
+      setStartM(now.m)
+      setEndH(end.h)
+      setEndM(end.m)
+      setStartHPreview(now.h)
+      setStartMPreview(now.m)
+      setEndHPreview(end.h)
+      setEndMPreview(end.m)
     } else {
       setIntervalHours(0)
       setIntervalMinutes(30)
@@ -173,6 +205,7 @@ export function AddSubReminderModal({
     setRestS(0)
     setRestContent('休息一下')
     setSplitErr(null)
+    setFixedRangeErr(null)
   }, [open, mode, variant, sourceItem?.id, formInstanceKey, layout])
 
   useEffect(() => {
@@ -187,13 +220,24 @@ export function AddSubReminderModal({
 
   const splitN = Math.max(1, Math.min(10, splitCount))
   const intervalTotalMs = (intervalHours * 3600 + intervalMinutes * 60 + intervalSeconds) * 1000
+  const fixedWindowMs = getFixedWindowDurationMs(startHPreview, startMPreview, endHPreview, endMPreview)
   const totalSpanMs =
     mode === 'fixed'
-      ? Math.max(0, getNextFixedTimeMs(formatHHmm(hPreview, mPreview)) - Date.now())
+      ? fixedWindowMs
       : intervalTotalMs
   const restSec = hmsToSeconds(restH, restM, restS)
   const restMs = splitN > 1 ? restSec * 1000 : 0
   const splitPlan = buildSplitSchedule(totalSpanMs, splitN, restMs)
+
+  useEffect(() => {
+    if (!open) return
+    if (mode !== 'fixed') {
+      setFixedRangeErr(null)
+      return
+    }
+    const sameMinute = startHPreview === endHPreview && startMPreview === endMPreview
+    setFixedRangeErr(sameMinute ? '起始时间与结束时间不能相同。' : null)
+  }, [open, mode, startHPreview, startMPreview, endHPreview, endMPreview])
 
   useEffect(() => {
     if (!open) return
@@ -235,10 +279,39 @@ export function AddSubReminderModal({
     applyRest(rh, rm, rs)
   }
 
+  const resetStartToNow = () => {
+    const now = getLocalHoursMinutes()
+    let nextEnd = { h: endHPreview, m: endMPreview }
+    if (now.h === nextEnd.h && now.m === nextEnd.m) {
+      nextEnd = addMinutes(now.h, now.m, 1)
+    }
+    setStartH(now.h)
+    setStartM(now.m)
+    setStartHPreview(now.h)
+    setStartMPreview(now.m)
+    setEndH(nextEnd.h)
+    setEndM(nextEnd.m)
+    setEndHPreview(nextEnd.h)
+    setEndMPreview(nextEnd.m)
+  }
+
+  const resetEndToNowPlusOneMinute = () => {
+    const now = getLocalHoursMinutes()
+    let nextEnd = addMinutes(now.h, now.m, 1)
+    if (nextEnd.h === startHPreview && nextEnd.m === startMPreview) {
+      nextEnd = addMinutes(nextEnd.h, nextEnd.m, 1)
+    }
+    setEndH(nextEnd.h)
+    setEndM(nextEnd.m)
+    setEndHPreview(nextEnd.h)
+    setEndMPreview(nextEnd.m)
+  }
+
   const useSplit = splitN > 1 && splitPlan.valid && splitPlan.segments.length > 1
   const segments = useSplit ? splitPlan.segments : []
 
   const handleStart = () => {
+    if (mode === 'fixed' && fixedRangeErr) return
     const totalRestSec = splitN > 1 ? hmsToSeconds(restH, restM, restS) : 0
     const confirmPlan = buildSplitSchedule(totalSpanMs, splitN, totalRestSec * 1000)
     if (!confirmPlan.valid) {
@@ -250,10 +323,13 @@ export function AddSubReminderModal({
       return
     }
     if (mode === 'fixed') {
+      const startTime = formatHHmm(startHPreview, startMPreview)
+      const endTime = formatHHmm(endHPreview, endMPreview)
       onConfirm({
         mode: 'fixed',
         title: title.trim() || getDefaultTitle('fixed'),
-        time: formatHHmm(hPreview, mPreview),
+        startTime,
+        time: endTime,
         weekdaysEnabled: weekdaysEnabled.slice(),
         content: content.trim() || '提醒',
         splitCount: splitN,
@@ -314,22 +390,84 @@ export function AddSubReminderModal({
           <section className="flex w-full flex-col items-center">
             <h4 className={sectionHeadingClass}>{timeSectionTitle}</h4>
             {mode === 'fixed' ? (
-              <div className="inline-grid grid-cols-[auto_min-content_auto] gap-x-2 sm:gap-x-3 items-end justify-items-center">
-                <span className="text-xs text-slate-500 font-medium text-center row-start-1 col-start-1 -translate-y-1">时</span>
-                <span className="row-start-1 col-start-3 text-xs text-slate-500 font-medium text-center -translate-y-1">分</span>
-                <div className="row-start-2 col-start-1 justify-self-center">
-                  <WheelColumn label="" min={0} max={23} value={h} onChange={setH} onLiveChange={setHPreview} />
+              <div className="flex w-full flex-col items-center gap-4">
+                <div className="grid w-full max-w-2xl grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="flex flex-col items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">起始时间</span>
+                    <div className="rounded-lg border border-slate-200 px-3 py-2">
+                      <div className="inline-grid grid-cols-[auto_min-content_auto] items-end justify-items-center gap-x-2 sm:gap-x-3">
+                        <span className="row-start-1 col-start-1 -translate-y-1 text-center text-xs font-medium text-slate-500">时</span>
+                        <span className="row-start-1 col-start-3 -translate-y-1 text-center text-xs font-medium text-slate-500">分</span>
+                        <div className="row-start-2 col-start-1 justify-self-center">
+                          <WheelColumn label="" min={0} max={23} value={startH} onChange={setStartH} onLiveChange={setStartHPreview} />
+                        </div>
+                        <div
+                          className="row-start-2 col-start-2 flex items-center justify-center select-none text-2xl font-semibold text-slate-900"
+                          style={{ height: WHEEL_VIEW_H }}
+                          aria-hidden
+                        >
+                          :
+                        </div>
+                        <div className="row-start-2 col-start-3 justify-self-center">
+                          <WheelColumn label="" min={0} max={59} value={startM} onChange={setStartM} onLiveChange={setStartMPreview} />
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={resetStartToNow}
+                      className="mt-1 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                      title="复位到当前时间"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 .49-9" />
+                      </svg>
+                      复位
+                    </button>
+                  </div>
+                  <div className="flex flex-col items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">结束时间</span>
+                    <div className="rounded-lg border border-slate-200 px-3 py-2">
+                      <div className="inline-grid grid-cols-[auto_min-content_auto] items-end justify-items-center gap-x-2 sm:gap-x-3">
+                        <span className="row-start-1 col-start-1 -translate-y-1 text-center text-xs font-medium text-slate-500">时</span>
+                        <span className="row-start-1 col-start-3 -translate-y-1 text-center text-xs font-medium text-slate-500">分</span>
+                        <div className="row-start-2 col-start-1 justify-self-center">
+                          <WheelColumn label="" min={0} max={23} value={endH} onChange={setEndH} onLiveChange={setEndHPreview} />
+                        </div>
+                        <div
+                          className="row-start-2 col-start-2 flex items-center justify-center select-none text-2xl font-semibold text-slate-900"
+                          style={{ height: WHEEL_VIEW_H }}
+                          aria-hidden
+                        >
+                          :
+                        </div>
+                        <div className="row-start-2 col-start-3 justify-self-center">
+                          <WheelColumn label="" min={0} max={59} value={endM} onChange={setEndM} onLiveChange={setEndMPreview} />
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={resetEndToNowPlusOneMinute}
+                      className="mt-1 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                      title="复位到当前时间后 1 分钟"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 .49-9" />
+                      </svg>
+                      复位
+                    </button>
+                  </div>
                 </div>
-                <div
-                  className="row-start-2 col-start-2 flex items-center justify-center text-2xl font-semibold text-slate-900 select-none"
-                  style={{ height: WHEEL_VIEW_H }}
-                  aria-hidden
-                >
-                  :
-                </div>
-                <div className="row-start-2 col-start-3 justify-self-center">
-                  <WheelColumn label="" min={0} max={59} value={m} onChange={setM} onLiveChange={setMPreview} />
-                </div>
+                {fixedRangeErr ? (
+                  <p className="w-full text-center text-xs text-red-600">{fixedRangeErr}</p>
+                ) : (
+                  <p className="w-full text-center text-xs text-slate-400">
+                    {startHPreview * 60 + startMPreview > endHPreview * 60 + endMPreview ? '该时间范围将跨天（次日结束）。' : '同日时间范围。'}
+                  </p>
+                )}
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2 justify-center w-full">
@@ -363,7 +501,7 @@ export function AddSubReminderModal({
               </div>
             )}
             {mode === 'fixed' ? (
-              <p className="mt-4 w-full text-center text-xs text-slate-400">滚轮、拖拽或点击选择闹钟响铃时间。</p>
+              <p className="mt-4 w-full text-center text-xs text-slate-400">滚轮、拖拽或点击选择闹钟起始与结束时间。</p>
             ) : (
               <p className="mt-4 w-full text-center text-xs text-slate-400">请填写倒计时的时、分、秒（到点再次触发）。</p>
             )}
@@ -372,7 +510,7 @@ export function AddSubReminderModal({
           {/* 3. 提醒内容（含预设） */}
           <section className="w-full">
             <h4 className={sectionHeadingClass}>提醒内容</h4>
-            <div className="flex flex-wrap items-center gap-3 w-full">
+            <div className="flex flex-wrap items-start gap-3 w-full">
               <div className="flex-1 min-w-[12rem]">
                 <PresetTextField
                   key={`content-${presetResetKey}`}
@@ -387,14 +525,18 @@ export function AddSubReminderModal({
               </div>
 
               {mode === 'fixed' && (
-                <WeekdayRepeatControl
-                  weekdaysEnabled={weekdaysEnabled}
-                  onChange={setWeekdaysEnabled}
-                />
+                <div className="shrink-0 self-start">
+                  <WeekdayRepeatControl
+                    weekdaysEnabled={weekdaysEnabled}
+                    onChange={setWeekdaysEnabled}
+                  />
+                </div>
               )}
 
               {mode === 'interval' && (
-                <RepeatCountPicker value={repeatCount} onChange={setRepeatCount} />
+                <div className="shrink-0 self-start">
+                  <RepeatCountPicker value={repeatCount} onChange={setRepeatCount} />
+                </div>
               )}
             </div>
           </section>
@@ -429,7 +571,7 @@ export function AddSubReminderModal({
                   max={10}
                   value={splitCount}
                   onChange={(e) => setSplitCount(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
-                  className="w-14 rounded border border-slate-300 px-1.5 py-1 text-right text-sm"
+                  className="w-16 rounded border border-slate-300 px-2 py-1 text-center text-sm"
                 />
                 <span className="shrink-0 text-sm text-slate-600">份</span>
               </div>
@@ -444,7 +586,7 @@ export function AddSubReminderModal({
                         max={23}
                         value={restH}
                         onChange={(e) => handleRestChange(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)), restM, restS)}
-                        className="w-10 rounded border border-slate-300 px-1 py-1 text-right text-sm"
+                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
                       />
                       <span className="text-sm text-slate-500">时</span>
                       <input
@@ -453,7 +595,7 @@ export function AddSubReminderModal({
                         max={59}
                         value={restM}
                         onChange={(e) => handleRestChange(restH, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)), restS)}
-                        className="w-10 rounded border border-slate-300 px-1 py-1 text-right text-sm"
+                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
                       />
                       <span className="text-sm text-slate-500">分</span>
                       <input
@@ -462,7 +604,7 @@ export function AddSubReminderModal({
                         max={59}
                         value={restS}
                         onChange={(e) => handleRestChange(restH, restM, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
-                        className="w-10 rounded border border-slate-300 px-1 py-1 text-right text-sm"
+                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
                       />
                       <span className="text-sm text-slate-500">秒</span>
                     </div>
@@ -505,7 +647,8 @@ export function AddSubReminderModal({
             </button>
             <button
               type="button"
-              className="rounded-lg bg-slate-800 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 min-w-[88px]"
+              disabled={mode === 'fixed' && !!fixedRangeErr}
+              className="rounded-lg bg-slate-800 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 min-w-[88px] disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleStart}
             >
               {variant === 'edit' ? '更新' : '开始'}

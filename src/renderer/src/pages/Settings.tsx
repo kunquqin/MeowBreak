@@ -97,8 +97,10 @@ function getDefaultSubTitle(mode: 'fixed' | 'interval' | 'stopwatch'): string {
 function getSubReminderLargeTimeMain(item: SubReminder, cd: CountdownItem | undefined): string {
   if (item.mode === 'stopwatch') return '—'
   if (item.mode === 'fixed') {
+    const startLabel = item.startTime ?? item.time
     if (item.enabled === false) return item.time
-    if (!cd) return item.time
+    if (!cd) return startLabel
+    if (cd.fixedState === 'pending') return formatTimeHHmm(cd.windowStartAt ?? cd.nextAt)
     if (cd.ended) return item.time
     return formatTimeHHmm(cd.nextAt)
   }
@@ -906,9 +908,10 @@ function SubReminderRow({
     if (!cd) return 1
     if (isInactive) return 0
     if (cd.type === 'fixed') {
+      if (cd.fixedState === 'pending') return 1
       if (cd.remainingMs <= 0) return 1
-      if (cd.cycleStartAt != null) {
-        const cycleTotalMs = cd.remainingMs + (Date.now() - cd.cycleStartAt)
+      if (cd.windowStartAt != null && cd.windowEndAt != null) {
+        const cycleTotalMs = cd.windowEndAt - cd.windowStartAt
         if (cycleTotalMs <= 0) return 1
         return Math.min(1, cd.remainingMs / cycleTotalMs)
       }
@@ -1072,7 +1075,7 @@ function SubReminderRow({
               ? '当前子项已关闭，请先打开开关'
               : item.mode === 'interval'
                 ? (isEnded ? '按当前配置开始新一轮倒计时' : '重置进度，从当前时刻重新倒计时（使用当前界面上的时间与拆分配置）')
-                : (isEnded ? '按当前闹钟时间开始新一轮' : '按当前闹钟时间从此刻开始倒计时')}
+                : (isEnded ? '按当前闹钟时间范围开始新一轮' : '按当前闹钟时间范围重新计算下一轮')}
           >
             {primaryActionLabel}
           </button>
@@ -1150,9 +1153,11 @@ function SubReminderRow({
           {/* 进度条上一行：左起始、右结束，均为普通文字（不进入编辑） */}
           {(() => {
             const startTimeLabel = cd.type === 'fixed'
-              ? (cd.cycleStartAt != null ? formatTimeHHmm(cd.cycleStartAt) : (cd.time ?? '—'))
+              ? (cd.windowStartAt != null ? formatTimeHHmm(cd.windowStartAt) : (cd.startTime ?? cd.time ?? '—'))
               : (cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? formatTimeHHmm(cd.nextAt - cd.cycleTotalMs) : '—')
-            const endTimeLabel = formatTimeHHmm(cd.nextAt)
+            const endTimeLabel = cd.type === 'fixed'
+              ? (cd.windowEndAt != null ? formatTimeHHmm(cd.windowEndAt) : (cd.time ?? formatTimeHHmm(cd.nextAt)))
+              : formatTimeHHmm(cd.nextAt)
             return (
               <div className="flex w-full items-center justify-between gap-2">
                 <span className="shrink-0 text-sm text-slate-500 tabular-nums">起始 {startTimeLabel}</span>
@@ -1172,10 +1177,8 @@ function SubReminderRow({
                 ? ((item.intervalHours ?? 0) * 3600 + item.intervalMinutes * 60 + (item.intervalSeconds ?? 0)) * 1000
                 : (cd.type === 'fixed'
                     ? (
-                        cd.cycleStartAt != null
-                          ? (isInactive
-                              ? Math.max(1, cd.nextAt - cd.cycleStartAt)
-                              : cd.remainingMs + (now - cd.cycleStartAt))
+                        cd.windowStartAt != null && cd.windowEndAt != null
+                          ? Math.max(1, cd.windowEndAt - cd.windowStartAt)
                           : DAY_MS
                       )
                     : (cd.remainingMs > 0 ? cd.remainingMs : 0))
@@ -1184,9 +1187,10 @@ function SubReminderRow({
               const useSplit = splitN > 1 && splitPlan.valid && splitPlan.segments.length > 1
               const elapsedInCycle = (() => {
                 if (isInactive) return cycleTotalMs
+                if (cd.type === 'fixed' && cd.fixedState === 'pending') return 0
                 if (cd.type === 'fixed' && splitN > 1) {
-                  if (cd.cycleStartAt != null) {
-                    return Math.max(0, Math.min(cycleTotalMs, now - cd.cycleStartAt))
+                  if (cd.windowStartAt != null) {
+                    return Math.max(0, Math.min(cycleTotalMs, now - cd.windowStartAt))
                   }
                   const elapsedInDay = Math.max(0, DAY_MS - cd.remainingMs)
                   return Math.max(0, Math.min(cycleTotalMs, elapsedInDay))
@@ -1209,18 +1213,25 @@ function SubReminderRow({
                   else elapsedInSeg = elapsedInCycle - start
                   const ratio = seg.durationMs > 0 ? elapsedInSeg / seg.durationMs : 0
                   const fillClass = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
+                  const pendingFillClass = cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : fillClass
                   return (
                     <SplitSegmentProgressBar
                       key={i}
                       durationMs={seg.durationMs}
                       elapsedRatio={ratio}
-                      fillClass={fillClass}
+                      fillClass={pendingFillClass}
                       showLabel={!(isFixedSingleEnded && seg.type === 'work')}
                     />
                   )
                 })
               }
-              return <SingleCycleProgressBar totalDurationMs={totalSpanMs} remainingRatio={progressRatio} />
+              return (
+                <SingleCycleProgressBar
+                  totalDurationMs={totalSpanMs}
+                  remainingRatio={progressRatio}
+                  fillClass={cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : 'bg-green-500'}
+                />
+              )
             })()}
           </div>
           {/* 进度条下方：沙漏与倒计时随锚点移动，左右夹紧在进度条宽度内，避免与时间列重叠 */}
@@ -1233,16 +1244,24 @@ function SubReminderRow({
                 />
               )
             }
+            if (cd.type === 'fixed' && cd.fixedState === 'pending') {
+              return (
+                <ClampedProgressFloater
+                  anchorPercent={0}
+                  label="未开始"
+                />
+              )
+            }
             const splitN = item.splitCount ?? 1
             const DAY_MS = 24 * 3600 * 1000
             const now = Date.now()
             const hourglassLeftPercent = cd.type === 'fixed' && splitN > 1 && cd.remainingMs > 0
               ? (() => {
                   const restMs = (item.restDurationSeconds ?? 0) * 1000
-                  if (cd.cycleStartAt != null) {
-                    const totalSpanMs = cd.remainingMs + (now - cd.cycleStartAt)
+                  if (cd.windowStartAt != null && cd.windowEndAt != null) {
+                    const totalSpanMs = Math.max(1, cd.windowEndAt - cd.windowStartAt)
                     const cycleTotalMs = buildSplitSchedule(totalSpanMs, splitN, restMs).cycleTotalMs
-                    const elapsedInCycle = Math.max(0, Math.min(cycleTotalMs, now - cd.cycleStartAt))
+                    const elapsedInCycle = Math.max(0, Math.min(cycleTotalMs, now - cd.windowStartAt))
                     return cycleTotalMs > 0 ? (elapsedInCycle / cycleTotalMs) * 100 : 0
                   }
                   const cycleTotalMs = buildSplitSchedule(DAY_MS, splitN, restMs).cycleTotalMs
@@ -1940,6 +1959,7 @@ export function Settings() {
             mode: 'fixed',
             title: payload.title?.trim() || getDefaultSubTitle('fixed'),
             enabled: true,
+            startTime: payload.startTime ?? payload.time ?? '12:00',
             time: payload.time ?? '12:00',
             content: payload.content || '提醒',
             ...(Array.isArray(payload.weekdaysEnabled) && payload.weekdaysEnabled.length === 7
@@ -2034,6 +2054,7 @@ export function Settings() {
           mode: 'fixed' as const,
           title: titleForFixed,
           ...(existing.mode === 'fixed' ? { enabled: existing.enabled !== false } : { enabled: true }),
+          startTime: payload.startTime ?? payload.time!,
           time: payload.time!,
           content,
           ...(nextWd !== undefined ? { weekdaysEnabled: nextWd } : {}),
