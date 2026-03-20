@@ -78,10 +78,11 @@ type SplitSegmentBarProps = {
   /** 本段内已流逝比例 0~1（左灰右彩） */
   elapsedRatio: number
   fillClass: string
+  showLabel?: boolean
 }
 
 /** 列表子项：多段拆分，带动画比例 */
-export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass }: SplitSegmentBarProps) {
+export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, showLabel = true }: SplitSegmentBarProps) {
   const ratio = Math.max(0, Math.min(1, elapsedRatio))
   const label = formatSegmentDurationCompact(durationMs)
   const variant = fillClassToVariant(fillClass)
@@ -105,11 +106,13 @@ export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass }:
           className={`h-full min-w-0 transition-[width] duration-200 ease-out ${fillClass}`}
           style={{ width: `${(1 - ratio) * 100}%` }}
         />
-        <span ref={labelRef} className={labelClass}>
-          {label}
-        </span>
+        {showLabel && (
+          <span ref={labelRef} className={labelClass}>
+            {label}
+          </span>
+        )}
       </div>
-      <ProgressBarHoverBubble show={truncated} label={label} variant={variant} />
+      <ProgressBarHoverBubble show={showLabel && truncated} label={label} variant={variant} />
     </div>
   )
 }

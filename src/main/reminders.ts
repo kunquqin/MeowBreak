@@ -1,7 +1,8 @@
 import { getSettings } from './settings'
 import type { ReminderCategory, SubReminder } from './settings'
 import type { ResetIntervalPayload } from '../shared/settings'
-import { showReminderPopup } from './reminderWindow'
+import { showReminderPopup, showRestEndCountdownPopup } from './reminderWindow'
+import { buildSplitSchedule } from '../shared/splitSchedule'
 
 const REMINDER_LOG = true
 function reminderLog(...args: unknown[]) {
@@ -11,6 +12,16 @@ function reminderLog(...args: unknown[]) {
 let fixedMinuteTimeout: ReturnType<typeof setTimeout> | null = null
 const intervalTimerKeys: string[] = []
 const intervalTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+interface IntervalCompletedState {
+  completedAt: number
+  repeatCount: number
+  firedCount: number
+  splitCount: number
+  segmentDurationMs: number
+  workDurationsMs: number[]
+  restDurationMs: number
+  cycleTotalMs: number
+}
 interface IntervalState {
   startTime: number
   firedCount: number
@@ -22,8 +33,12 @@ interface IntervalState {
   splitCount: number
   /** 每段工作时长（毫秒） */
   segmentDurationMs: number
+  /** 每段工作时长列表（支持余数分配） */
+  workDurationsMs: number[]
   /** 中间休息时长（毫秒），0 表示无 */
   restDurationMs: number
+  /** 整轮总时长（工作+休息） */
+  cycleTotalMs: number
   /** 休息弹窗文案 */
   restContent: string
   /** 当前阶段 work | rest */
@@ -34,6 +49,9 @@ interface IntervalState {
   phaseStartTime: number
 }
 const intervalState = new Map<string, IntervalState>()
+const intervalCompletedState = new Map<string, IntervalCompletedState>()
+/** 休息结束倒计时弹窗的 setTimeout 句柄，随休息段生命周期清理 */
+const restEndCountdownTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 
 /** 固定时间倒计时覆盖：key -> HH:mm，用于「重置」后按界面当前时间倒计时，保存后清除 */
 const fixedTimeCountdownOverride = new Map<string, string>()
@@ -48,6 +66,15 @@ const fixedSingleShotState = new Map<
   string,
   { signature: string; fired: boolean; stoppedAtMs: number | null }
 >()
+/** fixed 拆分休息弹窗去重：同一周期同一休息段仅触发一次 */
+const fixedRestBreakState = new Map<
+  string,
+  { signature: string; firedBreakIndexes: Set<number>; countdownFiredIndexes: Set<number> }
+>()
+/** fixed 休息开始弹窗的 setTimeout 句柄 */
+const fixedRestBreakTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+/** fixed 休息结束倒计时的 setTimeout 句柄 */
+const fixedRestEndCountdownTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 
 function showReminder(title: string, body: string) {
   const now = new Date()
@@ -94,9 +121,12 @@ function getNextFixedOccurrenceMs(timeStr: string, weekdaysEnabled: boolean[] | 
 function runFixedTimeCheck() {
   const s = getSettings()
   const now = new Date()
+  const nowMs = now.getTime()
+  const DAY_MS = 24 * 3600 * 1000
   for (const cat of s.reminderCategories) {
     for (const item of cat.items) {
       if (item.mode !== 'fixed') continue
+      if (item.enabled === false) continue
       const key = `${cat.id}_${item.id}`
       const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
       const wd = item.weekdaysEnabled
@@ -105,6 +135,98 @@ function runFixedTimeCheck() {
       const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
       const singleShotSignature = `single|${timeStr}|${maskKey}`
       const { h, m } = parseTimeHHmm(timeStr)
+
+      // fixed 拆分休息段弹窗：到达每段工作结束点时触发一次休息提示
+      const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
+      const restDurationMs = Math.max(0, item.restDurationSeconds ?? 0) * 1000
+      if (splitCount > 1 && restDurationMs > 0) {
+        const overrideStartAt = fixedTimeCycleStartAt.get(key)
+        const nextAtForCycle = hasMask && !anyOn
+          ? getNextFixedTime(timeStr)
+          : getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, nowMs)
+        const cycleStartAt = overrideStartAt ?? (nextAtForCycle - DAY_MS)
+        const cycleSpanMs = Math.max(1, nextAtForCycle - cycleStartAt)
+        const plan = buildSplitSchedule(cycleSpanMs, splitCount, restDurationMs)
+        if (plan.workDurationsMs.length <= 1) continue
+        const cycleSignature = `fixed-rest|${timeStr}|${splitCount}|${restDurationMs}|${cycleStartAt}`
+        const prev = fixedRestBreakState.get(key)
+        if (!prev || prev.signature !== cycleSignature) {
+          clearFixedRestTimersByKey(key)
+          fixedRestBreakState.set(key, { signature: cycleSignature, firedBreakIndexes: new Set<number>(), countdownFiredIndexes: new Set<number>() })
+        }
+        const cur = fixedRestBreakState.get(key)!
+        const restSec = Math.round(restDurationMs / 1000)
+        const countdownSec = Math.min(5, restSec)
+        let workAccMs = 0
+        for (let i = 0; i < plan.workDurationsMs.length - 1; i++) {
+          workAccMs += plan.workDurationsMs[i]
+          const restStartMs = workAccMs + i * restDurationMs
+          const restStartAt = cycleStartAt + restStartMs
+          const restEndAt = restStartAt + restDurationMs
+          const timeoutKey = `${key}_${i}`
+
+          const fireRestBreak = () => {
+            const latest = fixedRestBreakState.get(key)
+            if (!latest || latest.signature !== cycleSignature || latest.firedBreakIndexes.has(i)) return
+            reminderLog('固定时间·休息段弹窗', { key, phaseIndex: i })
+            showReminder(cat.name, item.restContent ?? '休息一下')
+            latest.firedBreakIndexes.add(i)
+          }
+          if (!cur.firedBreakIndexes.has(i)) {
+            if (nowMs >= restStartAt && nowMs < restEndAt) {
+              fireRestBreak()
+              const t = fixedRestBreakTimeouts.get(timeoutKey)
+              if (t) {
+                clearTimeout(t)
+                fixedRestBreakTimeouts.delete(timeoutKey)
+              }
+            } else if (nowMs < restStartAt) {
+              if (!fixedRestBreakTimeouts.has(timeoutKey)) {
+                const t = setTimeout(() => {
+                  fireRestBreak()
+                  fixedRestBreakTimeouts.delete(timeoutKey)
+                }, restStartAt - nowMs)
+                fixedRestBreakTimeouts.set(timeoutKey, t)
+              }
+            } else {
+              cur.firedBreakIndexes.add(i)
+            }
+          }
+
+          if (countdownSec >= 1 && !cur.countdownFiredIndexes.has(i)) {
+            const countdownAt = restEndAt - countdownSec * 1000
+            const fireRestCountdown = () => {
+              const latest = fixedRestBreakState.get(key)
+              if (!latest || latest.signature !== cycleSignature || latest.countdownFiredIndexes.has(i)) return
+              reminderLog('固定时间·休息结束倒计时', { key, phaseIndex: i, countdownSec })
+              showRestEndCountdownPopup(countdownSec, cat.name)
+              latest.countdownFiredIndexes.add(i)
+            }
+            if (nowMs >= countdownAt && nowMs < restEndAt) {
+              fireRestCountdown()
+              const t = fixedRestEndCountdownTimeouts.get(timeoutKey)
+              if (t) {
+                clearTimeout(t)
+                fixedRestEndCountdownTimeouts.delete(timeoutKey)
+              }
+            } else if (nowMs < countdownAt) {
+              if (!fixedRestEndCountdownTimeouts.has(timeoutKey)) {
+                const t = setTimeout(() => {
+                  fireRestCountdown()
+                  fixedRestEndCountdownTimeouts.delete(timeoutKey)
+                }, countdownAt - nowMs)
+                fixedRestEndCountdownTimeouts.set(timeoutKey, t)
+              }
+            } else {
+              cur.countdownFiredIndexes.add(i)
+            }
+          }
+        }
+      } else {
+        fixedRestBreakState.delete(key)
+        clearFixedRestTimersByKey(key)
+      }
+
       if (!isSameMinute(now, h, m)) continue
       if (hasMask && !anyOn) {
         // 单次触发：触发一次后停止
@@ -146,6 +268,40 @@ function scheduleFixedTimeReminders() {
   runAtNextMinute()
 }
 
+function clearRestEndCountdown(key: string) {
+  const t = restEndCountdownTimeouts.get(key)
+  if (t) clearTimeout(t)
+  restEndCountdownTimeouts.delete(key)
+}
+
+function getWorkDurationMs(st: IntervalState, phaseIndex: number): number {
+  if (phaseIndex < 0) return 0
+  return st.workDurationsMs[phaseIndex] ?? st.segmentDurationMs
+}
+
+/**
+ * 休息结束前弹出倒计时弹窗。
+ * countdownSec = min(5, restDurationSec)，在休息段最后 countdownSec 秒时触发。
+ */
+function scheduleRestEndCountdown(key: string, restDurationMs: number, categoryName: string) {
+  clearRestEndCountdown(key)
+  const restSec = Math.round(restDurationMs / 1000)
+  if (restSec < 1) return
+  const countdownSec = Math.min(5, restSec)
+  const delayMs = restDurationMs - countdownSec * 1000
+  const fireCountdown = () => {
+    reminderLog('休息结束倒计时弹窗', { key, countdownSec })
+    showRestEndCountdownPopup(countdownSec, categoryName)
+    restEndCountdownTimeouts.delete(key)
+  }
+  if (delayMs <= 0) {
+    fireCountdown()
+    return
+  }
+  const t = setTimeout(fireCountdown, delayMs)
+  restEndCountdownTimeouts.set(key, t)
+}
+
 function scheduleNextPhase(key: string) {
   const st = intervalState.get(key)
   if (!st) return
@@ -161,10 +317,12 @@ function scheduleNextPhase(key: string) {
         st.phaseStartTime = now
         const t = setTimeout(() => scheduleNextPhase(key), st.restDurationMs)
         intervalTimeouts.set(key, t)
+        scheduleRestEndCountdown(key, st.restDurationMs, st.categoryName)
       } else {
         st.phaseIndex++
         st.phaseStartTime = now
-        const t = setTimeout(() => scheduleNextPhase(key), st.segmentDurationMs)
+        const nextWorkMs = getWorkDurationMs(st, st.phaseIndex)
+        const t = setTimeout(() => scheduleNextPhase(key), nextWorkMs)
         intervalTimeouts.set(key, t)
       }
       return
@@ -183,6 +341,16 @@ function scheduleNextPhase(key: string) {
     st.phase = 'work'
     st.phaseStartTime = now
     if (st.repeatCount !== null && st.firedCount >= st.repeatCount) {
+      intervalCompletedState.set(key, {
+        completedAt: now,
+        repeatCount: st.repeatCount,
+        firedCount: st.firedCount,
+        splitCount: st.splitCount,
+        segmentDurationMs: st.segmentDurationMs,
+        workDurationsMs: st.workDurationsMs.slice(),
+        restDurationMs: st.restDurationMs,
+        cycleTotalMs: st.cycleTotalMs,
+      })
       const t = intervalTimeouts.get(key)
       if (t) clearTimeout(t)
       intervalTimeouts.delete(key)
@@ -191,47 +359,58 @@ function scheduleNextPhase(key: string) {
       if (i >= 0) intervalTimerKeys.splice(i, 1)
       return
     }
-    const t = setTimeout(() => scheduleNextPhase(key), st.segmentDurationMs)
+    const firstWorkMs = getWorkDurationMs(st, 0)
+    const t = setTimeout(() => scheduleNextPhase(key), firstWorkMs)
     intervalTimeouts.set(key, t)
     return
   }
 
   // phase === 'rest' 结束，进入下一段工作
+  clearRestEndCountdown(key)
   st.phase = 'work'
   st.phaseIndex++
   st.phaseStartTime = now
-  const t = setTimeout(() => scheduleNextPhase(key), st.segmentDurationMs)
+  const workMs = getWorkDurationMs(st, st.phaseIndex)
+  const t = setTimeout(() => scheduleNextPhase(key), workMs)
   intervalTimeouts.set(key, t)
 }
 
 /** 从旧 state 计算本周期内已过时间（毫秒） */
 function getElapsedInCycle(st: IntervalState, now: number): number {
+  const elapsedBeforePhase = (() => {
+    let acc = 0
+    for (let i = 0; i < st.phaseIndex; i++) {
+      acc += getWorkDurationMs(st, i)
+      if (st.restDurationMs > 0) acc += st.restDurationMs
+    }
+    return acc
+  })()
   if (st.phase === 'work') {
-    return st.phaseIndex * (st.segmentDurationMs + st.restDurationMs) + (now - st.phaseStartTime)
+    return elapsedBeforePhase + (now - st.phaseStartTime)
   }
-  return (st.phaseIndex + 1) * st.segmentDurationMs + st.phaseIndex * st.restDurationMs + (now - st.phaseStartTime)
+  return elapsedBeforePhase + getWorkDurationMs(st, st.phaseIndex) + (now - st.phaseStartTime)
 }
 
 /** 根据已过时间推算应处的 phase、phaseIndex、phaseStartTime，并返回当前阶段剩余 ms */
 function placeElapsedInNewCycle(
   elapsedMs: number,
-  segmentDurationMs: number,
+  workDurationsMs: number[],
   restDurationMs: number,
-  splitCount: number,
   now: number
 ): { phase: 'work' | 'rest'; phaseIndex: number; phaseStartTime: number; remainingInPhaseMs: number } {
   let acc = 0
-  for (let i = 0; i < splitCount; i++) {
-    if (elapsedMs < acc + segmentDurationMs) {
+  for (let i = 0; i < workDurationsMs.length; i++) {
+    const workMs = workDurationsMs[i]
+    if (elapsedMs < acc + workMs) {
       const elapsedInPhase = elapsedMs - acc
       return {
         phase: 'work',
         phaseIndex: i,
         phaseStartTime: now - elapsedInPhase,
-        remainingInPhaseMs: segmentDurationMs - elapsedInPhase,
+        remainingInPhaseMs: workMs - elapsedInPhase,
       }
     }
-    acc += segmentDurationMs
+    acc += workMs
     if (restDurationMs > 0) {
       if (elapsedMs < acc + restDurationMs) {
         const elapsedInPhase = elapsedMs - acc
@@ -249,7 +428,7 @@ function placeElapsedInNewCycle(
     phase: 'work',
     phaseIndex: 0,
     phaseStartTime: now,
-    remainingInPhaseMs: segmentDurationMs,
+    remainingInPhaseMs: workDurationsMs[0] ?? 0,
   }
 }
 
@@ -268,6 +447,10 @@ function scheduleIntervalReminders() {
   for (const cat of s.reminderCategories) {
     for (const item of cat.items) {
       if (item.mode !== 'interval') continue
+      if (item.enabled === false) {
+        intervalCompletedState.delete(`${cat.id}_${item.id}`)
+        continue
+      }
       const h = item.intervalHours ?? 0
       const m = item.intervalMinutes ?? 0
       const sec = item.intervalSeconds ?? 0
@@ -277,10 +460,14 @@ function scheduleIntervalReminders() {
       const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
       const restSec = Math.max(0, item.restDurationSeconds ?? 0)
       const restDurationMs = restSec * 1000
-      const segmentDurationMs = Math.floor(intervalMs / splitCount)
+      const plan = buildSplitSchedule(intervalMs, splitCount, restDurationMs)
+      const effectiveSplitCount = plan.workDurationsMs.length
+      const effectiveRestMs = effectiveSplitCount > 1 ? restDurationMs : 0
+      const segmentDurationMs = plan.workDurationsMs[0] ?? intervalMs
       const key = `${cat.id}_${item.id}`
+      intervalCompletedState.delete(key)
       const oldSt = prevState.get(key)
-      const newCycleTotalMs = segmentDurationMs * splitCount + restDurationMs * (splitCount - 1)
+      const newCycleTotalMs = plan.cycleTotalMs
       let phase: 'work' | 'rest' = 'work'
       let phaseIndex = 0
       let phaseStartTime = now
@@ -288,7 +475,7 @@ function scheduleIntervalReminders() {
       if (oldSt && oldSt.intervalMs === intervalMs) {
         const oldElapsed = getElapsedInCycle(oldSt, now)
         const newElapsed = Math.min(oldElapsed, newCycleTotalMs)
-        const placed = placeElapsedInNewCycle(newElapsed, segmentDurationMs, restDurationMs, splitCount, now)
+        const placed = placeElapsedInNewCycle(newElapsed, plan.workDurationsMs, effectiveRestMs, now)
         phase = placed.phase
         phaseIndex = placed.phaseIndex
         phaseStartTime = placed.phaseStartTime
@@ -301,9 +488,11 @@ function scheduleIntervalReminders() {
         repeatCount,
         categoryName: cat.name,
         content: item.content || '提醒',
-        splitCount,
+        splitCount: effectiveSplitCount,
         segmentDurationMs,
-        restDurationMs,
+        workDurationsMs: plan.workDurationsMs.slice(),
+        restDurationMs: effectiveRestMs,
+        cycleTotalMs: plan.cycleTotalMs,
         restContent: item.restContent ?? '休息一下',
         phase,
         phaseIndex,
@@ -320,6 +509,8 @@ function scheduleIntervalReminders() {
 export function startReminders() {
   scheduleFixedTimeReminders()
   scheduleIntervalReminders()
+  // 立即执行一次：用于补齐 fixed 拆分休息段的秒级预调度，避免首次整分前漏掉休息弹窗。
+  runFixedTimeCheck()
 }
 
 export function stopReminders() {
@@ -332,7 +523,14 @@ export function stopReminders() {
     if (t) clearTimeout(t)
   }
   intervalTimeouts.clear()
+  for (const t of restEndCountdownTimeouts.values()) clearTimeout(t)
+  restEndCountdownTimeouts.clear()
+  for (const t of fixedRestBreakTimeouts.values()) clearTimeout(t)
+  fixedRestBreakTimeouts.clear()
+  for (const t of fixedRestEndCountdownTimeouts.values()) clearTimeout(t)
+  fixedRestEndCountdownTimeouts.clear()
   intervalState.clear()
+  intervalCompletedState.clear()
   intervalTimerKeys.length = 0
 }
 
@@ -345,7 +543,9 @@ function removeIntervalTimerByKey(key: string): void {
   const t = intervalTimeouts.get(key)
   if (t) clearTimeout(t)
   intervalTimeouts.delete(key)
+  clearRestEndCountdown(key)
   intervalState.delete(key)
+  intervalCompletedState.delete(key)
   const i = intervalTimerKeys.indexOf(key)
   if (i >= 0) intervalTimerKeys.splice(i, 1)
 }
@@ -399,6 +599,20 @@ export function syncIntervalTimersAfterSettingsChange(
       const prevEntry = prevMap.get(key)
       if (!prevEntry) {
         reminderLog('syncInterval: 新子项', { key })
+        if (iv.enabled === false) {
+          removeIntervalTimerByKey(key)
+          continue
+        }
+        resetReminderProgress(key, buildIntervalPayload(cat, iv))
+        continue
+      }
+      const prevEnabled = prevEntry.item.enabled !== false
+      const nextEnabled = iv.enabled !== false
+      if (!nextEnabled) {
+        removeIntervalTimerByKey(key)
+        continue
+      }
+      if (!prevEnabled && nextEnabled) {
         resetReminderProgress(key, buildIntervalPayload(cat, iv))
         continue
       }
@@ -473,7 +687,10 @@ export function resetReminderProgress(key: string, payload?: ResetIntervalPayloa
   const totalSec = Math.max(1, h * 3600 + m * 60 + sec)
   const intervalMs = totalSec * 1000
   const restDurationMs = restSec * 1000
-  const segmentDurationMs = Math.floor(intervalMs / splitCount)
+  const plan = buildSplitSchedule(intervalMs, splitCount, restDurationMs)
+  const effectiveSplitCount = plan.workDurationsMs.length
+  const effectiveRestMs = effectiveSplitCount > 1 ? restDurationMs : 0
+  const segmentDurationMs = plan.workDurationsMs[0] ?? intervalMs
   const now = Date.now()
   const newSt: IntervalState = {
     startTime: now,
@@ -482,9 +699,11 @@ export function resetReminderProgress(key: string, payload?: ResetIntervalPayloa
     repeatCount,
     categoryName,
     content,
-    splitCount,
+    splitCount: effectiveSplitCount,
     segmentDurationMs,
-    restDurationMs,
+    workDurationsMs: plan.workDurationsMs.slice(),
+    restDurationMs: effectiveRestMs,
+    cycleTotalMs: plan.cycleTotalMs,
     restContent,
     phase: 'work',
     phaseIndex: 0,
@@ -509,11 +728,42 @@ import type { CountdownItem } from '../shared/settings'
 
 export type { CountdownItem }
 
+function clearFixedRestEndCountdownTimeoutsByKey(key: string): void {
+  const prefix = `${key}_`
+  for (const [timeoutKey, timer] of fixedRestEndCountdownTimeouts.entries()) {
+    if (!timeoutKey.startsWith(prefix)) continue
+    clearTimeout(timer)
+    fixedRestEndCountdownTimeouts.delete(timeoutKey)
+  }
+}
+
+function clearFixedRestBreakTimeoutsByKey(key: string): void {
+  const prefix = `${key}_`
+  for (const [timeoutKey, timer] of fixedRestBreakTimeouts.entries()) {
+    if (!timeoutKey.startsWith(prefix)) continue
+    clearTimeout(timer)
+    fixedRestBreakTimeouts.delete(timeoutKey)
+  }
+}
+
+function clearFixedRestTimersByKey(key: string): void {
+  clearFixedRestBreakTimeoutsByKey(key)
+  clearFixedRestEndCountdownTimeoutsByKey(key)
+}
+
 /** 固定时间「重置」：按界面当前设定时间从当前时刻倒计时；time 为 HH:mm，并记录周期起点供起始时间显示 */
 export function setFixedTimeCountdownOverride(key: string, time: string): void {
   const now = Date.now()
   fixedTimeCountdownOverride.set(key, time)
   fixedTimeCycleStartAt.set(key, now)
+  // 关键：单次 fixed（weekdays 全 false）在触发后会被标记 fired=true。
+  // 点击“启动/重置”应开启新一轮，必须清理该状态，否则 getReminderCountdowns 会持续返回 ended=true。
+  fixedSingleShotState.delete(key)
+  // 重启新周期时，清理旧周期的休息段去重与倒计时句柄，避免沿用旧状态导致分段显示/弹窗异常。
+  fixedRestBreakState.delete(key)
+  clearFixedRestTimersByKey(key)
+  // 立即补调度 fixed 拆分休息段弹窗，不等待下一次整分检查。
+  runFixedTimeCheck()
 }
 
 /** 保存设置后清除固定时间倒计时覆盖（仅在被调用时执行，保存设置不再自动调用） */
@@ -557,15 +807,16 @@ export function getReminderCountdowns(): CountdownItem[] {
     for (const item of cat.items) {
       const key = `${cat.id}_${item.id}`
       if (item.mode === 'fixed') {
+        if (item.enabled === false) {
+          result.push({ key, type: 'fixed', nextAt: now, remainingMs: 0, ended: true, time: item.time })
+          continue
+        }
         const timeStr = fixedTimeCountdownOverride.get(key) ?? item.time
         const wd = item.weekdaysEnabled
         const hasMask = Array.isArray(wd) && wd.length === 7
         const anyOn = hasMask ? wd!.some(Boolean) : false
         const maskKey = hasMask ? wd!.map((x) => (x ? '1' : '0')).join('') : 'no-mask'
         const singleShotSignature = `single|${timeStr}|${maskKey}`
-
-        const { h, m } = parseTimeHHmm(timeStr)
-        const isTriggerMinute = isSameMinute(new Date(now), h, m)
 
         let nextAt: number
         let remainingMs: number
@@ -576,15 +827,14 @@ export function getReminderCountdowns(): CountdownItem[] {
             nextAt = st.stoppedAtMs ?? now
             remainingMs = 0
           } else {
-            // 未触发前：下一次仍按 HH:mm 的最近触发点计算；命中触发分钟时 nextAt = now
-            nextAt = isTriggerMinute ? now : getNextFixedTime(timeStr)
+            // 未触发前：始终按“下一次 HH:mm”计算，避免在同一分钟内重启时 remaining 被误判为 0。
+            // 例如 18:24:10 点击“启动”，应直接进入到“明天 18:24”的新周期，而不是卡到 18:25:00。
+            nextAt = getNextFixedTime(timeStr)
             remainingMs = Math.max(0, nextAt - now)
           }
         } else {
-          // 周期触发：若正好在触发分钟，则 remaining=0
-          nextAt = isTriggerMinute && shouldFireFixedOnWeekday(item.weekdaysEnabled, new Date(now).getDay())
-            ? now
-            : getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, now)
+          // 周期触发：始终按下一次合法触发点计算，避免同一分钟内出现“假结束”显示。
+          nextAt = getNextFixedOccurrenceMs(timeStr, item.weekdaysEnabled, now)
           remainingMs = Math.max(0, nextAt - now)
         }
         const hasOverride = fixedTimeCountdownOverride.has(key)
@@ -594,38 +844,82 @@ export function getReminderCountdowns(): CountdownItem[] {
           type: 'fixed',
           nextAt,
           remainingMs,
+          ended: singleShot && remainingMs <= 0,
           time: timeStr,
           ...(cycleStartAt !== undefined ? { cycleStartAt } : {}),
         }
         result.push(base)
       } else if (item.mode === 'interval') {
+        if (item.enabled === false) {
+          result.push({
+            key,
+            type: 'interval',
+            nextAt: now,
+            remainingMs: 0,
+            ended: true,
+            workRemainingMs: 0,
+            repeatCount: item.repeatCount,
+            firedCount: 0,
+            splitCount: item.splitCount,
+          })
+          continue
+        }
         const st = intervalState.get(key)
         if (!st) {
-          result.push({ key, type: 'interval', nextAt: now, remainingMs: 0, repeatCount: item.repeatCount, firedCount: 0 })
+          const completed = intervalCompletedState.get(key)
+          if (completed) {
+            result.push({
+              key,
+              type: 'interval',
+              nextAt: completed.completedAt,
+              remainingMs: 0,
+              ended: true,
+              workRemainingMs: 0,
+              repeatCount: completed.repeatCount,
+              firedCount: completed.firedCount,
+              splitCount: completed.splitCount,
+              segmentDurationMs: completed.segmentDurationMs,
+              workDurationsMs: completed.workDurationsMs.slice(),
+              restDurationMs: completed.restDurationMs,
+              currentPhase: 'work',
+              phaseIndex: Math.max(0, completed.splitCount - 1),
+              phaseElapsedMs: completed.segmentDurationMs,
+              phaseTotalMs: completed.segmentDurationMs,
+              cycleTotalMs: completed.cycleTotalMs,
+            })
+          } else {
+            result.push({ key, type: 'interval', nextAt: now, remainingMs: 0, repeatCount: item.repeatCount, firedCount: 0 })
+          }
           continue
         }
         const phaseElapsedMs = now - st.phaseStartTime
-        const phaseTotalMs = st.phase === 'work' ? st.segmentDurationMs : st.restDurationMs
+        const phaseTotalMs = st.phase === 'work' ? getWorkDurationMs(st, st.phaseIndex) : st.restDurationMs
         const remainingInPhase = Math.max(0, phaseTotalMs - phaseElapsedMs)
         let remainingMs = remainingInPhase
         if (st.phase === 'work') {
           for (let i = st.phaseIndex + 1; i < st.splitCount; i++) {
-            remainingMs += st.restDurationMs + st.segmentDurationMs
+            remainingMs += st.restDurationMs + getWorkDurationMs(st, i)
           }
         } else {
-          remainingMs += st.segmentDurationMs
+          remainingMs += getWorkDurationMs(st, st.phaseIndex + 1)
           for (let i = st.phaseIndex + 2; i < st.splitCount; i++) {
-            remainingMs += st.restDurationMs + st.segmentDurationMs
+            remainingMs += st.restDurationMs + getWorkDurationMs(st, i)
           }
         }
-        const cycleTotalMs = st.segmentDurationMs * st.splitCount + st.restDurationMs * (st.splitCount - 1)
+        const cycleTotalMs = st.cycleTotalMs
         const nextAt = now + remainingMs
         // 仅工作段剩余（不含休息），与用户设置的「倒计时」一致，用于界面大数字显示
         let workRemainingMs: number
         if (st.phase === 'work') {
-          workRemainingMs = remainingInPhase + (st.splitCount - st.phaseIndex - 1) * st.segmentDurationMs
+          workRemainingMs = remainingInPhase
+          for (let i = st.phaseIndex + 1; i < st.splitCount; i++) {
+            workRemainingMs += getWorkDurationMs(st, i)
+          }
         } else {
-          workRemainingMs = (st.splitCount - st.phaseIndex - 1) * st.segmentDurationMs
+          workRemainingMs = 0
+          for (let i = st.phaseIndex + 1; i < st.splitCount; i++) {
+            workRemainingMs += getWorkDurationMs(st, i)
+          }
         }
         result.push({
           key,
@@ -637,6 +931,7 @@ export function getReminderCountdowns(): CountdownItem[] {
           firedCount: st.firedCount,
           splitCount: st.splitCount,
           segmentDurationMs: st.segmentDurationMs,
+          workDurationsMs: st.workDurationsMs.slice(),
           restDurationMs: st.restDurationMs,
           currentPhase: st.phase,
           phaseIndex: st.phaseIndex,

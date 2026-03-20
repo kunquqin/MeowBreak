@@ -1,10 +1,10 @@
 ---
-description: WorkBreak 设置页拖拽排序约定，避免退回 HTML5 DnD 或漏掉层级
+description: WorkBreak 设置页拖拽排序约定：大类与子项均用 @dnd-kit/sortable
 globs: ["src/renderer/src/pages/Settings.tsx"]
 ---
 
 # 设置页拖拽与排序
 
-- **排序方案**：大类与子项均使用 framer-motion 的 `Reorder.Group` + `Reorder.Item` + `useDragControls`（仅手柄触发拖拽）。不要用 HTML5 `draggable`/`onDragOver`/`onDrop` 做列表排序，否则会出现抖动、让位不统一、大类放置时子项位移等问题。
-- **拖拽层级**：被拖拽的项必须始终在最上层。子项在另一大类的层叠上下文中会被盖住，因此由 `CategoryCard` 用 `isChildDragging` 在子项拖拽时提升整卡 `zIndex`（10000）；子项 `Reorder.Item` 的 `whileDrag` 设 `position: 'relative'` 与 `zIndex: 99999`，大类 `whileDrag.zIndex` 为 10000；子项列表容器加 `overflow-visible`，避免拖拽时被裁剪。
-- **子项与父通信**：`SubReminderRow` 需支持可选 `onDragStart`/`onDragEnd`，并传给内部 `Reorder.Item`，供 `CategoryCard` 在子项拖起/放下时切换整卡 z-index。
+- **排序方案**：大类（`CategoryCard`）和子项（`SortableSubReminderItem`）均使用 **`@dnd-kit/sortable`**（`DndContext` + `SortableContext` + `useSortable`），手柄上挂 `listeners`。**不要用 Framer Motion `Reorder`**——Framer 的 FLIP 布局投影在动态高度变化时（秒表打点、内容展开）会导致兄弟卡片位置不更新、出现重叠。也不要用 HTML5 `draggable`/`onDragOver`/`onDrop`。
+- **拖拽层级**：被拖拽的项必须始终在最上层。`CategoryCard` 用 `isChildDragging` + `isCatDragging` 在拖拽时提升整卡 `zIndex`（10000）；子项 `useSortable` 设 `zIndex: 99999`（isDragging 时）；子项列表容器加 `overflow-visible`，避免拖拽时被裁剪。
+- **可变高度**：`useSortable` 的 `animateLayoutChanges` 设为 `() => false`，`transform` 样式只写 `translate3d(x,y,0)`（`sortableTranslateOnly`），**不写 scale**，避免矮/高卡片互拖时被拉伸或压扁。

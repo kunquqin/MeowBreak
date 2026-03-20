@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import type { ReminderCategory, SubReminder } from '../types'
+import type { SubReminder } from '../types'
 import { WheelColumn, parseTimeHHmm, formatHHmm, WHEEL_VIEW_H } from './TimePickerModal'
 import { StaticSplitPreviewSegment, StaticSinglePreviewBar } from './SegmentProgressBars'
 import { PresetTextField } from './PresetTextField'
 import { WeekdayRepeatControl } from './WeekdayRepeatControl'
 import { ALL_WEEKDAYS_ENABLED } from '../utils/weekdayRepeatUtils'
 import { RepeatCountPicker } from './RepeatCountPicker'
+import { buildSplitSchedule } from '../../../shared/splitSchedule'
 
 /** 给定 HH:mm，返回下一次该时刻的时间戳（毫秒） */
 function getNextFixedTimeMs(timeStr: string): number {
@@ -41,6 +42,7 @@ function getInitialFixedHM(
 
 export type AddSubReminderPayload = {
   mode: 'fixed' | 'interval'
+  title?: string
   time?: string
   /** 闹钟：与 Date.getDay() 一致，长度 7 */
   weekdaysEnabled?: boolean[]
@@ -57,12 +59,17 @@ export type AddSubReminderPayload = {
 export type AddSubReminderModalProps = {
   open: boolean
   mode: 'fixed' | 'interval'
-  category: ReminderCategory
-  categoryIndex: number
+  contentPresets: string[]
+  titlePresets: string[]
+  restPresets: string[]
   onClose: () => void
   onConfirm: (payload: AddSubReminderPayload) => void
-  /** 更新当前大类的预设列表（与设置页其它预设编辑一致，写入本地状态） */
-  onPresetsChange: (presets: string[]) => void
+  /** 更新主提醒文案预设（闹钟+倒计时共享） */
+  onContentPresetsChange: (presets: string[]) => void
+  /** 更新子项标题预设（按 mode 分池） */
+  onTitlePresetsChange: (presets: string[]) => void
+  /** 更新休息弹窗文案预设（与主提醒文案隔离） */
+  onRestPresetsChange: (presets: string[]) => void
   /** 编辑已有子项：与新建界面相同，底部为「更新」 */
   variant?: 'create' | 'edit'
   /** variant=edit 时必填，用于载入初始值 */
@@ -76,15 +83,20 @@ export type AddSubReminderModalProps = {
 export function AddSubReminderModal({
   open,
   mode,
-  category,
+  contentPresets,
+  titlePresets,
+  restPresets,
   onClose,
   onConfirm,
-  onPresetsChange,
+  onContentPresetsChange,
+  onTitlePresetsChange,
+  onRestPresetsChange,
   variant = 'create',
   sourceItem,
   layout = 'modal',
   formInstanceKey = '',
 }: AddSubReminderModalProps) {
+  const getDefaultTitle = (m: 'fixed' | 'interval') => (m === 'fixed' ? '未命名闹钟' : '未命名倒计时')
   const [h, setH] = useState(() => getInitialFixedHM(variant, mode, sourceItem).h)
   const [m, setM] = useState(() => getInitialFixedHM(variant, mode, sourceItem).m)
   const [hPreview, setHPreview] = useState(() => getInitialFixedHM(variant, mode, sourceItem).h)
@@ -94,6 +106,7 @@ export function AddSubReminderModal({
   const [intervalMinutes, setIntervalMinutes] = useState(30)
   const [intervalSeconds, setIntervalSeconds] = useState(0)
 
+  const [title, setTitle] = useState(getDefaultTitle(mode))
   const [content, setContent] = useState('')
   const [splitCount, setSplitCount] = useState(1)
   const [restH, setRestH] = useState(0)
@@ -104,12 +117,11 @@ export function AddSubReminderModal({
   const [weekdaysEnabled, setWeekdaysEnabled] = useState<boolean[]>(() => Array(7).fill(false))
   const [repeatCount, setRepeatCount] = useState<number | null>(1)
 
-  const presets = category.presets ?? []
-
   useEffect(() => {
     if (!open) return
     if (variant === 'edit' && sourceItem) {
       if (sourceItem.mode === 'stopwatch') return
+      setTitle((sourceItem.title ?? '').trim() || getDefaultTitle(sourceItem.mode))
       setContent(sourceItem.content)
       setSplitCount(sourceItem.splitCount ?? 1)
       const rsec = sourceItem.restDurationSeconds ?? 0
@@ -152,6 +164,7 @@ export function AddSubReminderModal({
       setIntervalSeconds(0)
       setRepeatCount(1)
     }
+    setTitle(getDefaultTitle(mode))
     setContent('')
     setWeekdaysEnabled(Array(7).fill(false))
     setSplitCount(1)
@@ -173,10 +186,14 @@ export function AddSubReminderModal({
   }, [open, onClose])
 
   const splitN = Math.max(1, Math.min(10, splitCount))
-  const segmentMaxSeconds =
-    mode === 'interval'
-      ? Math.floor((intervalHours * 3600 + intervalMinutes * 60 + intervalSeconds) / Math.max(1, splitN))
-      : 24 * 3600
+  const intervalTotalMs = (intervalHours * 3600 + intervalMinutes * 60 + intervalSeconds) * 1000
+  const totalSpanMs =
+    mode === 'fixed'
+      ? Math.max(0, getNextFixedTimeMs(formatHHmm(hPreview, mPreview)) - Date.now())
+      : intervalTotalMs
+  const restSec = hmsToSeconds(restH, restM, restS)
+  const restMs = splitN > 1 ? restSec * 1000 : 0
+  const splitPlan = buildSplitSchedule(totalSpanMs, splitN, restMs)
 
   useEffect(() => {
     if (!open) return
@@ -184,22 +201,28 @@ export function AddSubReminderModal({
       setSplitErr(null)
       return
     }
-    const total = hmsToSeconds(restH, restM, restS)
-    if (segmentMaxSeconds > 0 && total > segmentMaxSeconds) {
-      setSplitErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
-    } else {
-      setSplitErr(null)
+    if (!splitPlan.valid) {
+      setSplitErr('总时长不足以容纳拆分休息，请减少拆分份数或缩短休息时长。')
+      return
     }
-  }, [open, segmentMaxSeconds, restH, restM, restS, splitN])
+    if (mode === 'interval' && splitPlan.workDurationsMs.some((d) => d < 1000)) {
+      setSplitErr('每段工作时长至少 1 秒，请减少拆分份数或缩短休息时长。')
+      return
+    }
+    setSplitErr(null)
+  }, [open, splitN, splitPlan, mode])
 
   if (!open) return null
 
-  const restSec = hmsToSeconds(restH, restM, restS)
-
   const applyRest = (rh: number, rm: number, rs: number) => {
-    const total = hmsToSeconds(rh, rm, rs)
-    if (splitN > 1 && segmentMaxSeconds > 0 && total > segmentMaxSeconds) {
-      setSplitErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
+    const nextRestMs = (splitN > 1 ? hmsToSeconds(rh, rm, rs) : 0) * 1000
+    const previewPlan = buildSplitSchedule(totalSpanMs, splitN, nextRestMs)
+    if (!previewPlan.valid) {
+      setSplitErr('总时长不足以容纳拆分休息，请减少拆分份数或缩短休息时长。')
+      return
+    }
+    if (mode === 'interval' && previewPlan.workDurationsMs.some((d) => d < 1000)) {
+      setSplitErr('每段工作时长至少 1 秒，请减少拆分份数或缩短休息时长。')
       return
     }
     setSplitErr(null)
@@ -212,33 +235,24 @@ export function AddSubReminderModal({
     applyRest(rh, rm, rs)
   }
 
-  const totalWorkMs =
-    mode === 'fixed'
-      ? Math.max(0, getNextFixedTimeMs(formatHHmm(hPreview, mPreview)) - Date.now())
-      : (intervalHours * 3600 + intervalMinutes * 60 + intervalSeconds) * 1000
-  const restMs = restSec * 1000
-  const segmentDurationMs = splitN > 1 && totalWorkMs > 0 ? Math.floor(totalWorkMs / splitN) : totalWorkMs
-  const cycleTotalMs =
-    splitN > 1 && totalWorkMs > 0 ? segmentDurationMs * splitN + restMs * (splitN - 1) : totalWorkMs
-  const useSplit = splitN > 1 && cycleTotalMs > 0
-
-  const segments: { type: 'work' | 'rest'; durationMs: number }[] = []
-  if (useSplit) {
-    for (let i = 0; i < splitN; i++) {
-      segments.push({ type: 'work', durationMs: segmentDurationMs })
-      if (i < splitN - 1 && restMs > 0) segments.push({ type: 'rest', durationMs: restMs })
-    }
-  }
+  const useSplit = splitN > 1 && splitPlan.valid && splitPlan.segments.length > 1
+  const segments = useSplit ? splitPlan.segments : []
 
   const handleStart = () => {
     const totalRestSec = splitN > 1 ? hmsToSeconds(restH, restM, restS) : 0
-    if (splitN > 1 && segmentMaxSeconds > 0 && totalRestSec > segmentMaxSeconds) {
-      setSplitErr(`单次休息不能超过单份时长（${Math.ceil(segmentMaxSeconds / 60)} 分钟）`)
+    const confirmPlan = buildSplitSchedule(totalSpanMs, splitN, totalRestSec * 1000)
+    if (!confirmPlan.valid) {
+      setSplitErr('总时长不足以容纳拆分休息，请减少拆分份数或缩短休息时长。')
+      return
+    }
+    if (mode === 'interval' && confirmPlan.workDurationsMs.some((d) => d < 1000)) {
+      setSplitErr('每段工作时长至少 1 秒，请减少拆分份数或缩短休息时长。')
       return
     }
     if (mode === 'fixed') {
       onConfirm({
         mode: 'fixed',
+        title: title.trim() || getDefaultTitle('fixed'),
         time: formatHHmm(hPreview, mPreview),
         weekdaysEnabled: weekdaysEnabled.slice(),
         content: content.trim() || '提醒',
@@ -249,6 +263,7 @@ export function AddSubReminderModal({
     } else {
       onConfirm({
         mode: 'interval',
+        title: title.trim() || getDefaultTitle('interval'),
         intervalHours,
         intervalMinutes,
         intervalSeconds,
@@ -263,7 +278,7 @@ export function AddSubReminderModal({
 
   const presetResetKey = `${open}-${layout}-${formInstanceKey}-${mode}-${variant}-${sourceItem?.id ?? 'new'}`
 
-  const title =
+  const modalTitle =
     mode === 'fixed'
       ? variant === 'edit'
         ? '编辑闹钟提醒'
@@ -279,6 +294,23 @@ export function AddSubReminderModal({
   const formScroll = (
         <div className={formBodyClass}>
           {/* 1. 闹钟设置 / 倒计时 */}
+          <section className="w-full">
+            <h4 className={sectionHeadingClass}>标题</h4>
+            <div className="w-full">
+              <PresetTextField
+                key={`title-${presetResetKey}`}
+                resetKey={`title-${presetResetKey}`}
+                value={title}
+                onChange={setTitle}
+                presets={titlePresets}
+                onPresetsChange={onTitlePresetsChange}
+                mainPlaceholder="请输入标题"
+                autoFocusInput
+              />
+            </div>
+          </section>
+
+          {/* 2. 闹钟设置 / 倒计时 */}
           <section className="flex w-full flex-col items-center">
             <h4 className={sectionHeadingClass}>{timeSectionTitle}</h4>
             {mode === 'fixed' ? (
@@ -337,7 +369,7 @@ export function AddSubReminderModal({
             )}
           </section>
 
-          {/* 2. 提醒内容（含预设） */}
+          {/* 3. 提醒内容（含预设） */}
           <section className="w-full">
             <h4 className={sectionHeadingClass}>提醒内容</h4>
             <div className="flex flex-wrap items-center gap-3 w-full">
@@ -347,9 +379,10 @@ export function AddSubReminderModal({
                   resetKey={presetResetKey}
                   value={content}
                   onChange={setContent}
-                  presets={presets}
-                  onPresetsChange={onPresetsChange}
+                  presets={contentPresets}
+                  onPresetsChange={onContentPresetsChange}
                   mainPlaceholder="请输入提醒内容"
+                  multilineMain
                 />
               </div>
 
@@ -366,7 +399,7 @@ export function AddSubReminderModal({
             </div>
           </section>
 
-          {/* 3. 拆分预览（静态条；保存/开始后的列表进度另算） */}
+          {/* 4. 拆分预览（静态条；保存/开始后的列表进度另算） */}
           <section className="w-full">
             <h4 className={sectionHeadingClass}>拆分预览</h4>
             <div className="w-full flex items-center gap-1.5 flex-wrap min-h-[1rem]">
@@ -379,12 +412,12 @@ export function AddSubReminderModal({
                   />
                 ))
               ) : (
-                <StaticSinglePreviewBar totalDurationMs={Math.max(0, totalWorkMs)} />
+                <StaticSinglePreviewBar totalDurationMs={Math.max(0, totalSpanMs)} />
               )}
             </div>
           </section>
 
-          {/* 4. 拆分配置 */}
+          {/* 5. 拆分配置 */}
           <section className="w-full">
             <h4 className={sectionHeadingClass}>拆分配置</h4>
             <div className="flex w-full flex-col items-center space-y-5">
@@ -442,9 +475,10 @@ export function AddSubReminderModal({
                         resetKey={presetResetKey}
                         value={restContent}
                         onChange={setRestContent}
-                        presets={presets}
-                        onPresetsChange={onPresetsChange}
+                        presets={restPresets}
+                        onPresetsChange={onRestPresetsChange}
                         mainPlaceholder="请输入休息提示语"
+                        multilineMain
                       />
                     </div>
                   </div>
@@ -483,7 +517,7 @@ export function AddSubReminderModal({
   if (layout === 'embedded') {
     return (
       <div className="flex w-full flex-col overflow-visible rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="shrink-0 border-b border-slate-200 bg-slate-50/95 px-4 py-2.5 text-center text-sm font-medium text-slate-800">{title}</div>
+        <div className="shrink-0 border-b border-slate-200 bg-slate-50/95 px-4 py-2.5 text-center text-sm font-medium text-slate-800">{modalTitle}</div>
         <div className="flex flex-col overflow-visible">
           {formScroll}
           {formFooter}
@@ -505,7 +539,7 @@ export function AddSubReminderModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="relative flex min-h-[48px] items-center justify-center border-b border-slate-200 px-4 py-3">
-          <h3 className="w-full text-center font-medium text-slate-800 px-10">{title}</h3>
+          <h3 className="w-full text-center font-medium text-slate-800 px-10">{modalTitle}</h3>
           <button
             type="button"
             className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-xl leading-none text-slate-400 hover:text-slate-600"

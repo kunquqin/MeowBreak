@@ -118,3 +118,97 @@ export function closeReminderPopupIfAny() {
     reminderPopupWindow = null
   }
 }
+
+/* ─── 休息即将结束：倒计时弹窗 ─── */
+
+function buildRestEndCountdownHtml(countdownSec: number, title: string): string {
+  const titleEsc = escapeHtml(title)
+  const sec = Math.max(1, Math.min(countdownSec, 99))
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>休息即将结束</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: min(5vw, 48px); }
+    .title { font-size: clamp(20px, 4vw, 48px); opacity: 0.8; text-align: center; margin-bottom: clamp(8px, 1.5vw, 20px); }
+    .subtitle { font-size: clamp(28px, 6vw, 72px); text-align: center; font-weight: 600; margin-bottom: clamp(24px, 4vw, 56px); }
+    .countdown { font-size: clamp(80px, 20vw, 240px); font-weight: 700; text-align: center; line-height: 1; font-variant-numeric: tabular-nums; transition: transform 0.15s ease-out, opacity 0.15s ease-out; }
+    .countdown.tick { transform: scale(1.15); opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <div class="title">${titleEsc}</div>
+  <div class="subtitle">休息即将结束</div>
+  <div class="countdown" id="cd">${sec}</div>
+  <script>
+    (function(){
+      var remaining = ${sec};
+      var el = document.getElementById('cd');
+      function tick() {
+        remaining--;
+        if (remaining <= 0) {
+          el.textContent = '0';
+          setTimeout(function(){ window.close(); }, 300);
+          return;
+        }
+        el.textContent = String(remaining);
+        el.classList.add('tick');
+        setTimeout(function(){ el.classList.remove('tick'); }, 150);
+        setTimeout(tick, 1000);
+      }
+      setTimeout(tick, 1000);
+    })();
+  </script>
+</body>
+</html>`
+}
+
+/**
+ * 休息即将结束倒计时弹窗：全屏黑底，大数字从 countdownSec 倒数到 0 后自动关闭。
+ * 复用同一个 reminderPopupWindow 单例（覆盖当前休息提醒弹窗内容）。
+ */
+export function showRestEndCountdownPopup(countdownSec: number, title: string) {
+  const html = buildRestEndCountdownHtml(countdownSec, title)
+  const url = 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+
+  if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
+    applyDisplayBounds(reminderPopupWindow)
+    void reminderPopupWindow.loadURL(url).then(() => {
+      const w = reminderPopupWindow
+      if (w && !w.isDestroyed()) presentReminderWindow(w)
+    }).catch(() => {})
+    return
+  }
+
+  const primary = screen.getPrimaryDisplay()
+  const { x, y, width, height } = primary.bounds
+
+  reminderPopupWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    fullscreenable: true,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  })
+
+  reminderPopupWindow.on('closed', () => {
+    reminderPopupWindow = null
+  })
+
+  void reminderPopupWindow.loadURL(url).then(() => {
+    const w = reminderPopupWindow
+    if (w && !w.isDestroyed()) presentReminderWindow(w)
+  }).catch(() => {})
+}

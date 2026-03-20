@@ -2,9 +2,12 @@ import { useState, useEffect, useRef } from 'react'
 
 /** 主输入与预设行内控件同高 */
 const CTRL_H = 'h-9'
-const presetRowInputClass = `${CTRL_H} w-full min-w-0 rounded border border-slate-300 bg-white px-2 text-sm leading-9 box-border outline-none ring-0 focus:outline-none focus:ring-0 focus:border-slate-400`
-const presetSaveBtnClass = `${CTRL_H} min-w-[52px] shrink-0 inline-flex items-center justify-center rounded bg-slate-800 px-2.5 text-xs font-medium leading-none text-white hover:bg-slate-700`
-const presetEditBtnClass = `${CTRL_H} shrink-0 inline-flex items-center justify-center rounded border border-slate-300 px-2.5 text-xs font-medium leading-none text-slate-600 hover:bg-slate-100`
+const presetRowTextAreaClass = `min-h-[4.5rem] w-full min-w-0 rounded border border-slate-300 bg-white px-2 py-2 text-sm leading-6 box-border outline-none ring-0 resize-none overflow-hidden focus:outline-none focus:ring-0 focus:border-slate-400`
+const presetActionBtnClass = `${CTRL_H} shrink-0 inline-flex items-center justify-center rounded px-2.5 text-xs font-medium leading-none hover:bg-slate-100`
+const presetSaveBtnClass = `${presetActionBtnClass} text-slate-700`
+const presetEditBtnClass = `${presetActionBtnClass} text-slate-600`
+const presetDeleteBtnClass = `${presetActionBtnClass} text-red-600 hover:text-red-700`
+const MAX_TEXT_CHARS = 50
 
 function PresetDeleteButton({ onClick, title }: { onClick: () => void; title?: string }) {
   return (
@@ -14,11 +17,11 @@ function PresetDeleteButton({ onClick, title }: { onClick: () => void; title?: s
         e.stopPropagation()
         onClick()
       }}
-      className={`h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-full bg-red-500 text-xs font-bold leading-none text-white hover:bg-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-0`}
+      className={presetDeleteBtnClass}
       title={title ?? '删除'}
       aria-label={title ?? '删除'}
     >
-      −
+      删除
     </button>
   )
 }
@@ -35,6 +38,10 @@ export type PresetTextFieldProps = {
   resetKey: string
   /** 追加到主输入框的额外 class（如 text-center） */
   inputClassName?: string
+  /** 是否自动聚焦主输入框 */
+  autoFocusInput?: boolean
+  /** 主输入框是否使用多行自适应高度（用于文案输入） */
+  multilineMain?: boolean
 }
 
 /** 提醒内容 / 休息弹窗文案：主输入 + 同宽预设下拉（列表子项与 AddSubReminderModal 共用） */
@@ -46,13 +53,39 @@ export function PresetTextField({
   mainPlaceholder,
   resetKey,
   inputClassName,
+  autoFocusInput = false,
+  multilineMain = false,
 }: PresetTextFieldProps) {
   const [presetOpen, setPresetOpen] = useState(false)
   const [editingPresetIndex, setEditingPresetIndex] = useState<number | null>(null)
   const [editBuffer, setEditBuffer] = useState('')
   const [newDraftActive, setNewDraftActive] = useState(false)
   const [newDraftText, setNewDraftText] = useState('')
+  const [limitTipVisible, setLimitTipVisible] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const mainTextAreaRef = useRef<HTMLTextAreaElement>(null)
+  const newDraftRef = useRef<HTMLTextAreaElement>(null)
+  const editRef = useRef<HTMLTextAreaElement>(null)
+  const limitTipTimerRef = useRef<number | null>(null)
+
+  const autoResize = (el: HTMLTextAreaElement | null) => {
+    if (!el) return
+    el.style.height = '0px'
+    el.style.height = `${Math.max(el.scrollHeight, 36)}px`
+  }
+
+  const clampText = (raw: string): string => {
+    const chars = Array.from(raw)
+    if (chars.length <= MAX_TEXT_CHARS) return raw
+    if (limitTipTimerRef.current) window.clearTimeout(limitTipTimerRef.current)
+    setLimitTipVisible(true)
+    limitTipTimerRef.current = window.setTimeout(() => {
+      setLimitTipVisible(false)
+      limitTipTimerRef.current = null
+    }, 1300)
+    return chars.slice(0, MAX_TEXT_CHARS).join('')
+  }
 
   const resetPicker = () => {
     setPresetOpen(false)
@@ -67,6 +100,12 @@ export function PresetTextField({
   }, [resetKey])
 
   useEffect(() => {
+    return () => {
+      if (limitTipTimerRef.current) window.clearTimeout(limitTipTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
     if (!presetOpen) return
     const onDown = (e: MouseEvent) => {
       const el = wrapRef.current
@@ -75,6 +114,25 @@ export function PresetTextField({
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [presetOpen])
+
+  useEffect(() => {
+    if (!presetOpen || !newDraftActive) return
+    const el = listRef.current
+    if (!el) return
+    el.scrollTop = 0
+  }, [presetOpen, newDraftActive])
+
+  useEffect(() => {
+    if (multilineMain) autoResize(mainTextAreaRef.current)
+  }, [value, multilineMain])
+
+  useEffect(() => {
+    if (newDraftActive) autoResize(newDraftRef.current)
+  }, [newDraftActive, newDraftText])
+
+  useEffect(() => {
+    if (editingPresetIndex !== null) autoResize(editRef.current)
+  }, [editingPresetIndex, editBuffer])
 
   /** Esc 先关预设面板（捕获阶段，避免一并关掉整弹窗） */
   useEffect(() => {
@@ -93,13 +151,33 @@ export function PresetTextField({
 
   return (
     <div ref={wrapRef} className="relative w-full">
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={mainPlaceholder}
-        className={`${CTRL_H} w-full rounded border border-slate-300 pl-2 pr-9 text-sm leading-9 box-border outline-none ring-0 placeholder:text-slate-300 focus:outline-none focus:ring-0 focus:border-slate-400${inputClassName ? ` ${inputClassName}` : ''}`}
-      />
+      {multilineMain ? (
+        <textarea
+          ref={mainTextAreaRef}
+          autoFocus={autoFocusInput}
+          value={value}
+          onChange={(e) => onChange(clampText(e.target.value))}
+          onInput={(e) => autoResize(e.currentTarget)}
+          placeholder={mainPlaceholder}
+          maxLength={MAX_TEXT_CHARS}
+          className={`min-h-[2.25rem] w-full rounded border border-slate-300 pl-2 pr-9 py-1.5 text-sm leading-6 box-border outline-none ring-0 resize-none overflow-hidden placeholder:text-slate-300 focus:outline-none focus:ring-0 focus:border-slate-400${inputClassName ? ` ${inputClassName}` : ''}`}
+        />
+      ) : (
+        <input
+          type="text"
+          autoFocus={autoFocusInput}
+          value={value}
+          onChange={(e) => onChange(clampText(e.target.value))}
+          placeholder={mainPlaceholder}
+          maxLength={MAX_TEXT_CHARS}
+          className={`${CTRL_H} w-full rounded border border-slate-300 pl-2 pr-9 text-sm leading-9 box-border outline-none ring-0 placeholder:text-slate-300 focus:outline-none focus:ring-0 focus:border-slate-400${inputClassName ? ` ${inputClassName}` : ''}`}
+        />
+      )}
+      {limitTipVisible && (
+        <div className="pointer-events-none absolute left-1/2 top-0 z-30 -translate-x-1/2 -translate-y-[115%] rounded bg-slate-800/95 px-2 py-1 text-xs text-white shadow">
+          最多输入 50 字
+        </div>
+      )}
       <div className={`absolute right-2 top-1/2 -translate-y-1/2 ${CTRL_H} flex items-center`}>
         <button
           type="button"
@@ -115,18 +193,57 @@ export function PresetTextField({
       </div>
       {presetOpen && (
         <div className="absolute left-0 right-0 top-full z-20 mt-1 flex max-h-72 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
-          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-1">
+            {newDraftActive && (
+              <div className={`${rowClass} ${presets.length > 0 ? 'border-b border-slate-100' : ''}`}>
+                <textarea
+                  ref={newDraftRef}
+                  autoFocus
+                  value={newDraftText}
+                  onChange={(e) => setNewDraftText(clampText(e.target.value))}
+                  onInput={(e) => autoResize(e.currentTarget)}
+                  placeholder={PRESET_DRAFT_PLACEHOLDER}
+                  maxLength={MAX_TEXT_CHARS}
+                  className={`${presetRowTextAreaClass} placeholder:text-slate-300`}
+                />
+                {newDraftText.trim() !== '' && (
+                  <button
+                    type="button"
+                    className={presetSaveBtnClass}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      const v = newDraftText.trim()
+                      if (!v) return
+                      onPresetsChange([v, ...presets])
+                      setNewDraftActive(false)
+                      setNewDraftText('')
+                    }}
+                  >
+                    保存
+                  </button>
+                )}
+                <PresetDeleteButton
+                  title="取消新增"
+                  onClick={() => {
+                    setNewDraftActive(false)
+                    setNewDraftText('')
+                  }}
+                />
+              </div>
+            )}
             {presets.map((p, i) => {
               const isEditing = editingPresetIndex === i
               if (isEditing) {
                 return (
                   <div key={`e-${i}-${p}`} className={rowClass}>
-                    <input
-                      type="text"
+                    <textarea
+                      ref={editRef}
                       value={editBuffer}
-                      onChange={(e) => setEditBuffer(e.target.value)}
+                      onChange={(e) => setEditBuffer(clampText(e.target.value))}
+                      onInput={(e) => autoResize(e.currentTarget)}
                       placeholder={PRESET_DRAFT_PLACEHOLDER}
-                      className={`${presetRowInputClass} placeholder:text-slate-300`}
+                      maxLength={MAX_TEXT_CHARS}
+                      className={`${presetRowTextAreaClass} placeholder:text-slate-300`}
                     />
                     {editBuffer.trim() !== '' && (
                       <button
@@ -159,10 +276,10 @@ export function PresetTextField({
                 )
               }
               return (
-                <div key={`d-${i}-${p}`} className={`group ${rowClass} hover:bg-slate-50`}>
+                <div key={`d-${i}-${p}`} className={`group ${rowClass} items-start hover:bg-slate-50`}>
                   <button
                     type="button"
-                    className={`${CTRL_H} min-w-0 flex-1 truncate text-left text-sm leading-9 text-slate-800`}
+                    className={`min-w-0 flex-1 whitespace-normal break-words py-1 text-left text-sm leading-6 text-slate-800`}
                     onClick={() => {
                       onChange(p ?? '')
                       resetPicker()
@@ -201,40 +318,6 @@ export function PresetTextField({
                 </div>
               )
             })}
-            {newDraftActive && (
-              <div className={`${rowClass} ${presets.length > 0 ? 'border-t border-slate-100' : ''}`}>
-                <input
-                  type="text"
-                  value={newDraftText}
-                  onChange={(e) => setNewDraftText(e.target.value)}
-                  placeholder={PRESET_DRAFT_PLACEHOLDER}
-                  className={`${presetRowInputClass} placeholder:text-slate-300`}
-                />
-                {newDraftText.trim() !== '' && (
-                  <button
-                    type="button"
-                    className={presetSaveBtnClass}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const v = newDraftText.trim()
-                      if (!v) return
-                      onPresetsChange([...presets, v])
-                      setNewDraftActive(false)
-                      setNewDraftText('')
-                    }}
-                  >
-                    保存
-                  </button>
-                )}
-                <PresetDeleteButton
-                  title="取消新增"
-                  onClick={() => {
-                    setNewDraftActive(false)
-                    setNewDraftText('')
-                  }}
-                />
-              </div>
-            )}
           </div>
           <div className="shrink-0 border-t border-slate-200 p-1.5">
             <button
@@ -247,6 +330,7 @@ export function PresetTextField({
                 setEditBuffer('')
                 setNewDraftActive(true)
                 setNewDraftText('')
+                if (listRef.current) listRef.current.scrollTop = 0
               }}
               aria-label="新增预设"
             >

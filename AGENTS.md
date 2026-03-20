@@ -28,7 +28,7 @@
 
 ### 2.1 要做（第一版）
 
-1. **可配置提醒**：用户可新增**闹钟**、**倒计时**或**秒表**大类。闹钟/倒计时规则不变：`categoryKind` 为 `alarm` | `countdown`，子项分别为 `mode: 'fixed'` 与 `mode: 'interval'`。**秒表**大类 `categoryKind: 'stopwatch'`，子项为 `mode: 'stopwatch'`（无提醒文案、无弹窗、不参与主进程定时器）；运行态与打点列表仅存设置页内存，不落盘。旧配置无 `categoryKind` 时由主进程归一化推断。
+1. **可配置提醒**：用户可新增**闹钟**、**倒计时**或**秒表**大类。闹钟/倒计时规则不变：`categoryKind` 为 `alarm` | `countdown`，子项分别为 `mode: 'fixed'` 与 `mode: 'interval'`。**秒表**大类 `categoryKind: 'stopwatch'`，子项为 `mode: 'stopwatch'`（可选标题 `content?: string`、无弹窗、不参与主进程定时器）；运行态与打点列表仅存设置页内存，不落盘。旧配置无 `categoryKind` 时由主进程归一化推断。
 2. **系统托盘**：后台静默运行，托盘图标与基础菜单。
 3. **设置界面**：可增删改大类与子提醒、管理预设、持久化到本地。
 
@@ -131,6 +131,7 @@
 - **保存设置**：仅将当前配置写入磁盘（`setSettings`），**不**调用 `restartReminders()`、**不**清除闹钟（fixed）override，因此不会重置任何提醒的起始点或进度。
 - **全部重置**：设置页提供「全部重置」按钮，调用主进程 `resetAllReminderProgress()`，将所有**闹钟**子项设为“从当前时刻开始”、所有**倒计时**子项从当前时刻重新排程；使用当前已保存的配置（`getSettings()`）。
 - 提醒计划、定时器均在主进程 `reminders.ts`，以主进程为“单一事实来源”；应用启动时由 `startReminders()` 排程。
+- **normalizeCategories 保全字段**：`main/settings.ts` 的 `normalizeCategories` 负责反序列化校验；为 `SubReminder` 的每种 mode 分支构造对象时，**必须保留该 mode 的全部字段**（如秒表的 `content`、闹钟的 `weekdaysEnabled`）。否则 auto-save → hydrate 后新加的字段会丢失。
 
 ### 4.5 闹钟（mode: fixed）「重置」与起始时间
 
@@ -145,14 +146,14 @@
 
 ### 4.7 设置页拖拽与排序
 
-- **大类用 Framer Motion Reorder**：主列表为 `Reorder.Group`，每项为 `CategoryCard`（内为 `Reorder.Item` + `useDragControls`）；`onReorder` 调用 `setCategories`，同时 `setPresetModal(null)`、`setPresetDropdown(null)` 避免重排后索引错位。**子项不用 Framer Reorder**（见下条）。
-- **子项排序**：大类内容区内使用 **`@dnd-kit/sortable`**（`DndContext` + `SortableContext` + `useSortable`），每行外包一层 `SortableSubReminderItem`，手柄上挂 `listeners`；**不再**用 Framer `Reorder` 排子项。原因：Framer Reorder 在交换 DOM 顺序时，可变高度子项易出现「让位瞬间被拖卡片相对鼠标跳约一行高」的错位；dnd-kit 用 `transform` 跟指针一致。大类列表仍用 Framer `Reorder`。
-- **dnd-kit 可变高度**：`useSortable` 默认的 layout 动画会用 `useDerivedTransform` 注入 **scaleY**（旧/新测量框高度比），拖过另一行时矮卡片会被拉高、高卡片会被压扁；子项侧已设 **`animateLayoutChanges: () => false`**，且样式 **`transform` 只用 `translate3d`**，不写 `scale`，避免内容被拉伸。
+- **大类与子项均用 `@dnd-kit/sortable`**：大类（`CategoryCard`）和子项（`SortableSubReminderItem`）均使用 `DndContext` + `SortableContext` + `useSortable`，手柄上挂 `listeners`。**不再使用 Framer Motion `Reorder`**——Framer 的 FLIP 布局投影在动态高度变化时（如秒表打点区展开）会导致兄弟卡片位置不更新、出现重叠。
+- **dnd-kit 可变高度**：`useSortable` 默认的 layout 动画会用 `useDerivedTransform` 注入 **scaleY**（旧/新测量框高度比），拖过另一行时矮卡片会被拉高、高卡片会被压扁；大类与子项侧均已设 **`animateLayoutChanges: () => false`**，且样式 **`transform` 只用 `translate3d`**（`sortableTranslateOnly`），不写 `scale`，避免内容被拉伸。
 - **子项 UI**：内层仍为 `SubReminderRow` / `StopwatchReminderRow`（秒表状态仍行内 `useState`）。大类分 `categoryKind`（闹钟 / 倒计时 / 秒表），子项不得跨 kind 移动（`moveItemToCategory` 需同 kind）。
-- **拖拽时始终在最上层**：`CategoryCard` 用 `isChildDragging`，在子项 `DndContext` 的 `onDragStart`/`onDragEnd` 与 Framer 大类拖拽一致思路；根大类 `Reorder.Item` 的 `zIndex` 在 `isChildDragging` 时为 10000；子项列表容器 `overflow-visible`，避免裁剪。
+- **拖拽时始终在最上层**：`CategoryCard` 用 `isChildDragging`，在子项 `DndContext` 的 `onDragStart`/`onDragEnd` 切换整卡 `zIndex`（10000）；子项列表容器 `overflow-visible`，避免裁剪。
 
 ### 4.8 秒表（设置页）
 
+- **标题**：秒表子项顶部有可选标题（`content?: string`），采用 **点击编辑** 交互：非编辑态显示纯文本（居中），点击进入 `PresetTextField`（支持预设），失焦或 Enter 退出编辑态并自动保存。非编辑态 padding 需与 `PresetTextField` input 的 `pl-2 pr-9` 一致，避免模式切换时文字偏移。
 - **状态**：每条秒表子项在 **`StopwatchReminderRow`** 内用 **`useState`** 存 `StopwatchRuntime`，**不要**用全局 `Record<key, …>` 映射多条秒表（易因 id/键冲突或 React 复用导致「复位一条清空多条」）。运行中显示可用 `setInterval` ~50ms，仅在该行 `running` 时启用。
 - **逻辑**：`src/renderer/src/utils/stopwatchUtils.ts`（`emptyStopwatch`、`stopwatchLap`、`stopwatchRemoveLap`、显示格式化等）；删除单条打点后按时间重算计次与分段。
 - **打点列表**：约 10 条可见用 `max-h-80` + 内部滚动；**dnd-kit 拖拽**时对内层滚动区可在 **`isSortableDragging`** 下 **`pointer-events-none`**，避免抢指针。长页可在 `index.css` 等对根滚动设 **`overflow-anchor: none`**，减轻动态增高时的视口跳动。

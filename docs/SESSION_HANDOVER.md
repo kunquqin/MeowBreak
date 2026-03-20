@@ -1,4 +1,4 @@
-# 会话交接（最近一轮：设置页秒表 / 排序 / 进度条）
+# 会话交接（最近一轮：秒表标题、normalization 修复、大类排序迁移）
 
 > 下一段「粘贴用交接提示」见文末代码块。
 
@@ -6,36 +6,50 @@
 
 ### 功能与修复
 
-- **秒表状态隔离**：由全局 `stopwatchByKey` 改为每行 `StopwatchReminderRow` 内 **`useState`**，避免多表共用键或 React 复用导致「复位一条清空多条」。
-- **秒表打点**：支持 **`stopwatchRemoveLap`** 删除单条打点并重算计次/分段；列表右侧 hover 显红色圆钮减号。
-- **打点列表与滚动**：保持约 **10 条** `max-h-80` + 内部滚动；秒表拖拽时用 **`isSortableDragging`** 对打点区 **`pointer-events-none`**，减少内层滚动抢事件；根样式可加 **`overflow-anchor: none`** 减轻长页跳动。
-- **子项排序栈**：子项从 Framer **`Reorder` 改为 `@dnd-kit/sortable`**，解决可变高度下让位时 **相对鼠标大幅错位**；大类仍用 Framer Reorder。
-- **dnd-kit 拉伸/压扁**：关闭 **`animateLayoutChanges`**，且 **`transform` 仅用 `translate3d`**（`sortableTranslateOnly`），避免 `useDerivedTransform` 的 **scaleY** 把矮/高卡片拉变形。
-- **进度条时间气泡**：`SegmentProgressBars` 内在文案 **truncate** 且 **`scrollWidth > clientWidth`** 时，hover 条身在 **居中上方** 显示 **绿/蓝底白字** 气泡（尖角朝下）；完整显示则不出现。外层 `group` + 内层 `overflow-hidden` 条形容器，避免气泡被裁切。
+- **秒表标题**：`SubReminder` stopwatch 变体新增 `content?: string`，`StopwatchReminderRow` 顶部新增标题行（含左右拖拽手柄、删除按钮）。
+- **点击编辑交互**：标题默认显示纯文本（居中），点击进入 `PresetTextField`（含预设增删编辑），失焦 / Enter / 点击外部退出编辑态并自动保存。非编辑态 padding 与 PresetTextField input 的 `pl-2 pr-9` 一致，避免模式切换时文字偏移。
+- **normalization 修复**：`main/settings.ts` 的 `normalizeCategories` 对秒表项只保留 `{ id, mode }` 导致 `content` 在 auto-save hydrate 后丢失。已修复为保留 `content`。
+- **PresetTextField 扩展**：新增 `inputClassName` prop，秒表标题传入 `text-center` 实现居中，不影响闹钟/倒计时。
+- **v0.0.5 标签**：已创建带中文注释的 annotated tag 并推送至远程。
 
-### 技术决策（约定）
+### 上一轮会话遗留（已合入 v0.0.5）
+
+- **大类排序迁移**：Framer Motion `Reorder` → `@dnd-kit/sortable`，解决秒表打点展开后下方卡片重叠。
+- **闹钟星期重复**：`weekdaysEnabled?: boolean[]`，iOS 风格开关，"永不"表示单次触发后停止。
+- **子项增删不重置**：移除 `handleAddSubReminderConfirm` / `handleEditSubReminderConfirm` 中冗余的 `restartReminders()` 调用。
+- **进度条修复**："永不"闹钟的倒计时浮标正确显示剩余时间而非"永不"。
+
+### 技术决策
 
 | 主题 | 决策 |
 |------|------|
-| 多秒表运行时状态 | 每子项组件内 `useState`，不落盘 |
-| 子项拖拽 | dnd-kit sortable；大类拖拽 Framer Reorder |
-| dnd-kit + 变高 | `animateLayoutChanges: () => false` + 仅平移 transform |
-| 进度条截断提示 | 仅截断时 hover 气泡；颜色与条（绿/蓝）一致 |
+| 秒表标题持久化 | `content?: string` 可选字段；normalization 必须保留 |
+| 标题交互模式 | 点击编辑（非编辑态纯文本），不常驻输入框 |
+| 编辑/非编辑态一致性 | 非编辑态 padding `pl-2 pr-9` 匹配 input，避免文字跳动 |
+| PresetTextField 扩展 | `inputClassName` prop 而非修改基础样式 |
+| 大类 + 子项排序 | 全部 @dnd-kit/sortable，不再使用 Framer Motion |
+| normalizeCategories | 每次给 SubReminder 加字段必须同步更新 normalization |
 
 ---
 
-## 2. AGENTS.md
+## 2. AGENTS.md 更新
 
-已补充 **4.8 秒表**、**4.9 SegmentProgressBars**，修正 **4.7** 首条（避免写「子项也用 Framer Reorder」）；目录 **3.2** 已写明 `components/`、`utils/` 中现有模块示例。
+- **4.7**：大类排序从 Framer Motion 改为 @dnd-kit/sortable 的描述已更正
+- **4.8**：补充秒表标题（click-to-edit）、padding 一致性约定
+- **4.4**：新增 normalizeCategories 保全字段的注意事项
+- **2.1**：秒表描述从"无提醒文案"改为"可选标题 `content?: string`"
 
 ---
 
 ## 3. Cursor Rules
 
-| 文件 | 作用 |
+| 文件 | 变更 |
 |------|------|
-| **`.cursor/rules/settings-sortable.mdc`**（新建） | 子项用 dnd-kit、勿用 Framer 排子项；变高时禁用 scale 类 derived transform |
-| `settings-drag.mdc` / `save-and-reset.mdc` / `workbreak.mdc` | 仍适用；与本轮不冲突 |
+| **`settings-drag.mdc`**（更新） | 大类排序从 Framer Motion 改为 @dnd-kit/sortable |
+| **`normalize-settings.mdc`**（新建） | normalizeCategories 必须保留 SubReminder 各 mode 全部字段 |
+| `settings-sortable.mdc` | 仍适用（子项 dnd-kit 可变高度约定） |
+| `save-and-reset.mdc` | 仍适用（保存 vs 重置、cycleStartAt 约定） |
+| `workbreak.mdc` | 仍适用（preload CJS、仓库约定） |
 
 ---
 
@@ -44,11 +58,14 @@
 ```
 【WorkBreak — 新会话交接】
 
-请先读 AGENTS.md（尤其 4.7～4.9）。
+请先读 AGENTS.md（尤其 4.4、4.7～4.9）与 docs/SESSION_HANDOVER.md。
 
-- 秒表：每条子项状态在 StopwatchReminderRow 的 useState，不用全局 Map；逻辑在 utils/stopwatchUtils.ts；可删单条打点（stopwatchRemoveLap）。
-- 子项排序：@dnd-kit/sortable（SortableSubReminderItem + DndContext）；大类仍 Framer Reorder。变高列表不要用 Framer 排子项。
-- dnd-kit：useSortable 要 animateLayoutChanges: () => false，transform 只用 translate3d（见 sortableTranslateOnly），否则拖过另一行会 scaleY 拉扁/拉高卡片。
-- 进度条文案：SegmentProgressBars.tsx；truncate 且测量为截断时才在 hover 时显示绿/蓝气泡；结构要外层 group、内层 overflow-hidden 以免裁切气泡。
-- 详细约定：AGENTS.md 4.7–4.9；子项排序细节：.cursor/rules/settings-sortable.mdc。
+- 拖拽排序：大类与子项均用 @dnd-kit/sortable，不再使用 Framer Motion Reorder（会导致动态高度下卡片重叠）。useSortable 要 animateLayoutChanges: () => false，transform 只用 translate3d（sortableTranslateOnly）。
+- 秒表：每条子项状态在 StopwatchReminderRow 的 useState，不用全局 Map。顶部有可选标题（content?: string），采用点击编辑交互（非编辑态纯文本，点击显示 PresetTextField，失焦/Enter 保存）。非编辑态 padding 需与 input 一致（pl-2 pr-9）避免文字偏移。
+- normalizeCategories：main/settings.ts 反序列化时必须保留 SubReminder 各 mode 的全部字段，否则 auto-save hydrate 后新字段会丢失。
+- 闹钟星期重复：weekdaysEnabled?: boolean[]，"永不"（全 false）= 单次触发后停止。
+- 保存设置：只写盘不重启定时器；新建/编辑子项不调用 restartReminders()。
+- 进度条文案：SegmentProgressBars.tsx；truncate 且截断时才 hover 显示绿/蓝气泡。
+- Cursor Rules：settings-drag.mdc、settings-sortable.mdc、normalize-settings.mdc、save-and-reset.mdc。
+- 当前版本：v0.0.5，已推送至 GitHub。
 ```

@@ -1,12 +1,26 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import type { AppSettings, CategoryKind, ReminderCategory, SubReminder } from '../shared/settings'
-import { getStableDefaultCategories } from '../shared/settings'
+import type { AppSettings, CategoryKind, ReminderCategory, SubReminder, PresetPools } from '../shared/settings'
+import { getDefaultPresetPools, getStableDefaultCategories } from '../shared/settings'
 
 export type { AppSettings, ReminderCategory, SubReminder } from '../shared/settings'
 
 const defaultCategories = getStableDefaultCategories()
+const defaultPresetPools = getDefaultPresetPools()
+const legacyReminderContentDefaults = [
+  '该休息一下啦',
+  '起身活动一下',
+  '喝口水，放松肩颈',
+  '看看远处，放松眼睛',
+  '本轮结束，预备下轮',
+]
+const legacyRestContentDefaults = [
+  '休息一下，深呼吸',
+  '离开屏幕，活动颈肩',
+  '闭眼放松 30 秒',
+  '休息即将结束，准备回来',
+]
 
 /** 旧版扁平设置（仅用于迁移检测与读取） */
 interface LegacySettings {
@@ -24,6 +38,23 @@ interface LegacySettings {
   mealPresets?: string[]
   activityPresets?: string[]
   restPresets?: string[]
+}
+
+function getDefaultCategoryName(kind: CategoryKind): string {
+  return kind === 'alarm' ? '未命名闹钟类型' : kind === 'countdown' ? '未命名倒计时类型' : '未命名秒表类型'
+}
+
+function uniqStrings(input: unknown[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const v of input) {
+    if (typeof v !== 'string') continue
+    const s = v.trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
 }
 
 function hasLegacyFields(data: unknown): data is LegacySettings {
@@ -91,8 +122,9 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
     if (!c || typeof c !== 'object') return defaultCategories[0]
     const o = c as Record<string, unknown>
     const id = typeof o.id === 'string' ? o.id : `cat_${Date.now()}`
-    const name = typeof o.name === 'string' ? o.name : '未命名'
+    const rawName = typeof o.name === 'string' ? o.name : ''
     const presets = Array.isArray(o.presets) ? o.presets.filter((p): p is string => typeof p === 'string') : []
+    const titlePresets = Array.isArray(o.titlePresets) ? o.titlePresets.filter((p): p is string => typeof p === 'string') : []
     const rawItems = Array.isArray(o.items) ? (o.items as unknown[]) : []
     const items: SubReminder[] = rawItems
       .map((item): SubReminder | null => {
@@ -106,6 +138,7 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
       if (i.mode === 'fixed' && typeof (i as { time: unknown }).time === 'string') {
         const fixed = i as {
           time: string
+          title?: unknown
           splitCount?: number
           restDurationSeconds?: number
           restContent?: string
@@ -118,6 +151,8 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
         return {
           id: i.id,
           mode: 'fixed' as const,
+          ...(typeof fixed.title === 'string' && fixed.title ? { title: fixed.title } : {}),
+          ...(typeof i.enabled === 'boolean' ? { enabled: i.enabled } : { enabled: true }),
           time: fixed.time,
           content: i.content as string,
           splitCount: fixed.splitCount,
@@ -127,13 +162,15 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
         }
       }
       if (i.mode === 'interval' && typeof (i as { intervalMinutes: unknown }).intervalMinutes === 'number') {
-        const interval = i as { intervalMinutes: number; intervalHours?: number; intervalSeconds?: number; repeatCount?: number | null; splitCount?: number; restDurationSeconds?: number; restContent?: string }
+        const interval = i as { title?: unknown; intervalMinutes: number; intervalHours?: number; intervalSeconds?: number; repeatCount?: number | null; splitCount?: number; restDurationSeconds?: number; restContent?: string }
         const repeatCount = interval.repeatCount === undefined || interval.repeatCount === null
           ? null
           : Math.max(1, Math.floor(Number(interval.repeatCount)))
         return {
           id: i.id,
           mode: 'interval' as const,
+          ...(typeof interval.title === 'string' && interval.title ? { title: interval.title } : {}),
+          ...(typeof i.enabled === 'boolean' ? { enabled: i.enabled } : { enabled: true }),
           intervalHours: interval.intervalHours,
           intervalMinutes: interval.intervalMinutes,
           intervalSeconds: interval.intervalSeconds,
@@ -172,8 +209,55 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
           ? i.mode === 'interval'
           : i.mode === 'stopwatch'
     )
-    return { id, name, categoryKind, presets, items: filteredItems }
+    const name = rawName.trim() || getDefaultCategoryName(categoryKind)
+    return { id, name, categoryKind, presets, titlePresets, items: filteredItems }
   })
+}
+
+function normalizePresetPools(raw: unknown, categories: ReminderCategory[]): PresetPools {
+  const categoryPresetsLegacy = uniqStrings(categories.flatMap((c) => c.presets ?? []))
+  const restPresetsLegacy = uniqStrings(
+    categories.flatMap((c) =>
+      c.items.flatMap((i) =>
+        i.mode === 'fixed' || i.mode === 'interval'
+          ? (typeof i.restContent === 'string' && i.restContent.trim() ? [i.restContent] : [])
+          : []
+      )
+    )
+  )
+  const base = {
+    categoryTitle: { ...defaultPresetPools.categoryTitle },
+    subTitle: { ...defaultPresetPools.subTitle },
+    reminderContent: categoryPresetsLegacy.length > 0 ? categoryPresetsLegacy : [...defaultPresetPools.reminderContent],
+    restContent: restPresetsLegacy.length > 0 ? restPresetsLegacy : [...defaultPresetPools.restContent],
+  }
+  if (!raw || typeof raw !== 'object') return base
+  const o = raw as Record<string, unknown>
+  const categoryTitle = (o.categoryTitle ?? {}) as Record<string, unknown>
+  const subTitle = (o.subTitle ?? {}) as Record<string, unknown>
+  const reminderContentRaw = Array.isArray(o.reminderContent) ? uniqStrings(o.reminderContent) : base.reminderContent
+  const restContentRaw = Array.isArray(o.restContent) ? uniqStrings(o.restContent) : base.restContent
+  const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i])
+  const reminderContent = sameList(reminderContentRaw, legacyReminderContentDefaults)
+    ? [...defaultPresetPools.reminderContent]
+    : reminderContentRaw
+  const restContent = sameList(restContentRaw, legacyRestContentDefaults)
+    ? [...defaultPresetPools.restContent]
+    : restContentRaw
+  return {
+    categoryTitle: {
+      alarm: Array.isArray(categoryTitle.alarm) ? uniqStrings(categoryTitle.alarm as unknown[]) : base.categoryTitle.alarm,
+      countdown: Array.isArray(categoryTitle.countdown) ? uniqStrings(categoryTitle.countdown as unknown[]) : base.categoryTitle.countdown,
+      stopwatch: Array.isArray(categoryTitle.stopwatch) ? uniqStrings(categoryTitle.stopwatch as unknown[]) : base.categoryTitle.stopwatch,
+    },
+    subTitle: {
+      fixed: Array.isArray(subTitle.fixed) ? uniqStrings(subTitle.fixed as unknown[]) : base.subTitle.fixed,
+      interval: Array.isArray(subTitle.interval) ? uniqStrings(subTitle.interval as unknown[]) : base.subTitle.interval,
+      stopwatch: Array.isArray(subTitle.stopwatch) ? uniqStrings(subTitle.stopwatch as unknown[]) : base.subTitle.stopwatch,
+    },
+    reminderContent,
+    restContent,
+  }
 }
 
 /** 开发时写到项目根目录，便于确认；正式用 userData */
@@ -193,28 +277,33 @@ export function getSettings(): AppSettings {
   const path = getSettingsPath()
   if (!existsSync(path)) {
     if (process.env.VITE_DEV_SERVER_URL) console.log('[WorkBreak] 设置文件不存在，使用默认值。路径:', path)
-    return { reminderCategories: defaultCategories }
+    return { reminderCategories: defaultCategories, presetPools: defaultPresetPools }
   }
   try {
     const raw = readFileSync(path, 'utf-8')
     const data = JSON.parse(raw) as Record<string, unknown>
     if (hasLegacyFields(data) && (!Array.isArray(data.reminderCategories) || data.reminderCategories.length === 0)) {
       const migrated = migrateFromLegacy(data)
-      const next: AppSettings = { reminderCategories: migrated }
+      const next: AppSettings = {
+        reminderCategories: migrated,
+        presetPools: normalizePresetPools(data.presetPools, migrated),
+      }
       const dir = dirname(path)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       writeFileSync(path, JSON.stringify(next, null, 2), 'utf-8')
       if (process.env.VITE_DEV_SERVER_URL) console.log('[WorkBreak] 已迁移旧配置为新结构:', path)
       return next
     }
+    const normalizedCategories = normalizeCategories(data.reminderCategories)
     const out: AppSettings = {
-      reminderCategories: normalizeCategories(data.reminderCategories),
+      reminderCategories: normalizedCategories,
+      presetPools: normalizePresetPools(data.presetPools, normalizedCategories),
     }
     if (process.env.VITE_DEV_SERVER_URL) console.log('[WorkBreak] 已读取设置:', path)
     return out
   } catch (e) {
     if (process.env.VITE_DEV_SERVER_URL) console.warn('[WorkBreak] 读取设置失败', e)
-    return { reminderCategories: defaultCategories }
+    return { reminderCategories: defaultCategories, presetPools: defaultPresetPools }
   }
 }
 
@@ -224,6 +313,9 @@ export function setSettings(settings: Partial<AppSettings>): AppSettings {
     reminderCategories: settings.reminderCategories !== undefined
       ? normalizeCategories(settings.reminderCategories)
       : current.reminderCategories,
+    presetPools: settings.presetPools !== undefined
+      ? normalizePresetPools(settings.presetPools, settings.reminderCategories !== undefined ? normalizeCategories(settings.reminderCategories) : current.reminderCategories)
+      : current.presetPools,
   }
   const path = getSettingsPath()
   const dir = dirname(path)
