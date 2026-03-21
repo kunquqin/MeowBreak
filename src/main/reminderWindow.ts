@@ -180,6 +180,8 @@ function buildReminderHtml(options: ReminderPopupOptions): string {
 
 /** 全局唯一提醒弹窗：新提醒覆盖当前内容，不叠多个窗口 */
 let reminderPopupWindow: BrowserWindow | null = null
+let popupSeq = 0
+let popupChain: Promise<void> = Promise.resolve()
 
 function applyDisplayBounds(win: BrowserWindow) {
   const primary = screen.getPrimaryDisplay()
@@ -194,66 +196,59 @@ function presentReminderWindow(win: BrowserWindow) {
   win.setAlwaysOnTop(true, 'screen-saver')
 }
 
-/** 到点提醒：铺满当前主显示器（含任务栏区域，与任务栏重叠） */
-export function showReminderPopup(options: ReminderPopupOptions) {
-  const html = buildReminderHtml(options)
-  const fallbackHtml = buildReminderHtml({ ...options, theme: undefined })
-  const htmlPath = writePopupHtmlToTempFile('reminder-popup.html', html)
-  const fallbackPath = writePopupHtmlToTempFile('reminder-popup-fallback.html', fallbackHtml)
-
+function ensurePopupWindow(): BrowserWindow {
   if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
-    applyDisplayBounds(reminderPopupWindow)
-    void reminderPopupWindow.loadFile(htmlPath).then(() => {
-      const w = reminderPopupWindow
-      if (w && !w.isDestroyed()) presentReminderWindow(w)
-    }).catch(() => {
-      const w = reminderPopupWindow
-      if (!w || w.isDestroyed()) return
-      void w.loadFile(fallbackPath).then(() => {
-        if (!w.isDestroyed()) presentReminderWindow(w)
-      }).catch(() => {})
-    })
-    return
+    return reminderPopupWindow
   }
-
   const primary = screen.getPrimaryDisplay()
   const { x, y, width, height } = primary.bounds
-
-  reminderPopupWindow = new BrowserWindow({
-    x,
-    y,
-    width,
-    height,
+  const win = new BrowserWindow({
+    x, y, width, height,
     frame: false,
     resizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     fullscreenable: true,
     show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
   })
+  win.on('closed', () => {
+    if (reminderPopupWindow === win) reminderPopupWindow = null
+  })
+  reminderPopupWindow = win
+  return win
+}
 
-  reminderPopupWindow.on('closed', () => {
-    reminderPopupWindow = null
+function enqueuePopupLoad(htmlPath: string, fallbackPath: string) {
+  const seq = ++popupSeq
+  popupChain = popupChain.then(async () => {
+    if (seq !== popupSeq) return
+    try {
+      const win = ensurePopupWindow()
+      applyDisplayBounds(win)
+      try {
+        await win.loadFile(htmlPath)
+      } catch {
+        if (win.isDestroyed() || seq !== popupSeq) return
+        await win.loadFile(fallbackPath).catch(() => {})
+      }
+      if (!win.isDestroyed() && seq === popupSeq) presentReminderWindow(win)
+    } catch { /* window destroyed during operation — safe to ignore */ }
   })
+}
 
-  void reminderPopupWindow.loadFile(htmlPath).then(() => {
-    const w = reminderPopupWindow
-    if (w && !w.isDestroyed()) presentReminderWindow(w)
-  }).catch(() => {
-    const w = reminderPopupWindow
-    if (!w || w.isDestroyed()) return
-    void w.loadFile(fallbackPath).then(() => {
-      if (!w.isDestroyed()) presentReminderWindow(w)
-    }).catch(() => {})
-  })
+/** 到点提醒：铺满当前主显示器（含任务栏区域，与任务栏重叠） */
+export function showReminderPopup(options: ReminderPopupOptions) {
+  const html = buildReminderHtml(options)
+  const fallbackHtml = buildReminderHtml({ ...options, theme: undefined })
+  const htmlPath = writePopupHtmlToTempFile('reminder-popup.html', html)
+  const fallbackPath = writePopupHtmlToTempFile('reminder-popup-fallback.html', fallbackHtml)
+  enqueuePopupLoad(htmlPath, fallbackPath)
 }
 
 /** 若存在提醒弹窗则关闭（例如应用退出前可选调用） */
 export function closeReminderPopupIfAny() {
+  popupSeq++
   if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
     reminderPopupWindow.close()
     reminderPopupWindow = null
@@ -262,21 +257,18 @@ export function closeReminderPopupIfAny() {
 
 /* ─── 休息即将结束：倒计时弹窗 ─── */
 
-function buildRestEndCountdownHtml(countdownSec: number, content: string, timeStr: string, theme?: PopupTheme): string {
+function buildRestEndCountdownHtml(countdownSec: number, content: string, theme?: PopupTheme): string {
   const contentEsc = escapeHtml(content)
-  const timeEsc = escapeHtml(timeStr)
   const sec = Math.max(1, Math.min(countdownSec, 99))
   const textAlign = theme?.textAlign ?? 'center'
   const alignItems = textAlign === 'left' ? 'flex-start' : textAlign === 'right' ? 'flex-end' : 'center'
   const contentColor = theme?.contentColor || '#ffffff'
   const timeColor = theme?.timeColor || '#e2e8f0'
-  const countdownColor = theme?.countdownColor || '#ffffff'
   const overlayEnabled = Boolean(theme?.overlayEnabled)
   const overlayColor = theme?.overlayColor || '#000000'
   const overlayOpacity = clampOpacity(theme?.overlayOpacity, 0.4)
   const bgStyle = getBackgroundStyle(theme)
   const contentFont = Math.max(14, Math.min(120, Math.floor(theme?.contentFontSize ?? 40)))
-  const timeFont = Math.max(10, Math.min(100, Math.floor(theme?.timeFontSize ?? 24)))
   const countdownFont = Math.max(48, Math.min(280, Math.floor(theme?.countdownFontSize ?? 180)))
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -289,9 +281,8 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, timeSt
     html, body { width: 100%; height: 100%; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; overflow: hidden; ${bgStyle} }
     .overlay { position: fixed; inset: 0; background: ${overlayColor}; opacity: ${overlayEnabled ? overlayOpacity : 0}; pointer-events: none; }
     .content { position: relative; z-index: 1; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: ${alignItems}; justify-content: center; padding: min(5vw, 48px); }
-    .line1 { width: 100%; font-size: clamp(20px, 6vw, ${contentFont}px); color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; margin-bottom: clamp(16px, 3vw, 40px); font-weight: 600; max-width: 96vw; white-space: pre-wrap; }
-    .line2 { width: 100%; font-size: clamp(14px, 3vw, ${timeFont}px); color: ${timeColor}; text-align: ${textAlign}; margin-bottom: clamp(24px, 4vw, 56px); max-width: 96vw; }
-    .countdown { width: 100%; color: ${countdownColor}; font-size: clamp(80px, 20vw, ${countdownFont}px); font-weight: 700; text-align: ${textAlign}; line-height: 1; font-variant-numeric: tabular-nums; transition: transform 0.15s ease-out, opacity 0.15s ease-out; max-width: 96vw; }
+    .line1 { width: 100%; font-size: clamp(20px, 6vw, ${contentFont}px); color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; margin-bottom: clamp(24px, 4vw, 56px); font-weight: 600; max-width: 96vw; white-space: pre-wrap; }
+    .countdown { width: 100%; color: ${timeColor}; font-size: clamp(80px, 20vw, ${countdownFont}px); font-weight: 700; text-align: ${textAlign}; line-height: 1; font-variant-numeric: tabular-nums; transition: transform 0.15s ease-out, opacity 0.15s ease-out; max-width: 96vw; }
     .countdown.tick { transform: scale(1.15); opacity: 0.7; }
     .close-floating {
       position: fixed;
@@ -333,7 +324,6 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, timeSt
   <div class="overlay"></div>
   <div class="content">
     <div class="line1">${contentEsc}</div>
-    <div class="line2">${timeEsc}</div>
     <div class="countdown" id="cd">${sec}</div>
   </div>
   <button class="close-floating" id="closeBtn" aria-label="关闭弹窗">
@@ -385,60 +375,9 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, timeSt
  * 复用同一个 reminderPopupWindow 单例（覆盖当前休息提醒弹窗内容）。
  */
 export function showRestEndCountdownPopup(countdownSec: number, content: string, theme?: PopupTheme) {
-  const now = new Date()
-  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-  const html = buildRestEndCountdownHtml(countdownSec, content, timeStr, theme)
-  const fallbackHtml = buildRestEndCountdownHtml(countdownSec, content, timeStr, undefined)
+  const html = buildRestEndCountdownHtml(countdownSec, content, theme)
+  const fallbackHtml = buildRestEndCountdownHtml(countdownSec, content, undefined)
   const htmlPath = writePopupHtmlToTempFile('rest-countdown-popup.html', html)
   const fallbackPath = writePopupHtmlToTempFile('rest-countdown-popup-fallback.html', fallbackHtml)
-
-  if (reminderPopupWindow && !reminderPopupWindow.isDestroyed()) {
-    applyDisplayBounds(reminderPopupWindow)
-    void reminderPopupWindow.loadFile(htmlPath).then(() => {
-      const w = reminderPopupWindow
-      if (w && !w.isDestroyed()) presentReminderWindow(w)
-    }).catch(() => {
-      const w = reminderPopupWindow
-      if (!w || w.isDestroyed()) return
-      void w.loadFile(fallbackPath).then(() => {
-        if (!w.isDestroyed()) presentReminderWindow(w)
-      }).catch(() => {})
-    })
-    return
-  }
-
-  const primary = screen.getPrimaryDisplay()
-  const { x, y, width, height } = primary.bounds
-
-  reminderPopupWindow = new BrowserWindow({
-    x,
-    y,
-    width,
-    height,
-    frame: false,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    fullscreenable: true,
-    show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-  })
-
-  reminderPopupWindow.on('closed', () => {
-    reminderPopupWindow = null
-  })
-
-  void reminderPopupWindow.loadFile(htmlPath).then(() => {
-    const w = reminderPopupWindow
-    if (w && !w.isDestroyed()) presentReminderWindow(w)
-  }).catch(() => {
-    const w = reminderPopupWindow
-    if (!w || w.isDestroyed()) return
-    void w.loadFile(fallbackPath).then(() => {
-      if (!w.isDestroyed()) presentReminderWindow(w)
-    }).catch(() => {})
-  })
+  enqueuePopupLoad(htmlPath, fallbackPath)
 }

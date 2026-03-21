@@ -1,4 +1,4 @@
-import { getSettings } from './settings'
+import { getSettings, setSettings } from './settings'
 import type { ReminderCategory, SubReminder } from './settings'
 import type { ResetIntervalPayload, PopupTheme } from '../shared/settings'
 import { showReminderPopup, showRestEndCountdownPopup } from './reminderWindow'
@@ -7,6 +7,20 @@ import { buildSplitSchedule } from '../shared/splitSchedule'
 const REMINDER_LOG = true
 function reminderLog(...args: unknown[]) {
   if (REMINDER_LOG) console.log('[WorkBreak][Reminder]', ...args)
+}
+
+function autoDisableByKey(key: string) {
+  const s = getSettings()
+  for (const cat of s.reminderCategories) {
+    for (const item of cat.items) {
+      if (`${cat.id}_${item.id}` === key && item.mode !== 'stopwatch' && item.enabled !== false) {
+        item.enabled = false
+        setSettings({ reminderCategories: s.reminderCategories })
+        reminderLog('自动关闭已结束子项', { key })
+        return
+      }
+    }
+  }
 }
 
 let fixedMinuteTimeout: ReturnType<typeof setTimeout> | null = null
@@ -72,6 +86,8 @@ const fixedRestBreakState = new Map<
 const fixedRestBreakTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 /** fixed 休息结束倒计时的 setTimeout 句柄 */
 const fixedRestEndCountdownTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+/** 新建/重置时记录精确毫秒起点，用于进度条消除秒级偏差 */
+const fixedPreciseStartAt = new Map<string, number>()
 
 function resolvePopupThemeById(themeId: string | undefined, target: 'main' | 'rest'): PopupTheme | undefined {
   const s = getSettings()
@@ -373,13 +389,14 @@ function runFixedTimeCheck() {
 
       const endDate = new Date(context.windowEndAt)
       if (!isSameMinute(now, endDate.getHours(), endDate.getMinutes())) continue
-      if (context.state !== 'running') continue
+      if (context.state === 'ended') continue
       if (context.singleShot) {
         const signature = getFixedSingleShotSignature(startTime, endTime, item.weekdaysEnabled)
         const st = fixedSingleShotState.get(key)
         if (st?.signature === signature && st.fired) continue
         fixedSingleShotState.set(key, { signature, fired: true, stoppedAtMs: nowMs })
         reminderLog('固定时间（单次）整分触发', { key, startTime, endTime, cat: cat.name })
+        autoDisableByKey(key)
       } else {
         reminderLog('固定时间整分触发', { key, startTime, endTime, cat: cat.name })
       }
@@ -496,6 +513,7 @@ function scheduleNextPhase(key: string) {
       intervalState.delete(key)
       const i = intervalTimerKeys.indexOf(key)
       if (i >= 0) intervalTimerKeys.splice(i, 1)
+      autoDisableByKey(key)
       return
     }
     const firstWorkMs = getWorkDurationMs(st, 0)
@@ -898,6 +916,7 @@ export function setFixedTimeCountdownOverride(key: string, _time: string): void 
   fixedSingleShotState.delete(key)
   fixedRestBreakState.delete(key)
   clearFixedRestTimersByKey(key)
+  fixedPreciseStartAt.set(key, Date.now())
   runFixedTimeCheck()
 }
 
@@ -905,6 +924,7 @@ export function setFixedTimeCountdownOverride(key: string, _time: string): void 
 export function clearFixedTimeCountdownOverrides(): void {
   fixedSingleShotState.clear()
   fixedRestBreakState.clear()
+  fixedPreciseStartAt.clear()
   for (const t of fixedRestBreakTimeouts.values()) clearTimeout(t)
   fixedRestBreakTimeouts.clear()
   for (const t of fixedRestEndCountdownTimeouts.values()) clearTimeout(t)
@@ -951,37 +971,64 @@ export function getReminderCountdowns(): CountdownItem[] {
         const endTime = isValidTimeHHmm(item.time) ? item.time : '00:00'
         const startTime = isValidTimeHHmm(item.startTime) ? item.startTime : endTime
         const durationMs = getWindowDurationMs(startTime, endTime)
-        if (item.enabled === false) {
-          result.push({
-            key,
-            type: 'fixed',
-            nextAt: now,
-            remainingMs: 0,
-            ended: true,
-            fixedState: 'ended',
-            time: endTime,
-            startTime,
-            windowStartAt: now,
-            windowEndAt: now,
-          })
-          continue
-        }
-        if (durationMs <= 0) {
-          result.push({
-            key,
-            type: 'fixed',
-            nextAt: now,
-            remainingMs: 0,
-            ended: true,
-            fixedState: 'ended',
-            time: endTime,
-            startTime,
-            windowStartAt: now,
-            windowEndAt: now,
-          })
+        if (item.enabled === false || durationMs <= 0) {
+          const hasWeekly = Array.isArray(item.weekdaysEnabled) && item.weekdaysEnabled.some(Boolean)
+          if (item.useNowAsStart === true && item.enabled === false) {
+            const e = parseTimeHHmm(endTime)
+            const base = new Date(now)
+            base.setHours(e.h, e.m, 0, 0)
+            let we = base.getTime()
+            if (we <= now) we += 24 * 3600 * 1000
+            result.push({
+              key,
+              type: 'fixed',
+              nextAt: now,
+              remainingMs: 0,
+              ended: true,
+              fixedState: 'ended',
+              time: endTime,
+              startTime,
+              windowStartAt: now,
+              windowEndAt: we,
+              useNowAsStart: true,
+              hasWeeklyRepeat: hasWeekly,
+            })
+          } else {
+            const s = parseTimeHHmm(startTime)
+            const e = parseTimeHHmm(endTime)
+            const base = new Date(now)
+            base.setHours(s.h, s.m, 0, 0)
+            let ws = base.getTime()
+            base.setHours(e.h, e.m, 0, 0)
+            let we = base.getTime()
+            if (we <= ws) we += 24 * 3600 * 1000
+            if (we <= now) { ws += 24 * 3600 * 1000; we += 24 * 3600 * 1000 }
+            result.push({
+              key,
+              type: 'fixed',
+              nextAt: now,
+              remainingMs: 0,
+              ended: true,
+              fixedState: 'ended',
+              time: endTime,
+              startTime,
+              windowStartAt: ws,
+              windowEndAt: we,
+              useNowAsStart: false,
+              hasWeeklyRepeat: hasWeekly,
+            })
+          }
           continue
         }
         const context = getFixedWindowContext(key, startTime, endTime, item.weekdaysEnabled, now)
+        let effectiveWindowStart = context.windowStartAt
+        const preciseStart = fixedPreciseStartAt.get(key)
+        if (preciseStart && context.state === 'running' && preciseStart >= context.windowStartAt && preciseStart <= context.windowEndAt) {
+          effectiveWindowStart = preciseStart
+        } else if (preciseStart && context.state !== 'running') {
+          fixedPreciseStartAt.delete(key)
+        }
+        const hasWeeklyRepeat = Array.isArray(item.weekdaysEnabled) && item.weekdaysEnabled.some(Boolean)
         const base: CountdownItem = {
           key,
           type: 'fixed',
@@ -991,9 +1038,11 @@ export function getReminderCountdowns(): CountdownItem[] {
           fixedState: context.state,
           time: endTime,
           startTime,
-          windowStartAt: context.windowStartAt,
+          windowStartAt: effectiveWindowStart,
           windowEndAt: context.windowEndAt,
-          cycleStartAt: context.windowStartAt,
+          cycleStartAt: effectiveWindowStart,
+          useNowAsStart: item.useNowAsStart === true,
+          hasWeeklyRepeat,
         }
         result.push(base)
       } else if (item.mode === 'interval') {

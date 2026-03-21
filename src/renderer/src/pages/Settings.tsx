@@ -100,6 +100,17 @@ function formatTimeHHmm(ts: number | Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function formatTimeWithDay(ts: number | undefined, fallbackHHmm: string | undefined, label: '开始' | '结束'): string {
+  if (ts != null) {
+    const d = new Date(ts)
+    const now = new Date()
+    const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    const isTomorrow = d.getDate() !== now.getDate() || d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()
+    return isTomorrow ? `明天${label} ${hhmm}` : `${label} ${hhmm}`
+  }
+  return fallbackHHmm ? `${label} ${fallbackHHmm}` : `${label} —`
+}
+
 /** 间隔项显示为 H:MM:SS */
 function formatIntervalHms(item: SubReminder & { mode: 'interval' }): string {
   const h = item.intervalHours ?? 0
@@ -127,7 +138,7 @@ function getSubReminderLargeTimeMain(item: SubReminder, cd: CountdownItem | unde
     const startLabel = item.startTime ?? item.time
     if (item.enabled === false) return item.time
     if (!cd) return startLabel
-    if (cd.fixedState === 'pending') return formatTimeHHmm(cd.windowStartAt ?? cd.nextAt)
+    if (cd.fixedState === 'pending') return item.time
     if (cd.ended) return item.time
     return formatTimeHHmm(cd.nextAt)
   }
@@ -980,7 +991,7 @@ function SubReminderRow({
     >
       {isTimeSettingsExpanded ? (
         <div className="flex w-full min-w-0 flex-col gap-2">
-          <div className="flex flex-nowrap items-center justify-center gap-4">
+          <div className="flex flex-nowrap items-center justify-end gap-4">
             <button type="button" onClick={() => removeItem(categoryIndex, itemIndex)} className="text-red-600 hover:text-red-700 text-sm shrink-0">
               删除
             </button>
@@ -1080,7 +1091,7 @@ function SubReminderRow({
             }}
           />
         )}
-        {(item.mode === 'interval' || item.mode === 'fixed') && (
+        {(item.mode === 'interval' || (item.mode === 'fixed' && item.useNowAsStart === true)) && (
           <button
             type="button"
             disabled={!isEnabled}
@@ -1217,18 +1228,27 @@ function SubReminderRow({
       )}
       {cd && (
         <div className="flex min-w-0 w-full flex-col gap-1">
-          {/* 进度条上一行：左起始、右结束，均为普通文字（不进入编辑） */}
+          {/* 进度条上一行：左开始、右结束，均为普通文字（不进入编辑） */}
           {(() => {
-            const startTimeLabel = cd.type === 'fixed'
-              ? (cd.windowStartAt != null ? formatTimeHHmm(cd.windowStartAt) : (cd.startTime ?? cd.time ?? '—'))
-              : (cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? formatTimeHHmm(cd.nextAt - cd.cycleTotalMs) : '—')
-            const endTimeLabel = cd.type === 'fixed'
-              ? (cd.windowEndAt != null ? formatTimeHHmm(cd.windowEndAt) : (cd.time ?? formatTimeHHmm(cd.nextAt)))
-              : formatTimeHHmm(cd.nextAt)
+            let startTs: number | undefined
+            let startFallback: string | undefined
+            let endTs: number | undefined
+            let endFallback: string | undefined
+            if (cd.type === 'fixed') {
+              startTs = cd.windowStartAt
+              startFallback = cd.startTime ?? cd.time ?? '—'
+              endTs = cd.windowEndAt
+              endFallback = cd.time
+            } else {
+              startTs = cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? cd.nextAt - cd.cycleTotalMs : undefined
+              startFallback = '—'
+              endTs = cd.nextAt
+              endFallback = undefined
+            }
             return (
               <div className="flex w-full items-center justify-between gap-2">
-                <span className="shrink-0 text-sm text-slate-500 tabular-nums">起始 {startTimeLabel}</span>
-                <span className="shrink-0 text-sm text-slate-500 tabular-nums">结束 {endTimeLabel}</span>
+                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{formatTimeWithDay(startTs, startFallback, '开始')}</span>
+                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{formatTimeWithDay(endTs, endFallback, '结束')}</span>
               </div>
             )
           })()}
@@ -1279,8 +1299,8 @@ function SubReminderRow({
                   else if (elapsedInCycle <= start) elapsedInSeg = 0
                   else elapsedInSeg = elapsedInCycle - start
                   const ratio = seg.durationMs > 0 ? elapsedInSeg / seg.durationMs : 0
-                  const fillClass = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
-                  const pendingFillClass = cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : fillClass
+                  const segColor = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
+                  const pendingFillClass = cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : segColor
                   return (
                     <SplitSegmentProgressBar
                       key={i}
@@ -1288,6 +1308,7 @@ function SubReminderRow({
                       elapsedRatio={ratio}
                       fillClass={pendingFillClass}
                       showLabel={!(isFixedSingleEnded && seg.type === 'work')}
+                      hoverFillClass={isInactive ? segColor : undefined}
                     />
                   )
                 })
@@ -1297,6 +1318,7 @@ function SubReminderRow({
                   totalDurationMs={totalSpanMs}
                   remainingRatio={progressRatio}
                   fillClass={cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : 'bg-green-500'}
+                  hoverFillClass={isInactive ? 'bg-green-500' : undefined}
                 />
               )
             })()}
@@ -1304,6 +1326,14 @@ function SubReminderRow({
           {/* 进度条下方：沙漏与倒计时随锚点移动，左右夹紧在进度条宽度内，避免与时间列重叠 */}
           {(() => {
             if (isInactive) {
+              if (cd.ended) {
+                return (
+                  <ClampedProgressFloater
+                    anchorPercent={0}
+                    label="待启动"
+                  />
+                )
+              }
               return (
                 <ClampedProgressFloater
                   anchorPercent={100}
@@ -1738,7 +1768,12 @@ export function Settings() {
       if (!d) return null
       const c = cats.find((x) => x.id === d.categoryId)
       if (!c) return null
-      if (f !== 'all' && c.categoryKind !== f) return null
+      if (f !== 'all' && c.categoryKind !== f) {
+        if (c.items.length === 0) {
+          setCategories(cats.filter((x) => x.id !== d.categoryId))
+        }
+        return null
+      }
       return d
     })
     setExpandedEditSub((e) => {
@@ -1864,7 +1899,30 @@ export function Settings() {
   useEffect(() => {
     const api = getApi()
     if (!api?.getReminderCountdowns) return
-    const tick = () => api.getReminderCountdowns().then(setCountdowns).catch(() => setCountdowns([]))
+    const tick = () => api.getReminderCountdowns().then((cds) => {
+      setCountdowns(cds)
+      const cats = reminderCategoriesRef.current
+      let needSync = false
+      for (const cd of cds) {
+        if (!cd.ended) continue
+        for (const cat of cats) {
+          for (const item of cat.items) {
+            if (`${cat.id}_${item.id}` === cd.key && item.mode !== 'stopwatch' && item.enabled !== false) {
+              needSync = true
+              break
+            }
+          }
+          if (needSync) break
+        }
+        if (needSync) break
+      }
+      if (needSync) {
+        api.getSettings?.().then((data: AppSettings) => {
+          suppressAutoSaveAfterHydrateRef.current = true
+          setSettingsState(data)
+        }).catch(() => {})
+      }
+    }).catch(() => setCountdowns([]))
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
@@ -1900,11 +1958,16 @@ export function Settings() {
       if (ci !== categoryIndex) return c
       return {
         ...c,
-        items: c.items.map((it, ii) => (
-          ii === itemIndex && (it.mode === 'fixed' || it.mode === 'interval')
-            ? ({ ...it, enabled } as SubReminder)
-            : it
-        )),
+        items: c.items.map((it, ii) => {
+          if (ii !== itemIndex || (it.mode !== 'fixed' && it.mode !== 'interval')) return it
+          if (enabled && it.mode === 'fixed' && it.useNowAsStart === true) {
+            const now = new Date()
+            const hh = String(now.getHours()).padStart(2, '0')
+            const mm = String(now.getMinutes()).padStart(2, '0')
+            return { ...it, enabled, startTime: `${hh}:${mm}` } as SubReminder
+          }
+          return { ...it, enabled } as SubReminder
+        }),
       }
     })
     if (!api?.setSettings) {
@@ -1952,6 +2015,13 @@ export function Settings() {
   }
 
   const addCategoryOfKind = (kind: CategoryKind) => {
+    let cats = settings.reminderCategories
+    if (inlineAddDraft) {
+      const abandoned = cats.find((c) => c.id === inlineAddDraft.categoryId)
+      if (abandoned && abandoned.items.length === 0) {
+        cats = cats.filter((c) => c.id !== inlineAddDraft.categoryId)
+      }
+    }
     const newId = genId()
     const newCat: ReminderCategory = {
       id: newId,
@@ -1959,10 +2029,9 @@ export function Settings() {
       categoryKind: kind,
       presets: [],
       titlePresets: [],
-      /** 秒表与闹钟类似：新建大类后立刻有一条可用子项，无需再点「+ 添加秒表」 */
       items: kind === 'stopwatch' ? [{ id: genId(), mode: 'stopwatch', content: getDefaultSubTitle('stopwatch') }] : [],
     }
-    setCategories([newCat, ...settings.reminderCategories])
+    setCategories([newCat, ...cats])
     setPresetModal((pm) => (pm ? { ...pm, categoryIndex: pm.categoryIndex + 1 } : null))
     setRepeatDropdown((rd) => (rd ? { ...rd, categoryIndex: rd.categoryIndex + 1 } : null))
     setExpandedEditSub(null)
@@ -2096,6 +2165,7 @@ export function Settings() {
             splitCount: payload.splitCount,
             restDurationSeconds: payload.restDurationSeconds,
             restContent: payload.restContent,
+            useNowAsStart: payload.useNowAsStart === true,
           }
         : {
             id: genId(),
@@ -2194,6 +2264,7 @@ export function Settings() {
             ? { restPopupThemeId: payload.restPopupThemeId || (existing.mode === 'fixed' ? existing.restPopupThemeId : undefined) }
             : {}),
           ...(nextWd !== undefined ? { weekdaysEnabled: nextWd } : {}),
+          useNowAsStart: payload.useNowAsStart === true,
         }
         updated =
           splitN <= 1
@@ -2274,7 +2345,11 @@ export function Settings() {
     next[categoryIndex] = { ...next[categoryIndex], items }
     setCategories(next)
     setRepeatDropdown(null)
-    setExpandedEditSub(null)
+    setExpandedEditSub((prev) => {
+      if (!prev) return null
+      if (items.some((it) => it.id === prev.itemId)) return prev
+      return null
+    })
   }
 
   const setPresetPools = (next: PresetPools) => {
@@ -2651,6 +2726,12 @@ export function Settings() {
                 onOpenInlineAdd={(ci) => {
                   const c = settings.reminderCategories[ci]
                   if (!c || c.categoryKind === 'stopwatch') return
+                  if (inlineAddDraft && inlineAddDraft.categoryId !== c.id) {
+                    const abandoned = settings.reminderCategories.find((x) => x.id === inlineAddDraft.categoryId)
+                    if (abandoned && abandoned.items.length === 0) {
+                      setCategories(settings.reminderCategories.filter((x) => x.id !== inlineAddDraft.categoryId))
+                    }
+                  }
                   setExpandedEditSub(null)
                   setInlineAddDraft({
                     categoryId: c.id,
@@ -2845,7 +2926,7 @@ export function Settings() {
                                 width: '100%',
                               }}
                             >
-                              12:34
+                              12:00
                             </div>
                           </>
                         ) : (
@@ -2872,11 +2953,11 @@ export function Settings() {
                                 width: '100%',
                               }}
                             >
-                              12:34
+                              12:00
                             </div>
                             <div
                               style={{
-                                color: theme.countdownColor,
+                                color: theme.timeColor,
                                 fontSize: `${toPreviewPx(restCountdownFontPx)}px`,
                                 lineHeight: 1,
                                 fontWeight: 700,
@@ -2946,17 +3027,7 @@ export function Settings() {
                           className="h-8 w-full rounded border border-slate-300 bg-white"
                         />
                       </label>
-                      {theme.target === 'rest' && (
-                        <label className="text-xs text-slate-600 space-y-1">
-                          <span>倒计时颜色</span>
-                          <input
-                            type="color"
-                            value={theme.countdownColor}
-                            onChange={(e) => updatePopupTheme(theme.id, { countdownColor: e.target.value })}
-                            className="h-8 w-full rounded border border-slate-300 bg-white"
-                          />
-                        </label>
-                      )}
+                      
                     </div>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                       <label className="text-xs text-slate-600 space-y-1">
@@ -3177,7 +3248,7 @@ export function Settings() {
               type="button"
               onClick={() => setShowResetConfirm(true)}
               className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
-              title="将所有提醒的起始点与进度更新为当前时刻"
+              title="将所有提醒的开始点与进度更新为当前时刻"
             >
               全部重置
             </button>

@@ -69,6 +69,8 @@ export type SubReminder =
       mainPopupThemeId?: string
       /** 休息弹窗主题 id（拆分>1时生效） */
       restPopupThemeId?: string
+      /** 新建时"当前时间"开关状态：true=起始时间跟随当前时间 */
+      useNowAsStart?: boolean
     } & SplitRestOptions)
   | ({ id: string; mode: 'interval'; title?: string; enabled?: boolean; intervalHours?: number; intervalMinutes: number; intervalSeconds?: number; content: string; repeatCount: number | null; mainPopupThemeId?: string; restPopupThemeId?: string } & SplitRestOptions)
   | { id: string; mode: 'stopwatch'; content?: string }
@@ -160,6 +162,10 @@ export interface CountdownItem {
   workRemainingMs?: number
   /** 本周期起始时间戳；固定时间在「重置」后由主进程设为当前时刻，用于进度条/沙漏从新起点计算 */
   cycleStartAt?: number
+  /** 是否为"当前时间"启动模式 */
+  useNowAsStart?: boolean
+  /** 是否有每周重复（非单次） */
+  hasWeeklyRepeat?: boolean
 }
 
 function genId(): string {

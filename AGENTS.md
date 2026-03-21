@@ -73,6 +73,7 @@
 │   │   ├── index.ts          # 入口：窗口、托盘、IPC、单实例锁
 │   │   ├── settings.ts       # 设置读写与持久化
 │   │   ├── reminders.ts      # 可配置提醒的定时与弹窗触发
+│   │   ├── reminderWindow.ts # 弹窗窗口创建、主题渲染、临时 HTML 生成
 │   │   └── tray.ts           # 托盘图标与菜单
 │   ├── preload/              # 预加载脚本（主进程与渲染进程桥接）
 │   │   ├── index.ts          # 源码（Vite 可构建，当前未用于加载）
@@ -172,14 +173,31 @@
 
 - **全部重置需二次确认**：`Settings` 页「全部重置」为谨慎操作，必须先弹确认框；仅在用户点击「确认重置」后才调用 `resetAllReminderProgress()`。
 
-### 4.11 弹窗主题（壁纸）规划约定
+### 4.11 弹窗主题（壁纸）约定
 
 - **架构分层**：采用“双层架构”——**系统设置**承载完整主题编辑（背景/遮罩/文字/排版/预设/批量应用），**新建/编辑子项弹窗**仅提供轻量入口（选择主题 + 小预览 + 跳转主题工坊）。
-- **数据模型**：主题应作为独立实体管理（建议 `popupThemes`），子项仅绑定主题 id（如 `mainPopupThemeId`、`restPopupThemeId`）；避免将完整样式字段冗余写入每条子项。
+- **数据模型**：主题为独立实体 `popupThemes: PopupTheme[]`（`shared/settings.ts`），子项仅绑定主题 id（`mainPopupThemeId`、`restPopupThemeId`）；避免将完整样式字段冗余写入每条子项。
 - **目标区分**：主弹窗与休息弹窗主题分开管理；休息弹窗入口仅在拆分 `splitCount > 1` 时显示。
-- **会员预留**：主题能力须预留 free/pro 门控（如渐变遮罩、文件夹壁纸、文字高级排版），先设计能力开关再逐步接入商业化。
+- **会员预留**：`AppEntitlements.popupThemeLevel` 区分 `'free' | 'pro'`；门控能力如渐变遮罩、文件夹壁纸、文字高级排版，先设计开关再接商业化。
+- **批量应用**：以子项 `id` 为唯一标识构建候选列表，支持"全部符合条件/自定义选择"两种模式，至少选一条。
 
-### 4.12 进度沉淀规范（强制执行）
+### 4.12 弹窗渲染约定（reminderWindow.ts）
+
+- **临时 HTML 文件加载**：弹窗 HTML 写入 `os.tmpdir()` 下的临时 `.html` 文件，用 `BrowserWindow.loadFile()` 加载。**不要**用 `loadURL('data:text/html,...')`——大图片 base64 内嵌会超出 Chromium URL 长度限制，导致弹窗白屏。
+- **出错回退**：`loadFile` 失败时自动回退到无主题（纯黑背景）的临时 HTML，确保弹窗始终弹出。
+- **弹窗内容精简**：主弹窗仅显示"提醒内容 + 时间"；休息弹窗仅显示"休息提醒 + 时间 + 倒计时"。不显示分类名、标题等冗余信息。
+- **关闭按钮**：右上角黑色圆底白色 SVG 细线 X（`stroke-width` 控制粗细），鼠标移动时显示、静止 2 秒后隐藏；支持 `Esc` 键关闭。**不要**用"知道了"大按钮。
+- **文字尺寸**：使用显式像素值（如 `${contentFont}px`），不使用 CSS `clamp()`，保证渲染确定性与预览一致性。
+- **文字对齐**：`textAlign` 需同时映射到容器的 `align-items`（`left→flex-start`、`center→center`、`right→flex-end`），确保多行文字块对齐方向一致。
+
+### 4.13 弹窗主题预览（Settings.tsx 预览区）
+
+- **1:1 缩放映射**：预览区必须与实际全屏弹窗保持视觉一致。获取 `primaryDisplaySize`（屏幕实际宽高）→ 用 `clampByViewport` 计算真实像素值 → 用 `toPreviewPx`（预览容器宽度 / 屏幕宽度比）缩放到预览尺寸。
+- **图片预览**：渲染进程无法直接访问 `file://` 协议（Vite 开发服务器为 `http://`），须通过 IPC `resolvePreviewImageUrl` 让主进程读取本地图片并返回 `data:image/` base64 URL。缓存在 `previewImageUrlMap` 避免重复读取。
+- **预览不显示关闭按钮**：预览区是只读展示，关闭按钮无实际意义，不渲染。
+- **参数分页**：每张主题卡有独立的分页状态（全部/文字/遮罩/背景），存储在 `themeSettingsPanelFilterMap: Record<themeId, FilterType>` 中，切换一张不影响其他。
+
+### 4.14 进度沉淀规范（强制执行）
 
 - **每完成一个功能点，必须更新进度文档**：至少同步 `docs/SESSION_HANDOVER.md` 的“本轮改动/决策/下一步”。
 - **复杂功能须有专项方案文档**：如弹窗主题，使用单独文档（如 `docs/POPUP_THEME_PLAN.md`）维护范围、状态、决策和待办。

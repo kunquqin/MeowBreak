@@ -1,4 +1,4 @@
-import { useState, useEffect, type CSSProperties } from 'react'
+import { useState, useEffect, useRef, type CSSProperties } from 'react'
 import type { PopupTheme, SubReminder } from '../types'
 import { WheelColumn, parseTimeHHmm, formatHHmm, WHEEL_VIEW_H } from './TimePickerModal'
 import { StaticSplitPreviewSegment, StaticSinglePreviewBar } from './SegmentProgressBars'
@@ -8,6 +8,10 @@ import { ALL_WEEKDAYS_ENABLED } from '../utils/weekdayRepeatUtils'
 import { RepeatCountPicker } from './RepeatCountPicker'
 import { toPreviewImageUrl } from '../utils/popupThemePreview'
 import { buildSplitSchedule } from '../../../shared/splitSchedule'
+
+function clampByViewport(minPx: number, viewportRatio: number, maxPx: number, viewportWidth: number): number {
+  return Math.max(minPx, Math.min(maxPx, viewportWidth * viewportRatio))
+}
 
 function hmsToSeconds(h: number, m: number, s: number): number {
   return Math.max(0, h * 3600 + m * 60 + s)
@@ -56,6 +60,15 @@ function getFixedWindowDurationMs(startH: number, startM: number, endH: number, 
   return delta * 60 * 1000
 }
 
+/** nowMs 到 endH:endM 的精确毫秒差（处理跨天） */
+function getMsFromNowToEnd(nowMs: number, endH: number, endM: number): number {
+  const d = new Date(nowMs)
+  const endToday = new Date(d.getFullYear(), d.getMonth(), d.getDate(), endH, endM, 0, 0).getTime()
+  const diff = endToday - nowMs
+  if (diff > 0) return diff
+  return diff + 24 * 60 * 60 * 1000
+}
+
 export type AddSubReminderPayload = {
   mode: 'fixed' | 'interval'
   title?: string
@@ -73,6 +86,7 @@ export type AddSubReminderPayload = {
   splitCount?: number
   restDurationSeconds?: number
   restContent?: string
+  useNowAsStart?: boolean
 }
 
 export type AddSubReminderModalProps = {
@@ -102,6 +116,23 @@ export type AddSubReminderModalProps = {
   onOpenThemeStudio?: () => void
 }
 
+/** 根据总时长和拆分数计算默认每段休息秒数（总休息 ≈ 总时长的 1/6）。
+ *  总时长 ≥ 6 分钟时向上取整到分钟，clamp [60s, 1800s]；
+ *  总时长 < 6 分钟时保留秒级精度，clamp [1s, totalSec/splitCount]。 */
+function calcDefaultRestSeconds(totalMs: number, splitCount: number): number {
+  if (totalMs <= 0 || splitCount <= 1) return 0
+  const slots = splitCount - 1
+  const perSlotMs = totalMs / 6 / slots
+  const totalSec = totalMs / 1000
+  if (totalSec >= 360) {
+    const perSlotSec = Math.ceil(perSlotMs / 1000 / 60) * 60
+    return Math.max(60, Math.min(1800, perSlotSec))
+  }
+  const perSlotSec = Math.max(1, Math.round(perSlotMs / 1000))
+  const maxPerSlot = Math.floor(totalSec / (splitCount + slots)) 
+  return Math.max(1, Math.min(perSlotSec, maxPerSlot))
+}
+
 export function AddSubReminderModal({
   open,
   mode,
@@ -129,6 +160,7 @@ export function AddSubReminderModal({
   const [startMPreview, setStartMPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).startM)
   const [endHPreview, setEndHPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endH)
   const [endMPreview, setEndMPreview] = useState(() => getInitialFixedRangeHM(variant, mode, sourceItem).endM)
+  const [useNowAsStart, setUseNowAsStart] = useState(variant !== 'edit')
 
   const [intervalHours, setIntervalHours] = useState(0)
   const [intervalMinutes, setIntervalMinutes] = useState(30)
@@ -151,16 +183,24 @@ export function AddSubReminderModal({
   const restThemeOptions = popupThemes.filter((t) => t.target === 'rest')
   const defaultMainThemeId = mainThemeOptions[0]?.id ?? ''
   const defaultRestThemeId = restThemeOptions[0]?.id ?? ''
+  const restManuallySet = useRef(false)
+  const restZeroTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [highlightPopupType, setHighlightPopupType] = useState<'rest' | 'main' | null>(null)
   const [previewImageUrlMap, setPreviewImageUrlMap] = useState<Record<string, string>>({})
+  const [primaryDisplaySize, setPrimaryDisplaySize] = useState<{ width: number; height: number } | null>(null)
+  const [previewContainerWidth, setPreviewContainerWidth] = useState(0)
+  const previewMeasureRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) return
     if (variant === 'edit' && sourceItem) {
       if (sourceItem.mode === 'stopwatch') return
+      setUseNowAsStart(sourceItem.mode === 'fixed' && sourceItem.useNowAsStart === true)
       setTitle((sourceItem.title ?? '').trim() || getDefaultTitle(sourceItem.mode))
       setContent(sourceItem.content)
       setSplitCount(sourceItem.splitCount ?? 1)
       const rsec = sourceItem.restDurationSeconds ?? 0
+      restManuallySet.current = rsec > 0
       const rh = Math.floor(rsec / 3600)
       const rm = Math.floor((rsec % 3600) / 60)
       const rs = rsec % 60
@@ -215,10 +255,13 @@ export function AddSubReminderModal({
       setIntervalSeconds(0)
       setRepeatCount(1)
     }
+    setUseNowAsStart(true)
     setTitle(getDefaultTitle(mode))
     setContent('')
     setWeekdaysEnabled(Array(7).fill(false))
     setSplitCount(1)
+    restManuallySet.current = false
+    if (restZeroTimer.current) { clearTimeout(restZeroTimer.current); restZeroTimer.current = null }
     setRestH(0)
     setRestM(0)
     setRestS(0)
@@ -238,6 +281,44 @@ export function AddSubReminderModal({
       setRestPopupThemeId(defaultRestThemeId)
     }
   }, [open, mainPopupThemeId, restPopupThemeId, mainThemeOptions, restThemeOptions, defaultMainThemeId, defaultRestThemeId])
+
+  useEffect(() => {
+    if (!open) return
+    window.electronAPI?.getPrimaryDisplaySize?.().then(setPrimaryDisplaySize).catch(() => setPrimaryDisplaySize(null))
+  }, [open])
+
+  useEffect(() => {
+    const el = previewMeasureRef.current
+    if (!el) return
+    const obs = new ResizeObserver((entries) => {
+      for (const entry of entries) setPreviewContainerWidth(entry.contentRect.width)
+    })
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [open])
+
+  const [nowMs, setNowMs] = useState(Date.now)
+  useEffect(() => {
+    if (!open) return
+    let prevMin = -1
+    const tick = () => {
+      setNowMs(Date.now())
+      if (mode === 'fixed' && useNowAsStart) {
+        const now = getLocalHoursMinutes()
+        const curMin = now.h * 60 + now.m
+        if (curMin !== prevMin) {
+          prevMin = curMin
+          setStartH(now.h)
+          setStartM(now.m)
+          setStartHPreview(now.h)
+          setStartMPreview(now.m)
+        }
+      }
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [open, mode, useNowAsStart])
 
   useEffect(() => {
     if (!open) return
@@ -285,11 +366,31 @@ export function AddSubReminderModal({
   const fixedWindowMs = getFixedWindowDurationMs(startHPreview, startMPreview, endHPreview, endMPreview)
   const totalSpanMs =
     mode === 'fixed'
-      ? fixedWindowMs
+      ? (useNowAsStart ? getMsFromNowToEnd(nowMs, endHPreview, endMPreview) : fixedWindowMs)
       : intervalTotalMs
   const restSec = hmsToSeconds(restH, restM, restS)
   const restMs = splitN > 1 ? restSec * 1000 : 0
   const splitPlan = buildSplitSchedule(totalSpanMs, splitN, restMs)
+
+  const mainPreviewTimeStr = (() => {
+    if (mode === 'fixed') return formatHHmm(endHPreview, endMPreview)
+    const endDate = new Date(nowMs + intervalTotalMs)
+    return formatHHmm(endDate.getHours(), endDate.getMinutes())
+  })()
+
+  const restPreviewTimeStr = (() => {
+    if (splitN <= 1 || splitPlan.segments.length === 0) return '12:00'
+    const firstWorkMs = splitPlan.segments[0]?.durationMs ?? 0
+    if (mode === 'fixed') {
+      const baseMs = useNowAsStart
+        ? nowMs
+        : new Date(new Date().setHours(startHPreview, startMPreview, 0, 0)).getTime()
+      const t = new Date(baseMs + firstWorkMs)
+      return formatHHmm(t.getHours(), t.getMinutes())
+    }
+    const t = new Date(nowMs + firstWorkMs)
+    return formatHHmm(t.getHours(), t.getMinutes())
+  })()
 
   useEffect(() => {
     if (!open) return
@@ -298,7 +399,7 @@ export function AddSubReminderModal({
       return
     }
     const sameMinute = startHPreview === endHPreview && startMPreview === endMPreview
-    setFixedRangeErr(sameMinute ? '起始时间与结束时间不能相同。' : null)
+    setFixedRangeErr(sameMinute ? '开始时间与结束时间不能相同。' : null)
   }, [open, mode, startHPreview, startMPreview, endHPreview, endMPreview])
 
   useEffect(() => {
@@ -335,31 +436,23 @@ export function AddSubReminderModal({
   }
 
   const handleRestChange = (rh: number, rm: number, rs: number) => {
+    restManuallySet.current = true
     setRestH(rh)
     setRestM(rm)
     setRestS(rs)
     applyRest(rh, rm, rs)
-  }
-
-  const resetStartToNow = () => {
-    const now = getLocalHoursMinutes()
-    let nextEnd = { h: endHPreview, m: endMPreview }
-    if (now.h === nextEnd.h && now.m === nextEnd.m) {
-      nextEnd = addMinutes(now.h, now.m, 1)
+    if (restZeroTimer.current) clearTimeout(restZeroTimer.current)
+    if (rh === 0 && rm === 0 && rs === 0) {
+      restZeroTimer.current = setTimeout(() => {
+        setSplitCount(1)
+        restManuallySet.current = false
+      }, 400)
     }
-    setStartH(now.h)
-    setStartM(now.m)
-    setStartHPreview(now.h)
-    setStartMPreview(now.m)
-    setEndH(nextEnd.h)
-    setEndM(nextEnd.m)
-    setEndHPreview(nextEnd.h)
-    setEndMPreview(nextEnd.m)
   }
 
-  const resetEndToNowPlusOneMinute = () => {
+  const resetEndToNowPlusOneHour = () => {
     const now = getLocalHoursMinutes()
-    let nextEnd = addMinutes(now.h, now.m, 1)
+    let nextEnd = addOneHour(now.h, now.m)
     if (nextEnd.h === startHPreview && nextEnd.m === startMPreview) {
       nextEnd = addMinutes(nextEnd.h, nextEnd.m, 1)
     }
@@ -385,7 +478,8 @@ export function AddSubReminderModal({
       return
     }
     if (mode === 'fixed') {
-      const startTime = formatHHmm(startHPreview, startMPreview)
+      const nowSnap = useNowAsStart ? getLocalHoursMinutes() : null
+      const startTime = nowSnap ? formatHHmm(nowSnap.h, nowSnap.m) : formatHHmm(startHPreview, startMPreview)
       const endTime = formatHHmm(endHPreview, endMPreview)
       onConfirm({
         mode: 'fixed',
@@ -399,6 +493,7 @@ export function AddSubReminderModal({
         splitCount: splitN,
         restDurationSeconds: splitN > 1 && totalRestSec ? totalRestSec : undefined,
         restContent: splitN > 1 ? restContent.trim() || undefined : undefined,
+        useNowAsStart,
       })
     } else {
       onConfirm({
@@ -431,12 +526,96 @@ export function AddSubReminderModal({
 
   const timeSectionTitle = mode === 'fixed' ? '闹钟设置' : '倒计时'
   const sectionHeadingClass = 'text-sm font-medium text-slate-600 mb-4 w-full text-center'
-  const formBodyClass = 'flex flex-col gap-12 overflow-visible mx-auto w-full max-w-xl items-center px-4 py-6 sm:px-6 sm:py-8'
+
+  const screenW = primaryDisplaySize?.width ?? 1920
+  const screenH = primaryDisplaySize?.height ?? 1080
+  const previewScale = previewContainerWidth > 0 ? previewContainerWidth / screenW : 0.28
+  const toP = (px: number) => Math.max(1, px * previewScale)
+
+  const renderThemePreview = (
+    th: PopupTheme | undefined,
+    previewText: string,
+    isRest: boolean,
+    previewTimeStr: string,
+    measuredRef?: React.RefObject<HTMLDivElement | null>,
+  ) => {
+    const contentFontMax = Math.max(14, Math.min(120, Math.floor(th?.contentFontSize ?? 56)))
+    const timeFontMax = Math.max(10, Math.min(100, Math.floor(th?.timeFontSize ?? 30)))
+    const line1FontPx = clampByViewport(20, 0.06, contentFontMax, screenW)
+    const line2FontPx = clampByViewport(14, 0.03, timeFontMax, screenW)
+    const paddingPx = Math.min(screenW * 0.05, 48)
+    const line1MbPx = clampByViewport(16, 0.03, 40, screenW)
+    const line2MbPx = isRest ? clampByViewport(24, 0.04, 56, screenW) : clampByViewport(32, 0.05, 64, screenW)
+    const rawPath = ((th?.imageSourceType === 'folder' ? th?.imageFolderFiles?.[0] : th?.imagePath) ?? '').trim()
+    const imageUrl = previewImageUrlMap[rawPath] || toPreviewImageUrl(rawPath)
+    const previewAlignItems: CSSProperties['alignItems'] =
+      th?.textAlign === 'left' ? 'flex-start' : th?.textAlign === 'right' ? 'flex-end' : 'center'
+    const bg = th?.backgroundType === 'image' && (th?.imagePath || (th?.imageFolderFiles && th.imageFolderFiles.length > 0))
+      ? `url("${imageUrl}") center / cover no-repeat, ${th.backgroundColor || '#000'}`
+      : (th?.backgroundColor || '#000')
+
+    return (
+      <div
+        ref={measuredRef as React.RefObject<HTMLDivElement> | undefined}
+        className="relative w-full overflow-hidden rounded border border-slate-200 bg-black"
+        style={{ aspectRatio: `${screenW} / ${screenH}` }}
+      >
+        <div className="absolute inset-0" style={{ background: bg }} />
+        <div
+          className="absolute inset-0"
+          style={{
+            background: th?.overlayColor || '#000',
+            opacity: th?.overlayEnabled ? (th?.overlayOpacity ?? 0.45) : 0,
+          }}
+        />
+        <div
+          className="relative z-[1] flex h-full w-full flex-col justify-center"
+          style={{ textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'], alignItems: previewAlignItems, padding: `${toP(paddingPx)}px` }}
+        >
+          <div style={{
+            color: th?.contentColor || '#fff',
+            fontSize: `${toP(line1FontPx)}px`,
+            lineHeight: 1.35,
+            marginBottom: `${toP(line1MbPx)}px`,
+            fontWeight: 600,
+            width: '100%',
+            maxWidth: '96%',
+            whiteSpace: 'pre-wrap',
+          }}>
+            {previewText}
+          </div>
+          <div style={{
+            color: th?.timeColor || '#e2e8f0',
+            fontSize: `${toP(line2FontPx)}px`,
+            marginBottom: `${toP(line2MbPx)}px`,
+            width: '100%',
+          }}>
+            {previewTimeStr}
+          </div>
+          {isRest && (() => {
+            const countdownFontMax = Math.max(48, Math.min(280, Math.floor(th?.countdownFontSize ?? 180)))
+            const countdownFontPx = clampByViewport(80, 0.2, countdownFontMax, screenW)
+            return (
+              <div style={{
+                color: th?.timeColor || '#e2e8f0',
+                fontSize: `${toP(countdownFontPx)}px`,
+                lineHeight: 1,
+                fontWeight: 700,
+                width: '100%',
+              }}>
+                5
+              </div>
+            )
+          })()}
+        </div>
+      </div>
+    )
+  }
 
   const formScroll = (
-        <div className={formBodyClass}>
-          {/* 1. 闹钟设置 / 倒计时 */}
-          <section className="w-full">
+        <div className="flex flex-col gap-10 overflow-visible mx-auto w-full items-center px-4 py-6 sm:px-6 sm:py-8">
+          {/* 1. 标题 */}
+          <section className="w-full max-w-xl">
             <h4 className={sectionHeadingClass}>标题</h4>
             <div className="w-full">
               <PresetTextField
@@ -453,19 +632,19 @@ export function AddSubReminderModal({
           </section>
 
           {/* 2. 闹钟设置 / 倒计时 */}
-          <section className="flex w-full flex-col items-center">
+          <section className="flex w-full max-w-xl flex-col items-center">
             <h4 className={sectionHeadingClass}>{timeSectionTitle}</h4>
             {mode === 'fixed' ? (
               <div className="flex w-full flex-col items-center gap-4">
                 <div className="grid w-full max-w-2xl grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="flex flex-col items-center gap-2">
-                    <span className="text-xs font-medium text-slate-500">起始时间</span>
+                    <span className="text-xs font-medium text-slate-500">开始时间</span>
                     <div className="rounded-lg border border-slate-200 px-3 py-2">
                       <div className="inline-grid grid-cols-[auto_min-content_auto] items-end justify-items-center gap-x-2 sm:gap-x-3">
                         <span className="row-start-1 col-start-1 -translate-y-1 text-center text-xs font-medium text-slate-500">时</span>
                         <span className="row-start-1 col-start-3 -translate-y-1 text-center text-xs font-medium text-slate-500">分</span>
                         <div className="row-start-2 col-start-1 justify-self-center">
-                          <WheelColumn label="" min={0} max={23} value={startH} onChange={setStartH} onLiveChange={setStartHPreview} />
+                          <WheelColumn label="" min={0} max={23} value={startH} onChange={(v) => { setUseNowAsStart(false); setStartH(v) }} onLiveChange={setStartHPreview} />
                         </div>
                         <div
                           className="row-start-2 col-start-2 flex items-center justify-center select-none text-2xl font-semibold text-slate-900"
@@ -475,22 +654,32 @@ export function AddSubReminderModal({
                           :
                         </div>
                         <div className="row-start-2 col-start-3 justify-self-center">
-                          <WheelColumn label="" min={0} max={59} value={startM} onChange={setStartM} onLiveChange={setStartMPreview} />
+                          <WheelColumn label="" min={0} max={59} value={startM} onChange={(v) => { setUseNowAsStart(false); setStartM(v) }} onLiveChange={setStartMPreview} />
                         </div>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={resetStartToNow}
-                      className="mt-1 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                      title="复位到当前时间"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <polyline points="1 4 1 10 7 10" />
-                        <path d="M3.51 15a9 9 0 1 0 .49-9" />
-                      </svg>
-                      复位
-                    </button>
+                    <div className="mt-1 flex items-center gap-1.5">
+                      <span className="text-xs text-slate-500">当前时间</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={useNowAsStart}
+                        onClick={() => {
+                          const next = !useNowAsStart
+                          setUseNowAsStart(next)
+                          if (next) {
+                            const now = getLocalHoursMinutes()
+                            setStartH(now.h)
+                            setStartM(now.m)
+                            setStartHPreview(now.h)
+                            setStartMPreview(now.m)
+                          }
+                        }}
+                        className={`relative h-[20px] w-[36px] shrink-0 rounded-full transition-colors duration-200 ${useNowAsStart ? 'bg-green-500' : 'bg-slate-300'}`}
+                      >
+                        <span className={`absolute top-[2px] left-[2px] h-[16px] w-[16px] rounded-full bg-white shadow transition-transform duration-200 ${useNowAsStart ? 'translate-x-[16px]' : ''}`} />
+                      </button>
+                    </div>
                   </div>
                   <div className="flex flex-col items-center gap-2">
                     <span className="text-xs font-medium text-slate-500">结束时间</span>
@@ -515,9 +704,9 @@ export function AddSubReminderModal({
                     </div>
                     <button
                       type="button"
-                      onClick={resetEndToNowPlusOneMinute}
+                      onClick={resetEndToNowPlusOneHour}
                       className="mt-1 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                      title="复位到当前时间后 1 分钟"
+                      title="复位到当前时间后 1 小时"
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                         <polyline points="1 4 1 10 7 10" />
@@ -564,262 +753,261 @@ export function AddSubReminderModal({
                   className="w-12 rounded border border-slate-300 px-1.5 py-1.5 text-sm text-right"
                 />
                 <span className="text-slate-500 text-sm">秒</span>
+                <div className="ml-2">
+                  <RepeatCountPicker value={repeatCount} onChange={setRepeatCount} />
+                </div>
               </div>
             )}
             {mode === 'fixed' ? (
-              <p className="mt-4 w-full text-center text-xs text-slate-400">滚轮、拖拽或点击选择闹钟起始与结束时间。</p>
-            ) : (
-              <p className="mt-4 w-full text-center text-xs text-slate-400">请填写倒计时的时、分、秒（到点再次触发）。</p>
-            )}
-          </section>
-
-          {/* 3. 提醒内容（含预设） */}
-          <section className="w-full">
-            <h4 className={sectionHeadingClass}>提醒内容</h4>
-            <div className="flex flex-wrap items-start gap-3 w-full">
-              <div className="flex-1 min-w-[12rem]">
-                <PresetTextField
-                  key={`content-${presetResetKey}`}
-                  resetKey={presetResetKey}
-                  value={content}
-                  onChange={setContent}
-                  presets={contentPresets}
-                  onPresetsChange={onContentPresetsChange}
-                  mainPlaceholder="请输入提醒内容"
-                  multilineMain
-                />
-              </div>
-
-              {mode === 'fixed' && (
-                <div className="shrink-0 self-start">
+              <>
+                <p className="mt-4 w-full text-center text-xs text-slate-400">滚轮、拖拽或点击选择闹钟开始与结束时间。</p>
+                <div className="mt-5 flex items-center justify-center gap-3">
+                  <span className="text-sm font-medium text-slate-600">重复</span>
                   <WeekdayRepeatControl
                     weekdaysEnabled={weekdaysEnabled}
                     onChange={setWeekdaysEnabled}
                   />
                 </div>
-              )}
+              </>
+            ) : (
+              <p className="mt-4 w-full text-center text-xs text-slate-400">请填写倒计时的时、分、秒（到点再次触发）。</p>
+            )}
+          </section>
 
-              {mode === 'interval' && (
-                <div className="shrink-0 self-start">
-                  <RepeatCountPicker value={repeatCount} onChange={setRepeatCount} />
+          {/* 3. 时间线 */}
+          <section className="w-full">
+            <h4 className={sectionHeadingClass}>时间线</h4>
+            <div className="relative w-full">
+              <div className="w-full flex items-center gap-1.5 flex-wrap min-h-[1rem]">
+                {useSplit && segments.length > 0 ? (
+                  segments.map((seg, i) => (
+                    <StaticSplitPreviewSegment
+                      key={i}
+                      durationMs={seg.durationMs}
+                      fillClass={seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'}
+                    />
+                  ))
+                ) : (
+                  <StaticSinglePreviewBar totalDurationMs={Math.max(0, totalSpanMs)} />
+                )}
+              </div>
+              {highlightPopupType && totalSpanMs > 0 && (() => {
+                const markers: { pct: number; variant: 'green' | 'blue' }[] = []
+                if (useSplit && segments.length > 1) {
+                  let accMs = 0
+                  for (let i = 0; i < segments.length; i++) {
+                    if (highlightPopupType === 'rest' && segments[i].type === 'rest') {
+                      markers.push({ pct: accMs / totalSpanMs * 100, variant: 'blue' })
+                    }
+                    accMs += segments[i].durationMs
+                  }
+                  if (highlightPopupType === 'main') {
+                    markers.push({ pct: 100, variant: 'green' })
+                  }
+                } else if (highlightPopupType === 'main') {
+                  markers.push({ pct: 100, variant: 'green' })
+                }
+                return markers.map((m, i) => (
+                  <div
+                    key={i}
+                    className="pointer-events-none absolute bottom-full mb-0.5 flex flex-col items-center transition-opacity duration-150"
+                    style={{ left: `${m.pct}%`, transform: 'translateX(-50%)' }}
+                  >
+                    <div
+                      className={`rounded ${m.variant === 'blue' ? 'bg-blue-500' : 'bg-green-500'}`}
+                      style={{ width: '22px', height: '12px' }}
+                    />
+                    <div
+                      className={`h-0 w-0 border-x-[4px] border-t-[5px] border-x-transparent ${m.variant === 'blue' ? 'border-t-blue-500' : 'border-t-green-500'}`}
+                      style={{ marginTop: '-0.5px' }}
+                      aria-hidden
+                    />
+                  </div>
+                ))
+              })()}
+            </div>
+          </section>
+
+          {/* 4. 拆分时间 + 休息时长（左右并排） */}
+          <section className="w-full max-w-xl">
+            <div className="flex w-full items-start justify-center gap-8 flex-wrap">
+              <div className="flex flex-col items-center gap-2">
+                <span className="text-sm font-medium text-slate-600">拆分时间</span>
+                <div className="flex items-center gap-2">
+                  <span className="shrink-0 text-sm text-slate-600">拆分</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={splitCount}
+                    onChange={(e) => {
+                      const next = Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1))
+                      setSplitCount(next)
+                      if (next >= 2 && !restManuallySet.current) {
+                        const sec = calcDefaultRestSeconds(totalSpanMs, next)
+                        if (sec > 0) {
+                          const rh = Math.floor(sec / 3600)
+                          const rm = Math.floor((sec % 3600) / 60)
+                          const rs = sec % 60
+                          setRestH(rh)
+                          setRestM(rm)
+                          setRestS(rs)
+                        }
+                      }
+                    }}
+                    className="w-16 rounded border border-slate-300 px-2 py-1 text-center text-sm"
+                  />
+                  <span className="shrink-0 text-sm text-slate-600">份</span>
+                </div>
+              </div>
+              {splitN > 1 && (
+                <div className="flex flex-col items-center gap-2">
+                  <span className="text-sm font-medium text-slate-600">休息时长</span>
+                  <div className="flex flex-wrap items-center justify-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      max={23}
+                      value={restH}
+                      onChange={(e) => handleRestChange(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)), restM, restS)}
+                      className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
+                    />
+                    <span className="text-sm text-slate-500">时</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={restM}
+                      onChange={(e) => handleRestChange(restH, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)), restS)}
+                      className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
+                    />
+                    <span className="text-sm text-slate-500">分</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={59}
+                      value={restS}
+                      onChange={(e) => handleRestChange(restH, restM, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
+                      className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
+                    />
+                    <span className="text-sm text-slate-500">秒</span>
+                  </div>
                 </div>
               )}
             </div>
+            {splitErr && <p className="w-full text-center text-xs text-red-600 mt-3">{splitErr}</p>}
           </section>
 
-          {/* 4. 拆分预览（静态条；保存/开始后的列表进度另算） */}
+          {/* 5. 弹窗编辑 — 左右并排（splitN > 1 时休息弹窗在左、结束弹窗在右） */}
           <section className="w-full">
-            <h4 className={sectionHeadingClass}>弹窗主题</h4>
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-slate-600 shrink-0">主弹窗主题</span>
-                <select
-                  value={mainPopupThemeId}
-                  onChange={(e) => setMainPopupThemeId(e.target.value)}
-                  className="min-w-[12rem] flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm"
+            <div className="mb-4 flex items-center justify-center gap-3">
+              <h4 className="text-sm font-medium text-slate-600">弹窗设置</h4>
+              {onOpenThemeStudio && (
+                <button
+                  type="button"
+                  onClick={onOpenThemeStudio}
+                  className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:bg-slate-50"
                 >
-                  {mainThemeOptions.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </select>
-                {onOpenThemeStudio && (
-                  <button
-                    type="button"
-                    onClick={onOpenThemeStudio}
-                    className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                  >
-                    主题工坊
-                  </button>
-                )}
-              </div>
-              <div className="relative h-24 w-full overflow-hidden rounded border border-slate-200">
-                {(() => {
-                  const th = mainThemeOptions.find((t) => t.id === mainPopupThemeId)
-                  const rawPath = ((th?.imageSourceType === 'folder' ? th?.imageFolderFiles?.[0] : th?.imagePath) ?? '').trim()
-                  const imageUrl = previewImageUrlMap[rawPath] || toPreviewImageUrl(rawPath)
-                  const alignItems: CSSProperties['alignItems'] =
-                    th?.textAlign === 'left' ? 'flex-start' : th?.textAlign === 'right' ? 'flex-end' : 'center'
-                  const bg = th?.backgroundType === 'image' && th?.imagePath
-                    ? `url("${imageUrl}") center / cover no-repeat, ${th.backgroundColor || '#000'}`
-                    : (th?.backgroundColor || '#000')
-                  return (
-                    <>
-                      <div className="absolute inset-0" style={{ background: bg }} />
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          background: th?.overlayColor || '#000',
-                          opacity: th?.overlayEnabled ? (th?.overlayOpacity ?? 0.45) : 0,
-                        }}
-                      />
-                      <div
-                        className="relative z-[1] flex h-full flex-col justify-center px-3"
-                        style={{ textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'], alignItems }}
-                      >
-                        <div style={{ color: th?.contentColor || '#fff', fontSize: Math.min(20, th?.contentFontSize ?? 18), lineHeight: 1.25, width: '100%' }}>
-                          {content.trim() || '提醒内容预览'}
-                        </div>
-                        <div style={{ color: th?.timeColor || '#e2e8f0', fontSize: Math.min(14, th?.timeFontSize ?? 12), width: '100%' }}>
-                          12:34
-                        </div>
-                      </div>
-                    </>
-                  )
-                })()}
-              </div>
-
+                  主题工坊
+                </button>
+              )}
+            </div>
+            <div className={splitN > 1 ? 'grid w-full gap-4 grid-cols-1 sm:grid-cols-2' : 'flex w-full justify-center'}>
+              {/* 休息弹窗卡片（左列，仅 splitN > 1） */}
               {splitN > 1 && (
-                <>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm text-slate-600 shrink-0">休息弹窗主题</span>
-                    <select
-                      value={restPopupThemeId}
-                      onChange={(e) => setRestPopupThemeId(e.target.value)}
-                      className="min-w-[12rem] flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm"
-                    >
-                      {restThemeOptions.map((t) => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                    </select>
-                    {onOpenThemeStudio && (
-                      <button
-                        type="button"
-                        onClick={onOpenThemeStudio}
-                        className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                <div
+                  className="min-w-0 overflow-hidden rounded-lg border border-slate-200"
+                  onMouseEnter={() => setHighlightPopupType('rest')}
+                  onMouseLeave={() => setHighlightPopupType(null)}
+                  onFocusCapture={() => setHighlightPopupType('rest')}
+                  onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setHighlightPopupType(null) }}
+                >
+                  <div className="bg-blue-500 px-3 py-1.5 text-center text-sm font-medium text-white">休息弹窗</div>
+                  <div className="border-t border-blue-400" />
+                  <div className="space-y-3 p-3">
+                    <div className="flex items-start gap-2">
+                      <span className="shrink-0 pt-1.5 text-sm text-slate-500">内容</span>
+                      <div className="flex-1 min-w-0">
+                        <PresetTextField
+                          key={`rest-${presetResetKey}`}
+                          resetKey={presetResetKey}
+                          value={restContent}
+                          onChange={setRestContent}
+                          presets={restPresets}
+                          onPresetsChange={onRestPresetsChange}
+                          mainPlaceholder="请输入休息提示语"
+                          multilineMain
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm text-slate-500 shrink-0">主题</span>
+                      <select
+                        value={restPopupThemeId}
+                        onChange={(e) => setRestPopupThemeId(e.target.value)}
+                        className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm"
                       >
-                        主题工坊
-                      </button>
+                        {restThemeOptions.map((t) => (
+                          <option key={t.id} value={t.id}>{t.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {renderThemePreview(
+                      restThemeOptions.find((t) => t.id === restPopupThemeId),
+                      restContent.trim() || '休息一下',
+                      true,
+                      restPreviewTimeStr,
                     )}
                   </div>
-                  <div className="relative h-24 w-full overflow-hidden rounded border border-slate-200">
-                    {(() => {
-                      const th = restThemeOptions.find((t) => t.id === restPopupThemeId)
-                      const rawPath = ((th?.imageSourceType === 'folder' ? th?.imageFolderFiles?.[0] : th?.imagePath) ?? '').trim()
-                      const imageUrl = previewImageUrlMap[rawPath] || toPreviewImageUrl(rawPath)
-                      const alignItems: CSSProperties['alignItems'] =
-                        th?.textAlign === 'left' ? 'flex-start' : th?.textAlign === 'right' ? 'flex-end' : 'center'
-                      const bg = th?.backgroundType === 'image' && th?.imagePath
-                        ? `url("${imageUrl}") center / cover no-repeat, ${th.backgroundColor || '#000'}`
-                        : (th?.backgroundColor || '#000')
-                      return (
-                        <>
-                          <div className="absolute inset-0" style={{ background: bg }} />
-                          <div
-                            className="absolute inset-0"
-                            style={{
-                              background: th?.overlayColor || '#000',
-                              opacity: th?.overlayEnabled ? (th?.overlayOpacity ?? 0.45) : 0,
-                            }}
-                          />
-                          <div
-                            className="relative z-[1] flex h-full flex-col justify-center px-3"
-                            style={{ textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'], alignItems }}
-                          >
-                            <div style={{ color: th?.contentColor || '#fff', fontSize: Math.min(20, th?.contentFontSize ?? 18), lineHeight: 1.25, width: '100%' }}>
-                              {restContent.trim() || '休息一下'}
-                            </div>
-                            <div style={{ color: th?.timeColor || '#e2e8f0', fontSize: Math.min(14, th?.timeFontSize ?? 12), width: '100%' }}>
-                              12:34
-                            </div>
-                            <div style={{ color: th?.countdownColor || '#fff', fontSize: Math.min(20, th?.countdownFontSize ?? 18), fontWeight: 700, width: '100%' }}>
-                              5
-                            </div>
-                          </div>
-                        </>
-                      )
-                    })()}
-                  </div>
-                </>
+                </div>
               )}
-            </div>
-          </section>
-
-          {/* 5. 拆分预览（静态条；保存/开始后的列表进度另算） */}
-          <section className="w-full">
-            <h4 className={sectionHeadingClass}>拆分预览</h4>
-            <div className="w-full flex items-center gap-1.5 flex-wrap min-h-[1rem]">
-              {useSplit && segments.length > 0 ? (
-                segments.map((seg, i) => (
-                  <StaticSplitPreviewSegment
-                    key={i}
-                    durationMs={seg.durationMs}
-                    fillClass={seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'}
-                  />
-                ))
-              ) : (
-                <StaticSinglePreviewBar totalDurationMs={Math.max(0, totalSpanMs)} />
-              )}
-            </div>
-          </section>
-
-          {/* 6. 拆分配置 */}
-          <section className="w-full">
-            <h4 className={sectionHeadingClass}>拆分配置</h4>
-            <div className="flex w-full flex-col items-center space-y-5">
-              <div className="flex items-center justify-center gap-2">
-                <span className="shrink-0 text-sm text-slate-600">拆分</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={splitCount}
-                  onChange={(e) => setSplitCount(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
-                  className="w-16 rounded border border-slate-300 px-2 py-1 text-center text-sm"
-                />
-                <span className="shrink-0 text-sm text-slate-600">份</span>
-              </div>
-              {splitN > 1 && (
-                <>
-                  <div className="flex w-full flex-col items-center gap-2">
-                    <span className="text-center text-sm text-slate-600">休息时长</span>
-                    <div className="flex flex-wrap items-center justify-center gap-1.5">
-                      <input
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={restH}
-                        onChange={(e) => handleRestChange(Math.max(0, Math.min(23, parseInt(e.target.value, 10) || 0)), restM, restS)}
-                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
-                      />
-                      <span className="text-sm text-slate-500">时</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={restM}
-                        onChange={(e) => handleRestChange(restH, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)), restS)}
-                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
-                      />
-                      <span className="text-sm text-slate-500">分</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={restS}
-                        onChange={(e) => handleRestChange(restH, restM, Math.max(0, Math.min(59, parseInt(e.target.value, 10) || 0)))}
-                        className="w-14 rounded border border-slate-300 px-2 py-1 text-center text-sm"
-                      />
-                      <span className="text-sm text-slate-500">秒</span>
-                    </div>
-                  </div>
-                  <div className="flex w-full flex-col items-center gap-2">
-                    <span className="text-center text-sm text-slate-600">休息弹窗文案</span>
-                    <div className="w-full">
+              {/* 结束弹窗卡片（右列，或 splitN ≤ 1 时居中半宽） */}
+              <div
+                className={`min-w-0 overflow-hidden rounded-lg border border-slate-200 ${splitN > 1 ? '' : 'w-full sm:w-1/2'}`}
+                onMouseEnter={() => setHighlightPopupType('main')}
+                onMouseLeave={() => setHighlightPopupType(null)}
+                onFocusCapture={() => setHighlightPopupType('main')}
+                onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setHighlightPopupType(null) }}
+              >
+                <div className="bg-green-500 px-3 py-1.5 text-center text-sm font-medium text-white">结束弹窗</div>
+                <div className="border-t border-green-400" />
+                <div className="space-y-3 p-3">
+                  <div className="flex items-start gap-2">
+                    <span className="shrink-0 pt-1.5 text-sm text-slate-500">内容</span>
+                    <div className="flex-1 min-w-0">
                       <PresetTextField
-                        key={`rest-${presetResetKey}`}
+                        key={`content-${presetResetKey}`}
                         resetKey={presetResetKey}
-                        value={restContent}
-                        onChange={setRestContent}
-                        presets={restPresets}
-                        onPresetsChange={onRestPresetsChange}
-                        mainPlaceholder="请输入休息提示语"
+                        value={content}
+                        onChange={setContent}
+                        presets={contentPresets}
+                        onPresetsChange={onContentPresetsChange}
+                        mainPlaceholder="请输入提醒内容"
                         multilineMain
                       />
                     </div>
                   </div>
-                </>
-              )}
-              {splitErr && <p className="text-center text-xs text-red-600">{splitErr}</p>}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-slate-500 shrink-0">主题</span>
+                    <select
+                      value={mainPopupThemeId}
+                      onChange={(e) => setMainPopupThemeId(e.target.value)}
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1.5 text-sm"
+                    >
+                      {mainThemeOptions.map((t) => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {renderThemePreview(
+                    mainThemeOptions.find((t) => t.id === mainPopupThemeId),
+                    content.trim() || '提醒内容预览',
+                    false,
+                    mainPreviewTimeStr,
+                    previewMeasureRef,
+                  )}
+                </div>
+              </div>
             </div>
           </section>
         </div>

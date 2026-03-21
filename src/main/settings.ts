@@ -167,6 +167,7 @@ function normalizeCategories(cats: unknown): ReminderCategory[] {
           restDurationSeconds: fixed.restDurationSeconds,
           restContent: fixed.restContent,
           ...(weekdaysEnabled ? { weekdaysEnabled } : {}),
+          ...(typeof (i as Record<string, unknown>).useNowAsStart === 'boolean' ? { useNowAsStart: (i as Record<string, unknown>).useNowAsStart as boolean } : {}),
         }
       }
       if (i.mode === 'interval' && typeof (i as { intervalMinutes: unknown }).intervalMinutes === 'number') {

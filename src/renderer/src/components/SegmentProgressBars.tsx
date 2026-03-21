@@ -79,10 +79,12 @@ type SplitSegmentBarProps = {
   elapsedRatio: number
   fillClass: string
   showLabel?: boolean
+  /** hover 时整条显示的背景色（用于结束态灰条 hover 恢复颜色） */
+  hoverFillClass?: string
 }
 
 /** 列表子项：多段拆分，带动画比例 */
-export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, showLabel = true }: SplitSegmentBarProps) {
+export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, showLabel = true, hoverFillClass }: SplitSegmentBarProps) {
   const ratio = Math.max(0, Math.min(1, elapsedRatio))
   const label = formatSegmentDurationCompact(durationMs)
   const variant = fillClassToVariant(fillClass)
@@ -106,6 +108,9 @@ export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, s
           className={`h-full min-w-0 transition-[width] duration-200 ease-out ${fillClass}`}
           style={{ width: `${(1 - ratio) * 100}%` }}
         />
+        {hoverFillClass && (
+          <div className={`absolute inset-0 rounded-full ${hoverFillClass} opacity-0 group-hover:opacity-40 transition-opacity duration-150`} />
+        )}
         {showLabel && (
           <span ref={labelRef} className={labelClass}>
             {label}
@@ -122,10 +127,11 @@ type SingleBarProps = {
   /** 与 Settings 一致：剩余比例，绿条宽度 = progressRatio */
   remainingRatio: number
   fillClass?: string
+  hoverFillClass?: string
 }
 
 /** 列表子项：未拆分整段进度条 */
-export function SingleCycleProgressBar({ totalDurationMs, remainingRatio, fillClass = 'bg-green-500' }: SingleBarProps) {
+export function SingleCycleProgressBar({ totalDurationMs, remainingRatio, fillClass = 'bg-green-500', hoverFillClass }: SingleBarProps) {
   const pr = Math.max(0, Math.min(1, remainingRatio))
   const label = formatSegmentDurationCompact(totalDurationMs)
   const variant = fillClassToVariant(fillClass)
@@ -143,6 +149,9 @@ export function SingleCycleProgressBar({ totalDurationMs, remainingRatio, fillCl
           className={`${fillClass} h-full shrink-0 min-w-0 transition-[width] duration-300 ease-out`}
           style={{ width: `${pr * 100}%` }}
         />
+        {hoverFillClass && (
+          <div className={`absolute inset-0 rounded-full ${hoverFillClass} opacity-0 group-hover:opacity-40 transition-opacity duration-150`} />
+        )}
         <span ref={labelRef} className={labelClass}>
           {label}
         </span>
