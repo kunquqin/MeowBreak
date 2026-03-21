@@ -196,14 +196,19 @@
 - **弹窗内容精简**：主弹窗仅显示"提醒内容 + 时间"；休息弹窗仅显示"休息提醒 + 时间 + 倒计时"。不显示分类名、标题等冗余信息。
 - **关闭按钮**：右上角黑色圆底白色 SVG 细线 X（`stroke-width` 控制粗细），鼠标移动时显示、静止 2 秒后隐藏；支持 `Esc` 键关闭。**不要**用"知道了"大按钮。
 - **文字尺寸**：使用显式像素值（如 `${contentFont}px`），不使用 CSS `clamp()`，保证渲染确定性与预览一致性。
-- **文字对齐**：`textAlign` 需同时映射到容器的 `align-items`（`left→flex-start`、`center→center`、`right→flex-end`），确保多行文字块对齐方向一致。
+- **文字定位**：使用 `TextTransform` 百分比绝对定位（`left: x%; top: y%; transform: translate(-50%, -50%) rotate() scale()`），主进程 `transformStyle()` 辅助函数生成 CSS。无 transform 字段时使用默认位置（主弹窗：内容 y=42%、时间 y=55%；休息弹窗：内容 y=30%、倒计时 y=70%）。
+- **休息弹窗 tick 动画**：使用独立 CSS `scale` 属性（非 `transform`），避免覆盖定位 transform。Electron 28+ / Chromium 120+ 支持。
 
-### 4.13 弹窗主题预览（Settings.tsx 预览区）
+### 4.13 弹窗主题预览（ThemePreviewEditor 组件）
 
+- **独立组件**：`src/renderer/src/components/ThemePreviewEditor.tsx`，从 Settings.tsx 拆出，接收 `theme`、`onUpdateTheme`、`previewViewportWidth`、`previewImageUrlMap`、`popupPreviewAspect`、`selectedElement`、`onSelectElement` props。
 - **1:1 缩放映射**：预览区必须与实际全屏弹窗保持视觉一致。获取 `primaryDisplaySize`（屏幕实际宽高）→ 用 `clampByViewport` 计算真实像素值 → 用 `toPreviewPx`（预览容器宽度 / 屏幕宽度比）缩放到预览尺寸。
 - **图片预览**：渲染进程无法直接访问 `file://` 协议（Vite 开发服务器为 `http://`），须通过 IPC `resolvePreviewImageUrl` 让主进程读取本地图片并返回 `data:image/` base64 URL。缓存在 `previewImageUrlMap` 避免重复读取。
 - **预览不显示关闭按钮**：预览区是只读展示，关闭按钮无实际意义，不渲染。
 - **参数分页**：每张主题卡有独立的分页状态（全部/文字/遮罩/背景），存储在 `themeSettingsPanelFilterMap: Record<themeId, FilterType>` 中，切换一张不影响其他。
+- **可视化编辑**：`react-moveable` 提供拖拽 / 旋转 / 缩放 / 对齐参考线。拖拽时直接操作 DOM（`target.style.left/top`）保证 60fps，松手后 commit 百分比到 React state。
+- **对齐参考线**：容器 25%/50%/75% 水平 + 垂直线，加元素间相互对齐（`elementGuidelines`）。
+- **选中联动**：`themeSelectedElementMap: Record<themeId, TextElementKey | null>` 存储每张主题卡的选中元素；预览区点击选中 / 空白取消；参数面板「位置与变换」区同步高亮与数值编辑。
 
 ### 4.14 进度沉淀规范（强制执行）
 

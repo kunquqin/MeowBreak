@@ -9,6 +9,7 @@ export type {
   PopupThemeTarget,
   AppEntitlements,
   ResetIntervalPayload,
+  TextTransform,
 } from '../../shared/settings'
 
 export {
@@ -17,5 +18,6 @@ export {
   getDefaultPresetPools,
   getDefaultPopupThemes,
   getDefaultEntitlements,
+  defaultTextTransform,
   genId,
 } from '../../shared/settings'

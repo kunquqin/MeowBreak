@@ -1,84 +1,91 @@
-# 会话交接（v0.0.9：闹钟/倒计时交互优化 + 弹窗体验增强 + 跨天标签）
+# 会话交接（v0.0.10r：多选「重置为默认位置」）
 
 > 下一段「粘贴用交接提示」见文末代码块。
 
-## 1. 本轮已完成（v0.0.9）
+## 1. 本轮已完成（v0.0.10r）
 
-### 闹钟交互优化
-- **useNowAsStart 字段**：闹钟区分"当前时间"启动（实时跟随）与"自定义时间范围"；`normalizeCategories` 保全该字段
-- **单次结束自动关闭开关**：主进程 `autoDisableByKey()` + 渲染进程主动 `getSettings()` 同步
-- **重置按钮条件显示**：仅 `useNowAsStart=true` 时显示，自定义时间下隐藏
-- **结束态漏斗**：归位至起点显示"待启动"；手动关闭显示"0:00"在终点
+### 多选时「重置为默认位置」只生效第一个
+- **修复**：**`Settings.tsx`** 弹窗主题「位置与变换」中，**`onClick`** 对 **`getThemeSelectedElements` 的全部 `sels`** 各写 **`contentTransform` / `timeTransform` / `countdownTransform`** 默认值，**一次 `updatePopupTheme`** 合并 patch；多选时按钮文案为 **「将全部选中项重置为默认位置」**。
 
-### 弹窗体验增强
-- **并发串行化**：`popupChain` + `popupSeq` 修复多弹窗同时触发崩溃
-- **休息弹窗简化**：仅内容+倒计时数字，颜色跟随 `timeColor`
-- **预览时间动态计算**：设置页 12:00、闹钟=结束时间、倒计时=实时、休息=首节点
+## 2. 历史（v0.0.10q）
 
-### 设置页布局与交互
-- 弹窗区卡片化 + 彩色标题栏（蓝=休息、绿=结束）
-- 时间线气泡联动（hover/编辑弹窗区高亮对应触发节点）
-- 拆分≥2 自动预填休息时长（总时长 1/6，秒级精度支持短时长）
-- 编辑模式拖拽保持编辑状态、删除/拖拽图标右对齐
-- 新建中途切换 tab 静默清理空大类、结束时间复位 +1h
+### 变换松手瞬间轻微往右下偏移
+- **原因**：**`finalizeElement`** 用 **`getBoundingClientRect` 的 AABB 中心** 换算 `x/y`，有 **旋转/缩放** 时与 **`useLayoutEffect` 里用的「布局中心」**（`translate + offsetWidth/2`）不是同一几何点；再用 **`.toFixed(2)` 的百分比反算 `tx/ty`**，与 Moveable 最终 **`translate` 亚像素不一致** → 松手跳一下。
+- **修复**：新增 **`translateToThemePercent`**，与 **`tx = cW*(x/100)-w/2` 严格互逆**；**`finalizeElement`** 从当前 **`transform` 解析 `translateX/Y`**，**`theme` 用互逆公式**，**`buildTransform` 直接用解析值**（不经百分比回算）。**多选对齐**写回 theme 同样改为 **`translateToThemePercent`**。删除已无调用的 **`centerToPercent`**。
 
-### 跨天时间标签与文案统一
-- `formatTimeWithDay(ts, fallback, '开始'|'结束')`：当天无前缀、跨天"明天"
-- 禁用态时间戳 +24h 推算，确保开关开/关跨天标签一致
-- 全局"起始"→"开始"文案替换
-- 进度条 hover 变色（灰/紫态下显示对应分段颜色）
+## 3. 历史（v0.0.10p）
 
-## 2. 技术决策记录
+### 预览区内操作仍卡顿 / 外框慢半拍
+- **原因**：每次指针事件都 **`setState`（mergeStyleTransforms）+ 同步 `updateRect()`**，一帧内多次触发整组件重渲染与布局，和 Moveable 内部抢主线程。
+- **修复**：**`applyMoveableFrame`** 仍**立即**写 **`element.style.transform`**；**`styleTransformByKey` 与 `updateRect`** 通过 **`pendingMoveablePatchRef` + `requestAnimationFrame` 每帧最多合并一次**；各 **`on*Start`** 调用 **`resetMoveableVisualPipeline`**，**`on*End`** 先 **`flushMoveableVisual('sync')`** 再 **`finalizeElement`**。选中层加 **`will-change: transform`** 促合成层。
 
-| 决策 | 选型 | 理由 |
-|------|------|------|
-| 跨进程状态同步 | 渲染进程主动 pull | 简单可靠，不需要新增 IPC 事件通道 |
-| 弹窗并发 | Promise chain + seq 失效 | 比队列/锁更简单，失效机制保证关闭时立即生效 |
-| 跨天判断 | Date 字段比较 | 避免 toDateString() 的 locale 问题 |
-| 禁用态时间戳 | 返回推算时间戳 | 前端统一走 ts 分支，不需要 fallback 路径判断跨天 |
-| "当天"前缀 | 去除 | 信息密度更高，跨天才加"明天"更直观 |
+## 4. 历史（v0.0.10o）
 
-## 3. 版本信息
+### Moveable 外框滞后 / 改参数不更新
+- **原因**：目标 `transform` 或尺寸变化后未通知 Moveable 重算控制框。
+- **修复**：每次 **`applyMoveableFrame`** 写入 DOM 后调用 **`moveableRef.current.updateRect()`**；开启 **`useResizeObserver`**；**`useLayoutEffect`** 在字号/字重/对齐/视口等与排版相关依赖变化且非拖拽锁定时再 **`updateRect()`**。
 
-- **版本**：`v0.0.9`（commit: `a8aded7`），已推送 `origin/main`
-- **变更文件**：
-  - `src/shared/settings.ts`（`useNowAsStart` 字段）
-  - `src/main/settings.ts`（normalizeCategories 保全）
-  - `src/main/reminders.ts`（autoDisableByKey、禁用态时间戳推算、popupChain）
-  - `src/main/reminderWindow.ts`（并发串行化、休息弹窗简化）
-  - `src/renderer/src/components/AddSubReminderModal.tsx`（布局重构、气泡联动）
-  - `src/renderer/src/components/SegmentProgressBars.tsx`（hoverFillClass）
-  - `src/renderer/src/pages/Settings.tsx`（formatTimeWithDay、状态同步、文案替换）
-  - `AGENTS.md`（4.5 扩充、4.12 并发、文案规范）
+### 多选对齐错误
+- **原因**：旧实现把 **`TextTransform.x/y`（中心点百分比）** 当「左/右/顶/底」对齐，与视觉边界无关。
+- **修复**：用 **`getBoundingClientRect()`** 相对预览容器算各层 **AABB**，按选区包络做 **左/右/水平居中/顶/底/垂直居中**（与 Figma 等一致）；用 **`translate` 增量**移动；写回 theme 见 **v0.0.10q**（**`translateToThemePercent`**）。
+
+## 5. 历史（v0.0.10n）
+
+### 打组仍「各转各的」（续）
+- **补充原因**：子事件里 **`afterTransform` 有时与 `transform` 相同**（都只有 `rotate`/`scale`），**带像素的轨道平移**实际在 **`drag.transform`**（或 `drag.afterTransform`）。
+- **修复**：**`pickMoveableCssTransform`** 顺序：若 **`afterTransform !== transform` 且含 `translate(...px)` / `translate3d(...)`** → 用 `afterTransform`；否则若 **`drag.transform` 含 px 平移** → 用之；再回退 `afterTransform` / `transform`。并扩展 **`parseTransformValues`** 支持 **`translate3d`**，便于 finalize 读回位置。
+- **清理**：删除未使用的 **`applyShiftSnap`**（旋转吸附已由 **`snapRotateInFullTransform`** 承担）。
+
+## 6. 历史（v0.0.10m）
+
+### 打组旋转/缩放与 afterTransform
+- Moveable 子事件里 **`transform` 常为片段**；早期修复为统一走 **`pickMoveableCssTransform`** + **`snapRotateInFullTransform`**。
+
+## 7. 历史（v0.0.10l）
+
+### 白屏：`popupThemes.map is not a function`
+- **原因**：v0.0.10k 把 `updatePopupTheme` 改成了 `setPopupThemes((prev) => prev.map(...))`，但 **`setPopupThemes` 的签名是 `(nextThemes: PopupTheme[]) => void`**，内部直接 `popupThemes: nextThemes`，会把 **整个 updater 函数** 存进 `settings.popupThemes`，下一帧渲染 `popupThemes.map` 即崩。
+- **修复**：`updatePopupTheme` 改为 **`setSettingsState((prev) => ({ ...prev, popupThemes: themes.map(...) }))`**，在 **settings 一级** 做函数式更新；并 **`Array.isArray(settings.popupThemes)`** 兜底，避免脏数据再崩。
+
+### （v0.0.10k）打组松手后「回正 / 只保留一个对象」——真正根因
+- **不是 Moveable 不成熟**，而是 **`updatePopupTheme` 用了闭包里的 `popupThemes`**。
+- 打组 `on*GroupEnd` 里连续调用多次 `finalizeElement` → 多次 `onUpdateTheme(themeId, { contentTransform })`、`{ timeTransform }`…  
+  每次 `setPopupThemes(popupThemes.map(...))` 读到的都是**同一次渲染时的旧 theme**，后一次 patch 会**盖掉前一次**，最终只有**最后一个字段**写进 state，其它字层的变换丢失 → 看起来像「回正」。
+- **正确做法**：在 **`setSettingsState` 的 `prev` 上** 对 `popupThemes` 做 `map` 合并（见上节 v0.0.10l），**不要**把函数传给 `setPopupThemes`。
+
+### 按下即拖（不必先点一下再拖）
+- 在文字层 **`onMouseDown`**（非 Shift）里：`flushSync(() => onSelectElements([key]))` 立刻选中并提交 DOM，再 **`moveableRef.current.dragStart(nativeEvent)`**（react-moveable 官方 API）。
+- 多选已包含当前字块时：不改编选，直接 `dragStart`。
+- **Shift** 仍走原 `onClick` 多选逻辑，`onMouseDown` 里对 Shift 提前 return。
+
+### 涉及文件
+- `src/renderer/src/pages/Settings.tsx` — `updatePopupTheme` 函数式 setState  
+- `src/renderer/src/components/ThemePreviewEditor.tsx` — `moveableRef`、`flushSync`、`scheduleDragStart`、`handleTextPointerDown`
+
+## 8. 版本信息
+
+- **版本**：`v0.0.10r`（Settings：多选重置默认位置）
 
 ---
 
-## 4. 新会话开头可粘贴的交接提示
+## 9. 新会话开头可粘贴的交接提示
 
 ```
-【WorkBreak — 新会话交接（v0.0.9）】
+【WorkBreak — 新会话交接（v0.0.10r）】
 
-请先读 AGENTS.md（重点 4.4、4.5、4.7、4.11–4.14）与 docs/SESSION_HANDOVER.md、docs/POPUP_THEME_PLAN.md。
+请先读 AGENTS.md（重点 4.11–4.14）与 docs/SESSION_HANDOVER.md、docs/POPUP_THEME_PLAN.md。
 
 当前状态：
-- v0.0.9（commit: a8aded7），已推送 origin/main
-- 闹钟 useNowAsStart 字段：区分"当前时间"启动 vs "自定义时间范围"
-- 单次结束自动关闭开关（闹钟+倒计时），结束态漏斗"待启动"
-- 弹窗并发串行化（popupChain），修复多弹窗崩溃
-- 跨天时间标签统一：formatTimeWithDay 通用函数，开关开/关一致
-- 全局"起始"→"开始"文案替换
-- 进度条 hover 变色、弹窗预览时间动态计算、休息弹窗简化
+- v0.0.10r：主题「位置与变换」重置默认位置 → 所有选中文字层一次 patch
+- v0.0.10q：finalize / 对齐 `translateToThemePercent`
+- v0.0.10l：updatePopupTheme 用 setSettingsState；禁止 setPopupThemes(函数)
 
-关键约定（容易踩坑）：
-- 弹窗 HTML 必须用临时文件 + loadFile()，禁止 data: URL
-- 弹窗 BrowserWindow 单例，并发 loadFile 会崩溃，必须走 popupChain 串行
-- 禁用态子项的 windowStartAt/windowEndAt 必须返回有效时间戳且处理 +24h 推天
-- 渲染进程图片预览必须走 IPC resolvePreviewImageUrl
-- 预览区必须获取屏幕实际分辨率做 1:1 缩放映射
-- 每完成一个功能必须更新 SESSION_HANDOVER.md
+关键约定：
+- theme 的 x/y 与 CSS translate 的对应关系必须正反一致，避免亚像素跳变
+- setPopupThemes 只接收数组；合并用 setSettingsState
+- 每完成功能必须更新 SESSION_HANDOVER.md
 
 下一步方向：
-1. 测试回归：各状态组合（单次/每周 × 当前时间/自定义 × 结束/运行/等待 × 跨天/当天）
-2. V2 高级能力规划（渐变方向、文件夹轮播优化、高级排版）
-3. 会员门控 UI 接入
+1. 撤销/重做（Ctrl+Z）
+2. 键盘微调（方向键 1px）
 ```

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, screen } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
-import type { PopupTheme } from '../shared/settings'
+import type { PopupTheme, TextTransform } from '../shared/settings'
 
 export interface ReminderPopupOptions {
   title: string
@@ -78,13 +78,20 @@ function writePopupHtmlToTempFile(fileName: string, html: string): string {
   return filePath
 }
 
+function transformStyle(t: TextTransform | undefined, fallbackX: number, fallbackY: number): string {
+  const x = t?.x ?? fallbackX
+  const y = t?.y ?? fallbackY
+  const r = t?.rotation ?? 0
+  const s = t?.scale ?? 1
+  return `position: absolute; left: ${x}%; top: ${y}%; transform: translate(-50%, -50%) rotate(${r}deg) scale(${s}); transform-origin: center;`
+}
+
 function buildReminderHtml(options: ReminderPopupOptions): string {
   const { title, body, timeStr, theme } = options
   const titleEsc = escapeHtml(title)
   const bodyEsc = escapeHtml(body)
   const timeEsc = escapeHtml(timeStr)
   const textAlign = theme?.textAlign ?? 'center'
-  const alignItems = textAlign === 'left' ? 'flex-start' : textAlign === 'right' ? 'flex-end' : 'center'
   const contentFont = Math.max(14, Math.min(120, Math.floor(theme?.contentFontSize ?? 56)))
   const timeFont = Math.max(10, Math.min(100, Math.floor(theme?.timeFontSize ?? 30)))
   const contentColor = theme?.contentColor || '#ffffff'
@@ -93,6 +100,10 @@ function buildReminderHtml(options: ReminderPopupOptions): string {
   const overlayColor = theme?.overlayColor || '#000000'
   const overlayOpacity = clampOpacity(theme?.overlayOpacity, 0.45)
   const bgStyle = getBackgroundStyle(theme)
+  const contentPos = transformStyle(theme?.contentTransform, 50, 42)
+  const timePos = transformStyle(theme?.timeTransform, 50, 55)
+  const contentWeight = theme?.contentFontWeight ?? 600
+  const timeWeight = theme?.timeFontWeight ?? 400
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -104,9 +115,9 @@ function buildReminderHtml(options: ReminderPopupOptions): string {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; overflow: hidden; ${bgStyle} }
     .overlay { position: fixed; inset: 0; background: ${overlayColor}; opacity: ${overlayEnabled ? overlayOpacity : 0}; pointer-events: none; }
-    .content { position: relative; z-index: 1; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: ${alignItems}; justify-content: center; padding: min(5vw, 48px); }
-    .line1 { width: 100%; font-size: clamp(20px, 6vw, ${contentFont}px); color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; margin-bottom: clamp(16px, 3vw, 40px); font-weight: 600; max-width: 96vw; white-space: pre-wrap; }
-    .line2 { width: 100%; font-size: clamp(14px, 3vw, ${timeFont}px); color: ${timeColor}; text-align: ${textAlign}; margin-bottom: clamp(32px, 5vw, 64px); max-width: 96vw; }
+    .content { position: relative; z-index: 1; width: 100%; height: 100%; }
+    .line1 { ${contentPos} font-size: ${contentFont}px; color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; font-weight: ${contentWeight}; max-width: 96vw; white-space: pre-wrap; }
+    .line2 { ${timePos} font-size: ${timeFont}px; color: ${timeColor}; text-align: ${textAlign}; font-weight: ${timeWeight}; max-width: 96vw; }
     .close-floating {
       position: fixed;
       top: clamp(12px, 2vw, 28px);
@@ -261,7 +272,6 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, theme?
   const contentEsc = escapeHtml(content)
   const sec = Math.max(1, Math.min(countdownSec, 99))
   const textAlign = theme?.textAlign ?? 'center'
-  const alignItems = textAlign === 'left' ? 'flex-start' : textAlign === 'right' ? 'flex-end' : 'center'
   const contentColor = theme?.contentColor || '#ffffff'
   const timeColor = theme?.timeColor || '#e2e8f0'
   const overlayEnabled = Boolean(theme?.overlayEnabled)
@@ -270,6 +280,10 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, theme?
   const bgStyle = getBackgroundStyle(theme)
   const contentFont = Math.max(14, Math.min(120, Math.floor(theme?.contentFontSize ?? 40)))
   const countdownFont = Math.max(48, Math.min(280, Math.floor(theme?.countdownFontSize ?? 180)))
+  const contentPos = transformStyle(theme?.contentTransform, 50, 30)
+  const countdownPos = transformStyle(theme?.countdownTransform, 50, 70)
+  const contentWeight = theme?.contentFontWeight ?? 600
+  const countdownWeight = theme?.countdownFontWeight ?? 700
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -280,10 +294,10 @@ function buildRestEndCountdownHtml(countdownSec: number, content: string, theme?
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; color: #fff; font-family: system-ui, "Microsoft YaHei", sans-serif; overflow: hidden; ${bgStyle} }
     .overlay { position: fixed; inset: 0; background: ${overlayColor}; opacity: ${overlayEnabled ? overlayOpacity : 0}; pointer-events: none; }
-    .content { position: relative; z-index: 1; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: ${alignItems}; justify-content: center; padding: min(5vw, 48px); }
-    .line1 { width: 100%; font-size: clamp(20px, 6vw, ${contentFont}px); color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; margin-bottom: clamp(24px, 4vw, 56px); font-weight: 600; max-width: 96vw; white-space: pre-wrap; }
-    .countdown { width: 100%; color: ${timeColor}; font-size: clamp(80px, 20vw, ${countdownFont}px); font-weight: 700; text-align: ${textAlign}; line-height: 1; font-variant-numeric: tabular-nums; transition: transform 0.15s ease-out, opacity 0.15s ease-out; max-width: 96vw; }
-    .countdown.tick { transform: scale(1.15); opacity: 0.7; }
+    .content { position: relative; z-index: 1; width: 100%; height: 100%; }
+    .line1 { ${contentPos} font-size: ${contentFont}px; color: ${contentColor}; text-align: ${textAlign}; line-height: 1.35; font-weight: ${contentWeight}; max-width: 96vw; white-space: pre-wrap; }
+    .countdown { ${countdownPos} color: ${timeColor}; font-size: ${countdownFont}px; font-weight: ${countdownWeight}; text-align: ${textAlign}; line-height: 1; font-variant-numeric: tabular-nums; max-width: 96vw; transition: scale 0.15s ease-out, opacity 0.15s ease-out; }
+    .countdown.tick { scale: 1.15; opacity: 0.7; }
     .close-floating {
       position: fixed;
       top: clamp(12px, 2vw, 28px);

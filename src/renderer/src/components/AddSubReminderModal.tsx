@@ -543,16 +543,16 @@ export function AddSubReminderModal({
     const timeFontMax = Math.max(10, Math.min(100, Math.floor(th?.timeFontSize ?? 30)))
     const line1FontPx = clampByViewport(20, 0.06, contentFontMax, screenW)
     const line2FontPx = clampByViewport(14, 0.03, timeFontMax, screenW)
-    const paddingPx = Math.min(screenW * 0.05, 48)
-    const line1MbPx = clampByViewport(16, 0.03, 40, screenW)
-    const line2MbPx = isRest ? clampByViewport(24, 0.04, 56, screenW) : clampByViewport(32, 0.05, 64, screenW)
     const rawPath = ((th?.imageSourceType === 'folder' ? th?.imageFolderFiles?.[0] : th?.imagePath) ?? '').trim()
     const imageUrl = previewImageUrlMap[rawPath] || toPreviewImageUrl(rawPath)
-    const previewAlignItems: CSSProperties['alignItems'] =
-      th?.textAlign === 'left' ? 'flex-start' : th?.textAlign === 'right' ? 'flex-end' : 'center'
     const bg = th?.backgroundType === 'image' && (th?.imagePath || (th?.imageFolderFiles && th.imageFolderFiles.length > 0))
       ? `url("${imageUrl}") center / cover no-repeat, ${th.backgroundColor || '#000'}`
       : (th?.backgroundColor || '#000')
+    const defaultTransforms = isRest
+      ? { content: { x: 50, y: 30 }, time: { x: 50, y: 48 }, countdown: { x: 50, y: 70 } }
+      : { content: { x: 50, y: 42 }, time: { x: 50, y: 55 }, countdown: { x: 50, y: 70 } }
+    const ct = th?.contentTransform ?? { x: defaultTransforms.content.x, y: defaultTransforms.content.y, rotation: 0, scale: 1 }
+    const tt = th?.timeTransform ?? { x: defaultTransforms.time.x, y: defaultTransforms.time.y, rotation: 0, scale: 1 }
 
     return (
       <div
@@ -568,40 +568,53 @@ export function AddSubReminderModal({
             opacity: th?.overlayEnabled ? (th?.overlayOpacity ?? 0.45) : 0,
           }}
         />
-        <div
-          className="relative z-[1] flex h-full w-full flex-col justify-center"
-          style={{ textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'], alignItems: previewAlignItems, padding: `${toP(paddingPx)}px` }}
-        >
+        <div className="relative z-[1] h-full w-full">
           <div style={{
+            position: 'absolute',
+            left: `${ct.x}%`,
+            top: `${ct.y}%`,
+            transform: `translate(-50%, -50%) rotate(${ct.rotation}deg) scale(${ct.scale})`,
+            transformOrigin: 'center',
             color: th?.contentColor || '#fff',
             fontSize: `${toP(line1FontPx)}px`,
             lineHeight: 1.35,
-            marginBottom: `${toP(line1MbPx)}px`,
-            fontWeight: 600,
-            width: '100%',
+            fontWeight: th?.contentFontWeight ?? 600,
             maxWidth: '96%',
-            whiteSpace: 'pre-wrap',
+            whiteSpace: 'pre-wrap' as const,
+            textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'],
+            fontFamily: 'system-ui, "Microsoft YaHei", sans-serif',
           }}>
             {previewText}
           </div>
           <div style={{
+            position: 'absolute',
+            left: `${tt.x}%`,
+            top: `${tt.y}%`,
+            transform: `translate(-50%, -50%) rotate(${tt.rotation}deg) scale(${tt.scale})`,
+            transformOrigin: 'center',
             color: th?.timeColor || '#e2e8f0',
             fontSize: `${toP(line2FontPx)}px`,
-            marginBottom: `${toP(line2MbPx)}px`,
-            width: '100%',
+            fontWeight: th?.timeFontWeight ?? 400,
+            textAlign: (th?.textAlign ?? 'center') as CSSProperties['textAlign'],
+            fontFamily: 'system-ui, "Microsoft YaHei", sans-serif',
           }}>
             {previewTimeStr}
           </div>
           {isRest && (() => {
             const countdownFontMax = Math.max(48, Math.min(280, Math.floor(th?.countdownFontSize ?? 180)))
             const countdownFontPx = clampByViewport(80, 0.2, countdownFontMax, screenW)
+            const cdt = th?.countdownTransform ?? { x: defaultTransforms.countdown.x, y: defaultTransforms.countdown.y, rotation: 0, scale: 1 }
             return (
               <div style={{
+                position: 'absolute',
+                left: `${cdt.x}%`,
+                top: `${cdt.y}%`,
+                transform: `translate(-50%, -50%) rotate(${cdt.rotation}deg) scale(${cdt.scale})`,
+                transformOrigin: 'center',
                 color: th?.timeColor || '#e2e8f0',
                 fontSize: `${toP(countdownFontPx)}px`,
                 lineHeight: 1,
-                fontWeight: 700,
-                width: '100%',
+                fontWeight: th?.countdownFontWeight ?? 700,
               }}>
                 5
               </div>

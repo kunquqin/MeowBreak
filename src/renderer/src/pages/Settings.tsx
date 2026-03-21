@@ -13,7 +13,7 @@ import type { Transform } from '@dnd-kit/utilities'
 // Framer Motion Reorder 已移除——其 layout 投影系统在混合类型列表中
 // 会导致兄弟卡片位置不随内容高度变化而更新（秒表打点后下方卡重叠）。
 // 大类排序现统一使用 @dnd-kit/sortable。
-import type { AppSettings, CategoryKind, PresetPools, ReminderCategory, SubReminder, CountdownItem, PopupTheme } from '../types'
+import type { AppSettings, CategoryKind, PresetPools, ReminderCategory, SubReminder, CountdownItem, PopupTheme, TextTransform } from '../types'
 import { getDefaultPresetPools, getStableDefaultCategories, getDefaultPopupThemes, getDefaultEntitlements, genId } from '../types'
 import { AddSubReminderModal, type AddSubReminderPayload } from '../components/AddSubReminderModal'
 import { PresetTextField } from '../components/PresetTextField'
@@ -29,6 +29,7 @@ import {
   type StopwatchRuntime,
 } from '../utils/stopwatchUtils'
 import { toPreviewImageUrl } from '../utils/popupThemePreview'
+import { ThemePreviewEditor, type TextElementKey } from '../components/ThemePreviewEditor'
 import { buildSplitSchedule } from '../../../shared/splitSchedule'
 
 /** 每次使用时读取，避免模块加载时 preload 尚未注入 */
@@ -119,9 +120,7 @@ function formatIntervalHms(item: SubReminder & { mode: 'interval' }): string {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
-function clampByViewport(minPx: number, viewportRatio: number, maxPx: number, viewportWidth: number): number {
-  return Math.max(minPx, Math.min(maxPx, viewportWidth * viewportRatio))
-}
+// clampByViewport 已移至 ThemePreviewEditor 组件内部
 
 function getDefaultCategoryName(kind: CategoryKind): string {
   return kind === 'alarm' ? '未命名闹钟类型' : kind === 'countdown' ? '未命名倒计时类型' : '未命名秒表类型'
@@ -1736,6 +1735,11 @@ export function Settings() {
   const [themeBatchApplyDraft, setThemeBatchApplyDraft] = useState<ThemeBatchApplyDraft | null>(null)
   const [previewImageUrlMap, setPreviewImageUrlMap] = useState<Record<string, string>>({})
   const [primaryDisplaySize, setPrimaryDisplaySize] = useState<{ width: number; height: number } | null>(null)
+  const [themeSelectedElementsMap, setThemeSelectedElementsMap] = useState<Record<string, TextElementKey[]>>({})
+  const getThemeSelectedElements = (themeId: string): TextElementKey[] => themeSelectedElementsMap[themeId] ?? []
+  const setThemeSelectedElements = (themeId: string, els: TextElementKey[]) => {
+    setThemeSelectedElementsMap((prev) => ({ ...prev, [themeId]: els }))
+  }
   const listContainerRefsMap = useRef<Record<string, React.RefObject<HTMLDivElement | null>>>({})
   const categoryReorderContainerRef = useRef<HTMLDivElement>(null)
   const popupThemeSectionRef = useRef<HTMLElement>(null)
@@ -2365,7 +2369,7 @@ export function Settings() {
   const reminderContentPresets = settings.presetPools.reminderContent ?? []
   const restContentPresets = settings.presetPools.restContent ?? []
   const subTitlePresets = settings.presetPools.subTitle ?? getDefaultPresetPools().subTitle
-  const popupThemes = settings.popupThemes ?? getDefaultPopupThemes()
+  const popupThemes = Array.isArray(settings.popupThemes) ? settings.popupThemes : getDefaultPopupThemes()
   const getFirstThemeIdByTarget = (target: 'main' | 'rest') =>
     popupThemes.find((t) => t.target === target)?.id
 
@@ -2409,10 +2413,17 @@ export function Settings() {
     setPopupThemes([newTheme, ...popupThemes])
   }
 
+  /** 函数式更新 prev.popupThemes：打组松手会连续 patch 多个字段，闭包里的数组会互相覆盖。注意不能传给 setPopupThemes(函数)，setPopupThemes 只接受数组，否则会整段把函数写进 state → .map 崩溃 */
   const updatePopupTheme = (themeId: string, patch: Partial<PopupTheme>) => {
-    setPopupThemes(
-      popupThemes.map((t) => (t.id === themeId ? { ...t, ...patch } : t))
-    )
+    setSettingsState((prev) => {
+      const themes = Array.isArray(prev.popupThemes) ? prev.popupThemes : getDefaultPopupThemes()
+      return {
+        ...prev,
+        popupThemes: themes.map((t) => (t.id === themeId ? { ...t, ...patch } : t)),
+      }
+    })
+    setSaveStatus('idle')
+    setSaveError('')
   }
 
   const removePopupTheme = (themeId: string) => {
@@ -2818,23 +2829,6 @@ export function Settings() {
           <div className="space-y-3">
             {popupThemes.map((theme) => {
               const previewViewportWidth = primaryDisplaySize?.width ?? (popupPreviewAspect === '16:9' ? 1920 : 1600)
-              const previewRenderMaxWidth = 920
-              const previewScale = Math.min(1, previewRenderMaxWidth / Math.max(1, previewViewportWidth))
-              const toPreviewPx = (px: number) => Math.max(1, px * previewScale)
-              const contentFontMax = Math.max(14, Math.min(120, Math.floor(theme.contentFontSize ?? 56)))
-              const timeFontMax = Math.max(10, Math.min(100, Math.floor(theme.timeFontSize ?? 30)))
-              const countdownFontMax = Math.max(48, Math.min(280, Math.floor(theme.countdownFontSize ?? 180)))
-              const mainLine1FontPx = clampByViewport(20, 0.06, contentFontMax, previewViewportWidth)
-              const mainLine2FontPx = clampByViewport(14, 0.03, timeFontMax, previewViewportWidth)
-              const mainPaddingPx = Math.min(previewViewportWidth * 0.05, 48)
-              const mainLine1MbPx = clampByViewport(16, 0.03, 40, previewViewportWidth)
-              const mainLine2MbPx = clampByViewport(32, 0.05, 64, previewViewportWidth)
-              const restLine1FontPx = clampByViewport(20, 0.06, contentFontMax, previewViewportWidth)
-              const restLine2FontPx = clampByViewport(14, 0.03, timeFontMax, previewViewportWidth)
-              const restCountdownFontPx = clampByViewport(80, 0.2, countdownFontMax, previewViewportWidth)
-              const restLine1MbPx = clampByViewport(16, 0.03, 40, previewViewportWidth)
-              const restLine2MbPx = clampByViewport(24, 0.04, 56, previewViewportWidth)
-              const previewAlignItems = theme.textAlign === 'left' ? 'flex-start' : theme.textAlign === 'right' ? 'flex-end' : 'center'
               return (
               <div key={theme.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -2877,100 +2871,15 @@ export function Settings() {
                   </button>
                 </div>
                 <div className="space-y-3">
-                  <div className="rounded-md border border-slate-200 bg-white p-2">
-                    <div
-                      className="relative mx-auto w-full max-w-[920px] overflow-hidden rounded border border-slate-300 bg-black"
-                      style={{ aspectRatio: popupPreviewAspect === '16:9' ? '16 / 9' : '4 / 3' }}
-                    >
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          background:
-                            theme.backgroundType === 'image' && (theme.imagePath || (theme.imageFolderFiles && theme.imageFolderFiles.length > 0))
-                              ? `url("${previewImageUrlMap[((theme.imageSourceType === 'folder' ? theme.imageFolderFiles?.[0] : theme.imagePath) ?? '').trim()] || toPreviewImageUrl((theme.imageSourceType === 'folder' ? theme.imageFolderFiles?.[0] : theme.imagePath) ?? '')}") center / cover no-repeat, ${theme.backgroundColor || '#000000'}`
-                              : (theme.backgroundColor || '#000000'),
-                        }}
-                      />
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          background: theme.overlayColor || '#000000',
-                          opacity: theme.overlayEnabled ? Math.max(0, Math.min(1, theme.overlayOpacity ?? 0.45)) : 0,
-                        }}
-                      />
-                      <div
-                        className="relative z-[1] flex h-full w-full flex-col justify-center gap-2 px-6"
-                        style={{ textAlign: theme.textAlign, alignItems: previewAlignItems, padding: `${toPreviewPx(mainPaddingPx)}px` }}
-                      >
-                        {theme.target === 'main' ? (
-                          <>
-                            <div
-                              style={{
-                                color: theme.contentColor,
-                                fontSize: `${toPreviewPx(mainLine1FontPx)}px`,
-                                lineHeight: 1.35,
-                                marginBottom: `${toPreviewPx(mainLine1MbPx)}px`,
-                                fontWeight: 600,
-                                width: '100%',
-                                maxWidth: '96%',
-                                whiteSpace: 'pre-wrap',
-                              }}
-                            >
-                              提醒内容
-                            </div>
-                            <div
-                              style={{
-                                color: theme.timeColor,
-                                fontSize: `${toPreviewPx(mainLine2FontPx)}px`,
-                                marginBottom: `${toPreviewPx(mainLine2MbPx)}px`,
-                                width: '100%',
-                              }}
-                            >
-                              12:00
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div
-                              style={{
-                                color: theme.contentColor,
-                                fontSize: `${toPreviewPx(restLine1FontPx)}px`,
-                                lineHeight: 1.35,
-                                marginBottom: `${toPreviewPx(restLine1MbPx)}px`,
-                                fontWeight: 600,
-                                width: '100%',
-                                maxWidth: '96%',
-                                whiteSpace: 'pre-wrap',
-                              }}
-                            >
-                              休息提醒内容
-                            </div>
-                            <div
-                              style={{
-                                color: theme.timeColor,
-                                fontSize: `${toPreviewPx(restLine2FontPx)}px`,
-                                marginBottom: `${toPreviewPx(restLine2MbPx)}px`,
-                                width: '100%',
-                              }}
-                            >
-                              12:00
-                            </div>
-                            <div
-                              style={{
-                                color: theme.timeColor,
-                                fontSize: `${toPreviewPx(restCountdownFontPx)}px`,
-                                lineHeight: 1,
-                                fontWeight: 700,
-                                width: '100%',
-                              }}
-                            >
-                              5
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
+                  <ThemePreviewEditor
+                    theme={theme}
+                    onUpdateTheme={updatePopupTheme}
+                    previewViewportWidth={previewViewportWidth}
+                    previewImageUrlMap={previewImageUrlMap}
+                    popupPreviewAspect={popupPreviewAspect}
+                    selectedElements={getThemeSelectedElements(theme.id)}
+                    onSelectElements={(els) => setThemeSelectedElements(theme.id, els)}
+                  />
                   <div className="flex items-center justify-between gap-3 flex-wrap rounded-md border border-slate-200 bg-white px-3 py-2">
                     <p className="text-xs text-slate-500">参数分页</p>
                     <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5">
@@ -3079,6 +2988,134 @@ export function Settings() {
                           <option value="right">右对齐</option>
                         </select>
                       </label>
+                    </div>
+                    {/* 字重 */}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      <label className="text-xs text-slate-600 space-y-1">
+                        <span>内容字重</span>
+                        <select value={theme.contentFontWeight ?? 600}
+                          onChange={(e) => updatePopupTheme(theme.id, { contentFontWeight: Number(e.target.value) })}
+                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm">
+                          <option value={100}>100 Thin</option><option value={200}>200 Extra Light</option>
+                          <option value={300}>300 Light</option><option value={400}>400 Normal</option>
+                          <option value={500}>500 Medium</option><option value={600}>600 Semi Bold</option>
+                          <option value={700}>700 Bold</option><option value={800}>800 Extra Bold</option>
+                          <option value={900}>900 Black</option>
+                        </select>
+                      </label>
+                      <label className="text-xs text-slate-600 space-y-1">
+                        <span>时间字重</span>
+                        <select value={theme.timeFontWeight ?? 400}
+                          onChange={(e) => updatePopupTheme(theme.id, { timeFontWeight: Number(e.target.value) })}
+                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm">
+                          <option value={100}>100 Thin</option><option value={200}>200 Extra Light</option>
+                          <option value={300}>300 Light</option><option value={400}>400 Normal</option>
+                          <option value={500}>500 Medium</option><option value={600}>600 Semi Bold</option>
+                          <option value={700}>700 Bold</option><option value={800}>800 Extra Bold</option>
+                          <option value={900}>900 Black</option>
+                        </select>
+                      </label>
+                      {theme.target === 'rest' && (
+                        <label className="text-xs text-slate-600 space-y-1">
+                          <span>倒计时字重</span>
+                          <select value={theme.countdownFontWeight ?? 700}
+                            onChange={(e) => updatePopupTheme(theme.id, { countdownFontWeight: Number(e.target.value) })}
+                            className="w-full rounded border border-slate-300 px-2 py-1 text-sm">
+                            <option value={100}>100 Thin</option><option value={200}>200 Extra Light</option>
+                            <option value={300}>300 Light</option><option value={400}>400 Normal</option>
+                            <option value={500}>500 Medium</option><option value={600}>600 Semi Bold</option>
+                            <option value={700}>700 Bold</option><option value={800}>800 Extra Bold</option>
+                            <option value={900}>900 Black</option>
+                          </select>
+                        </label>
+                      )}
+                    </div>
+                    {/* 位置与变换 */}
+                    <div className="border-t border-slate-100 pt-2 mt-1 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <h5 className="text-xs font-semibold text-slate-700">位置与变换</h5>
+                        <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5">
+                          {(['content', 'time', ...(theme.target === 'rest' ? ['countdown'] : [])] as TextElementKey[]).map((elKey) => {
+                            const sels = getThemeSelectedElements(theme.id)
+                            const active = sels.includes(elKey)
+                            return (
+                              <button
+                                key={elKey}
+                                type="button"
+                                onClick={() => {
+                                  if (active) setThemeSelectedElements(theme.id, sels.filter((k) => k !== elKey))
+                                  else setThemeSelectedElements(theme.id, [...sels, elKey])
+                                }}
+                                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${active ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                              >
+                                {elKey === 'content' ? '内容' : elKey === 'time' ? '时间' : '倒计时'}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                      {(() => {
+                        const sels = getThemeSelectedElements(theme.id)
+                        const sel = sels[0]
+                        if (!sel) return <p className="text-[11px] text-slate-400">点击预览区文字或上方按钮选中元素</p>
+                        const tField = sel === 'content' ? 'contentTransform' : sel === 'time' ? 'timeTransform' : 'countdownTransform'
+                        const defaults: Record<string, Record<TextElementKey, TextTransform>> = {
+                          main: { content: { x: 50, y: 42, rotation: 0, scale: 1 }, time: { x: 50, y: 55, rotation: 0, scale: 1 }, countdown: { x: 50, y: 70, rotation: 0, scale: 1 } },
+                          rest: { content: { x: 50, y: 30, rotation: 0, scale: 1 }, time: { x: 50, y: 48, rotation: 0, scale: 1 }, countdown: { x: 50, y: 70, rotation: 0, scale: 1 } },
+                        }
+                        const def = defaults[theme.target]?.[sel] ?? { x: 50, y: 50, rotation: 0, scale: 1 }
+                        const t: TextTransform = (theme[tField as keyof PopupTheme] as TextTransform | undefined) ?? def
+                        const update = (patch: Partial<TextTransform>) => updatePopupTheme(theme.id, { [tField]: { ...t, ...patch } })
+                        return (
+                          <div className="space-y-2">
+                            <p className="text-[11px] text-indigo-500">
+                              {sel === 'content' ? '内容' : sel === 'time' ? '时间' : '倒计时'}
+                              {sels.length >= 2 ? ` (+ ${sels.length - 1} 个)` : ''}
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                              <label className="text-[11px] text-slate-600 space-y-0.5">
+                                <span>X 位置 (%)</span>
+                                <input type="number" min={0} max={100} step={0.5} value={+t.x.toFixed(1)}
+                                  onChange={(e) => update({ x: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                              </label>
+                              <label className="text-[11px] text-slate-600 space-y-0.5">
+                                <span>Y 位置 (%)</span>
+                                <input type="number" min={0} max={100} step={0.5} value={+t.y.toFixed(1)}
+                                  onChange={(e) => update({ y: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                              </label>
+                              <label className="text-[11px] text-slate-600 space-y-0.5">
+                                <span>旋转 (°)</span>
+                                <input type="number" min={-360} max={360} step={1} value={+t.rotation.toFixed(1)}
+                                  onChange={(e) => update({ rotation: Math.max(-360, Math.min(360, Number(e.target.value) || 0)) })}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                              </label>
+                              <label className="text-[11px] text-slate-600 space-y-0.5">
+                                <span>缩放</span>
+                                <input type="number" min={0.1} max={5} step={0.05} value={+t.scale.toFixed(2)}
+                                  onChange={(e) => update({ scale: Math.max(0.1, Math.min(5, Number(e.target.value) || 1)) })}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs" />
+                              </label>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const patch: Partial<PopupTheme> = {}
+                                for (const k of sels) {
+                                  const field = k === 'content' ? 'contentTransform' : k === 'time' ? 'timeTransform' : 'countdownTransform'
+                                  const d = defaults[theme.target]?.[k] ?? { x: 50, y: 50, rotation: 0, scale: 1 }
+                                  ;(patch as Record<string, TextTransform>)[field] = { ...d }
+                                }
+                                updatePopupTheme(theme.id, patch)
+                              }}
+                              className="text-[11px] text-indigo-600 hover:text-indigo-800"
+                            >
+                              {sels.length >= 2 ? '将全部选中项重置为默认位置' : '重置为默认位置'}
+                            </button>
+                          </div>
+                        )
+                      })()}
                     </div>
                   </div>
                   )}

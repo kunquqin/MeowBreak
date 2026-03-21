@@ -11,6 +11,22 @@ export type PopupTextAlign = 'left' | 'center' | 'right'
 export type PopupImageSourceType = 'single' | 'folder'
 export type PopupFolderPlayMode = 'sequence' | 'random'
 
+/** 文字元素空间变换（百分比定位 + 旋转 + 缩放） */
+export interface TextTransform {
+  /** 水平位置，容器宽度百分比（0=左边, 50=居中, 100=右边） */
+  x: number
+  /** 垂直位置，容器高度百分比（0=顶部, 50=居中, 100=底部） */
+  y: number
+  /** 旋转角度（度） */
+  rotation: number
+  /** 缩放倍率（1=原始大小） */
+  scale: number
+}
+
+export function defaultTextTransform(): TextTransform {
+  return { x: 50, y: 50, rotation: 0, scale: 1 }
+}
+
 export interface PopupTheme {
   id: string
   name: string
@@ -33,6 +49,16 @@ export interface PopupTheme {
   timeFontSize: number
   countdownFontSize: number
   textAlign: PopupTextAlign
+  /** 字重 (100-900) */
+  contentFontWeight?: number
+  timeFontWeight?: number
+  countdownFontWeight?: number
+  /** 提醒内容文字空间变换（可选，undefined 时使用传统 flex 布局） */
+  contentTransform?: TextTransform
+  /** 时间文字空间变换 */
+  timeTransform?: TextTransform
+  /** 倒计时数字空间变换（仅休息弹窗） */
+  countdownTransform?: TextTransform
 }
 
 export interface AppEntitlements {
@@ -223,6 +249,8 @@ function defaultMainTheme(): PopupTheme {
     timeFontSize: 30,
     countdownFontSize: 180,
     textAlign: 'center',
+    contentTransform: { x: 50, y: 42, rotation: 0, scale: 1 },
+    timeTransform: { x: 50, y: 55, rotation: 0, scale: 1 },
   }
 }
 
@@ -243,6 +271,9 @@ function defaultRestTheme(): PopupTheme {
     timeFontSize: 24,
     countdownFontSize: 180,
     textAlign: 'center',
+    contentTransform: { x: 50, y: 30, rotation: 0, scale: 1 },
+    timeTransform: { x: 50, y: 48, rotation: 0, scale: 1 },
+    countdownTransform: { x: 50, y: 70, rotation: 0, scale: 1 },
   }
 }
 

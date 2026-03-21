@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import type { AppSettings, CategoryKind, ReminderCategory, SubReminder, PresetPools, PopupTheme, AppEntitlements } from '../shared/settings'
+import type { AppSettings, CategoryKind, ReminderCategory, SubReminder, PresetPools, PopupTheme, AppEntitlements, TextTransform } from '../shared/settings'
 import { getDefaultPresetPools, getStableDefaultCategories, getDefaultPopupThemes, getDefaultEntitlements } from '../shared/settings'
 
 export type { AppSettings, ReminderCategory, SubReminder } from '../shared/settings'
@@ -282,6 +282,22 @@ function normalizePresetPools(raw: unknown, categories: ReminderCategory[]): Pre
   }
 }
 
+function normalizeTextTransform(raw: unknown): TextTransform | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const x = Number(o.x)
+  const y = Number(o.y)
+  const rotation = Number(o.rotation)
+  const scale = Number(o.scale)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined
+  return {
+    x: Math.max(0, Math.min(100, x)),
+    y: Math.max(0, Math.min(100, y)),
+    rotation: Number.isFinite(rotation) ? rotation % 360 : 0,
+    scale: Number.isFinite(scale) ? Math.max(0.1, Math.min(5, scale)) : 1,
+  }
+}
+
 function normalizePopupThemes(raw: unknown): PopupTheme[] {
   if (!Array.isArray(raw) || raw.length === 0) return [...defaultPopupThemes]
   const out: PopupTheme[] = raw
@@ -315,6 +331,15 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
       const timeFontSize = Math.max(10, Math.min(100, Math.floor(Number(o.timeFontSize) || 30)))
       const countdownFontSize = Math.max(24, Math.min(260, Math.floor(Number(o.countdownFontSize) || 180)))
       const textAlign = o.textAlign === 'left' || o.textAlign === 'right' ? o.textAlign : 'center'
+      const contentFontWeightNum = Number(o.contentFontWeight)
+      const contentFontWeight = Number.isFinite(contentFontWeightNum) ? Math.max(100, Math.min(900, Math.round(contentFontWeightNum / 100) * 100)) : undefined
+      const timeFontWeightNum = Number(o.timeFontWeight)
+      const timeFontWeight = Number.isFinite(timeFontWeightNum) ? Math.max(100, Math.min(900, Math.round(timeFontWeightNum / 100) * 100)) : undefined
+      const countdownFontWeightNum = Number(o.countdownFontWeight)
+      const countdownFontWeight = Number.isFinite(countdownFontWeightNum) ? Math.max(100, Math.min(900, Math.round(countdownFontWeightNum / 100) * 100)) : undefined
+      const contentTransform = normalizeTextTransform(o.contentTransform)
+      const timeTransform = normalizeTextTransform(o.timeTransform)
+      const countdownTransform = normalizeTextTransform(o.countdownTransform)
       return {
         id,
         name,
@@ -337,6 +362,12 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
         timeFontSize,
         countdownFontSize,
         textAlign,
+        ...(contentFontWeight !== undefined ? { contentFontWeight } : {}),
+        ...(timeFontWeight !== undefined ? { timeFontWeight } : {}),
+        ...(countdownFontWeight !== undefined ? { countdownFontWeight } : {}),
+        ...(contentTransform ? { contentTransform } : {}),
+        ...(timeTransform ? { timeTransform } : {}),
+        ...(countdownTransform ? { countdownTransform } : {}),
       }
     })
     .filter((x): x is PopupTheme => x !== null)
