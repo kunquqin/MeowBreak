@@ -12,7 +12,10 @@ export interface ReminderPopupOptions {
   body: string
   timeStr: string
   theme?: PopupTheme
-  /** 休息主题倒计时绑定层文案（如剩余 mm:ss）；无则该层可为空 */
+  /**
+   * 已废弃：休息段中途不在主题壁纸页叠倒计时（最后 N 秒用 `showRestEndCountdownPopup` 硬切全屏）。
+   * 保留字段仅为类型兼容，主进程不应再传入。
+   */
   countdownStr?: string
 }
 
@@ -23,6 +26,15 @@ function escapeHtml(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+/**
+ * 图层路径用 `style="..."` 拼整条 CSS 时，`font-family: system-ui, "Microsoft YaHei", sans-serif`
+ * 以及 `url("data:...")` 里的双引号会提前结束 HTML 属性，后续 font-size/color 全部失效 → 只剩 body 默认小白字、布局乱。
+ * 写入属性前把 `"` 转成 `&quot;`（及 `&`），浏览器解码后 CSS 仍正确。
+ */
+function escapeInlineStyleForHtmlAttribute(css: string): string {
+  return css.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 }
 
 function escapeCssUrl(s: string): string {
@@ -118,10 +130,20 @@ function clampLayerTransformScale(raw: number | undefined): number {
   return Math.max(0.1, Math.min(5, s))
 }
 
+/** 主题字号写入磁盘时偶发非数字，Math.floor(NaN) 会导致 CSS font-size 无效、继承成系统小字 */
+function safeFontPx(raw: unknown, fallback: number, minPx: number): number {
+  const n = Math.floor(Number(raw))
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(minPx, Math.min(8000, n))
+}
+
 function transformStyle(t: TextTransform | undefined, fallbackX: number, fallbackY: number): string {
-  const x = t?.x ?? fallbackX
-  const y = t?.y ?? fallbackY
-  const r = t?.rotation ?? 0
+  const xRaw = t?.x ?? fallbackX
+  const yRaw = t?.y ?? fallbackY
+  const x = Number.isFinite(Number(xRaw)) ? Math.max(0, Math.min(100, Number(xRaw))) : fallbackX
+  const y = Number.isFinite(Number(yRaw)) ? Math.max(0, Math.min(100, Number(yRaw))) : fallbackY
+  const rRaw = t?.rotation ?? 0
+  const r = Number.isFinite(Number(rRaw)) ? (Number(rRaw) % 360) : 0
   const s = clampLayerTransformScale(t?.scale)
   return `position: absolute; left: ${x}%; top: ${y}%; transform: translate(-50%, -50%) rotate(${r}deg) scale(${s}); transform-origin: center;`
 }
@@ -175,7 +197,7 @@ function textBoxLayoutCss(t: TextTransform | undefined, layer: TextBoxLayer): st
   return s
 }
 
-/** 各文字层排版：对齐 / 字间距 / 行高（缺省回落 textAlign 与内置行高） */
+/** 与 ThemePreviewEditor 中单行时间层：`shortLineLayer` 下强制 `lineHeight: 1` */
 function layerTypographyCss(theme: PopupTheme | undefined, layer: 'content' | 'time' | 'countdown'): string {
   const baseAlign = theme?.textAlign ?? 'center'
   let align = baseAlign
@@ -188,7 +210,7 @@ function layerTypographyCss(theme: PopupTheme | undefined, layer: 'content' | 't
   } else if (layer === 'time') {
     align = theme?.timeTextAlign ?? baseAlign
     letterSpacing = theme?.timeLetterSpacing ?? 0
-    lineHeight = theme?.timeLineHeight ?? 1.35
+    lineHeight = theme?.timeLineHeight ?? 1
   } else {
     align = theme?.countdownTextAlign ?? baseAlign
     letterSpacing = theme?.countdownLetterSpacing ?? 0
@@ -196,6 +218,16 @@ function layerTypographyCss(theme: PopupTheme | undefined, layer: 'content' | 't
   }
   return `text-align: ${align}; letter-spacing: ${letterSpacing}px; line-height: ${lineHeight};`
 }
+
+/** 与 ThemePreviewEditor 时间层 `display:flex` + `justifyContent` 一致 */
+function flexJustifyForTextAlign(align: string): string {
+  if (align === 'left') return 'flex-start'
+  if (align === 'right') return 'flex-end'
+  return 'center'
+}
+
+/** 预览中各绑定文字层有 `padding: toPreviewPx(3)`；全屏按逻辑像素 3px 对齐 */
+const BINDING_TEXT_PADDING_PX = 3
 
 function textLayerTypographyCss(theme: PopupTheme | undefined, L: TextThemeLayer): string {
   const baseAlign = theme?.textAlign ?? 'center'
@@ -274,8 +306,8 @@ function buildReminderHtmlLegacy(options: ReminderPopupOptions): string {
   const titleEsc = escapeHtml(title)
   const bodyEsc = escapeHtml(body)
   const timeEsc = escapeHtml(timeStr)
-  const contentFont = Math.max(1, Math.min(8000, Math.floor(theme?.contentFontSize ?? 180)))
-  const timeFont = Math.max(1, Math.min(8000, Math.floor(theme?.timeFontSize ?? 100)))
+  const contentFont = safeFontPx(theme?.contentFontSize, 180, 16)
+  const timeFont = safeFontPx(theme?.timeFontSize, 100, 14)
   const contentColor = theme?.contentColor || '#ffffff'
   const timeColor = theme?.timeColor || '#e2e8f0'
   const overlayEnabled = Boolean(theme?.overlayEnabled)
@@ -298,11 +330,11 @@ function buildReminderHtmlLegacy(options: ReminderPopupOptions): string {
   <title>${titleEsc}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; ${bgStyle} }
+    html, body { width: 100%; height: 100%; min-height: 100%; margin: 0; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; ${bgStyle} }
     .overlay { position: fixed; inset: 0; background: ${overlayColor}; opacity: ${overlayEnabled ? overlayOpacity : 0}; pointer-events: none; }
     .content { position: relative; z-index: 1; width: 100%; height: 100%; }
-    .line1 { ${contentPos} font-family: ${contentFontFamilyCss}; font-size: ${contentFont}px; color: ${contentColor}; ${tyContent} font-weight: ${contentWeight}; ${textBoxLayoutCss(theme?.contentTransform, 'content')} ${layerTextEffectsCss(theme, 'content')} }
-    .line2 { ${timePos} font-family: ${timeFontFamilyCss}; font-size: ${timeFont}px; color: ${timeColor}; ${tyTime} font-weight: ${timeWeight}; ${textBoxLayoutCss(theme?.timeTransform, 'time')} ${layerTextEffectsCss(theme, 'time')} }
+    .line1 { ${contentPos} box-sizing: border-box; padding: ${BINDING_TEXT_PADDING_PX}px; font-family: ${contentFontFamilyCss}; font-size: ${contentFont}px; color: ${contentColor}; ${tyContent} font-weight: ${contentWeight}; ${textBoxLayoutCss(theme?.contentTransform, 'content')} ${layerTextEffectsCss(theme, 'content')} }
+    .line2 { ${timePos} box-sizing: border-box; padding: ${BINDING_TEXT_PADDING_PX}px; display: flex; align-items: center; justify-content: ${flexJustifyForTextAlign(theme?.timeTextAlign ?? theme?.textAlign ?? 'center')}; font-family: ${timeFontFamilyCss}; font-size: ${timeFont}px; color: ${timeColor}; ${tyTime} font-weight: ${timeWeight}; ${textBoxLayoutCss(theme?.timeTransform, 'time')} ${layerTextEffectsCss(theme, 'time')} }
     ${REMINDER_CLOSE_CSS}
   </style>
 </head>
@@ -323,7 +355,6 @@ function renderLayerFragment(
   z: number,
   bodyEsc: string,
   timeEsc: string,
-  countdownEsc: string,
   htmlDir: string,
 ): string {
   if (!L.visible) return ''
@@ -336,30 +367,31 @@ function renderLayerFragment(
           if (base) {
             const urlEsc = escapeCssUrl(base)
             const bgc = theme.backgroundColor || '#000000'
-            return `<div style="position:absolute;inset:0;z-index:${z};pointer-events:none;background-image:url('./${urlEsc}');background-size:cover;background-position:center;background-repeat:no-repeat;background-color:${bgc};"></div>`
+            return `<div style="${escapeInlineStyleForHtmlAttribute(`position:absolute;inset:0;z-index:${z};pointer-events:none;background-image:url('./${urlEsc}');background-size:cover;background-position:center;background-repeat:no-repeat;background-color:${bgc};`)}"></div>`
           }
         }
       }
       const bg = getBackgroundStyle(theme)
-      return `<div style="position:absolute;inset:0;z-index:${z};pointer-events:none;${bg}"></div>`
+      return `<div style="${escapeInlineStyleForHtmlAttribute(`position:absolute;inset:0;z-index:${z};pointer-events:none;${bg}`)}"></div>`
     }
     case 'overlay': {
       const overlayColor = theme.overlayColor || '#000000'
       const overlayOpacity = theme.overlayEnabled ? clampOpacity(theme.overlayOpacity, 0.45) : 0
-      return `<div style="position:absolute;inset:0;z-index:${z};pointer-events:none;background:${overlayColor};opacity:${overlayOpacity};"></div>`
+      return `<div style="${escapeInlineStyleForHtmlAttribute(`position:absolute;inset:0;z-index:${z};pointer-events:none;background:${overlayColor};opacity:${overlayOpacity};`)}"></div>`
     }
     case 'text': {
       const tl = L as TextThemeLayer
       if (tl.bindsReminderBody) {
         /** 与 ThemePreviewEditor.renderTextLayerForKey(content) 一致：排版以主题根字段为准，避免图层 JSON 与根字段漂移时出现「预览正常、全屏弹窗字极小」 */
-        const fs = Math.max(16, Math.min(8000, Math.floor(theme.contentFontSize ?? 180)))
+        const fs = safeFontPx(theme.contentFontSize, 180, 16)
         const col = theme.contentColor || '#ffffff'
         const ff = resolvePopupFontFamilyCss(theme, 'content')
         const pos = transformStyle(theme.contentTransform, 50, 42)
         const fw = theme.contentFontWeight ?? 600
         const ty = layerTypographyCss(theme, 'content')
         const fx = layerTextEffectsCss(theme, 'content')
-        return `<div style="${pos} z-index:${z}; pointer-events:none; font-family:${ff}; font-size:${fs}px; color:${col}; ${ty} font-weight:${fw}; ${textBoxLayoutCss(theme.contentTransform, 'content')} ${fx}">${bodyEsc}</div>`
+        const stBody = `${pos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px; font-family:${ff}; font-size:${fs}px; color:${col}; ${ty} font-weight:${fw}; ${textBoxLayoutCss(theme.contentTransform, 'content')} ${fx}`
+        return `<div style="${escapeInlineStyleForHtmlAttribute(stBody)}">${bodyEsc}</div>`
       }
       const srcEsc = escapeHtml(tl.text ?? '')
       const fs = Math.max(1, Math.min(8000, Math.floor(tl.fontSize ?? 28)))
@@ -368,16 +400,19 @@ function renderLayerFragment(
       const pos = transformStyle(tl.transform, 50, 50)
       const fw = tl.fontWeight ?? 500
       const ty = textLayerTypographyCss(theme, tl)
-      return `<div style="${pos} z-index:${z}; pointer-events:none; font-family:${ff}; font-size:${fs}px; color:${col}; ${ty} font-weight:${fw}; ${textBoxLayoutCss(tl.transform, 'content')} ${layerTextEffectsCssFromEffects(tl.textEffects)}">${srcEsc}</div>`
+      const stDeco = `${pos} z-index:${z}; pointer-events:none; font-family:${ff}; font-size:${fs}px; color:${col}; ${ty} font-weight:${fw}; ${textBoxLayoutCss(tl.transform, 'content')} ${layerTextEffectsCssFromEffects(tl.textEffects)}`
+      return `<div style="${escapeInlineStyleForHtmlAttribute(stDeco)}">${srcEsc}</div>`
     }
     case 'bindingTime': {
-      const timeFont = Math.max(14, Math.min(8000, Math.floor(theme.timeFontSize ?? 100)))
+      const timeFont = safeFontPx(theme.timeFontSize, 100, 14)
       const timeColor = theme.timeColor || '#e2e8f0'
       const timeFontFamilyCss = resolvePopupFontFamilyCss(theme, 'time')
       const timePos = transformStyle(theme.timeTransform, 50, 55)
       const timeWeight = theme.timeFontWeight ?? 400
       const tyTime = layerTypographyCss(theme, 'time')
-      return `<div style="${timePos} z-index:${z}; pointer-events:none; font-family:${timeFontFamilyCss}; font-size:${timeFont}px; color:${timeColor}; ${tyTime} font-weight:${timeWeight}; ${textBoxLayoutCss(theme.timeTransform, 'time')} ${layerTextEffectsCss(theme, 'time')}">${timeEsc}</div>`
+      const tj = flexJustifyForTextAlign(theme?.timeTextAlign ?? theme?.textAlign ?? 'center')
+      const stTime = `${timePos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px; display:flex; align-items:center; justify-content:${tj}; font-family:${timeFontFamilyCss}; font-size:${timeFont}px; color:${timeColor}; ${tyTime} font-weight:${timeWeight}; ${textBoxLayoutCss(theme.timeTransform, 'time')} ${layerTextEffectsCss(theme, 'time')}`
+      return `<div style="${escapeInlineStyleForHtmlAttribute(stTime)}">${timeEsc}</div>`
     }
     case 'image': {
       const im = L as ImageThemeLayer
@@ -393,40 +428,24 @@ function renderLayerFragment(
       const fit = im.objectFit === 'contain' ? 'contain' : 'cover'
       const tf = `translate(-50%, -50%) rotate(${r}deg) scale(${s})`
       const urlEsc = escapeCssUrl(fileBase)
-      return `<div style="position:absolute;left:${x}%;top:${y}%;transform:${tf};transform-origin:center;width:${wp}%;height:${hp}%;max-width:100%;max-height:100%;box-sizing:border-box;z-index:${z};pointer-events:none;background-image:url('./${urlEsc}');background-size:${fit};background-position:center;background-repeat:no-repeat;"></div>`
+      return `<div style="${escapeInlineStyleForHtmlAttribute(`position:absolute;left:${x}%;top:${y}%;transform:${tf};transform-origin:center;width:${wp}%;height:${hp}%;max-width:100%;max-height:100%;box-sizing:border-box;z-index:${z};pointer-events:none;background-image:url('./${urlEsc}');background-size:${fit};background-position:center;background-repeat:no-repeat;`)}"></div>`
     }
     default:
       return ''
   }
 }
 
-/** 休息弹窗剩余时间：不占 layers 栈，统一叠在图层序列之上（z 高于所有已渲染层） */
-function renderRestCountdownOverlayHtml(theme: PopupTheme, z: number, countdownEsc: string): string {
-  if (!countdownEsc) return ''
-  const cdFont = Math.max(24, Math.min(8000, Math.floor(theme.countdownFontSize ?? 180)))
-  const cdColor = theme.countdownColor || theme.timeColor || '#ffffff'
-  const cdFontFamilyCss = resolvePopupFontFamilyCss(theme, 'countdown')
-  const cdPos = transformStyle(theme.countdownTransform, 50, 70)
-  const cdWeight = theme.countdownFontWeight ?? 700
-  const tyCd = layerTypographyCss(theme, 'countdown')
-  return `<div style="${cdPos} z-index:${z}; pointer-events:none; font-family:${cdFontFamilyCss}; font-size:${cdFont}px; color:${cdColor}; ${tyCd} font-weight:${cdWeight}; ${textBoxLayoutCss(theme.countdownTransform, 'countdown')} ${layerTextEffectsCss(theme, 'countdown')}">${countdownEsc}</div>`
-}
-
 function buildReminderHtmlWithLayers(options: ReminderPopupOptions, theme: PopupTheme, htmlDir: string): string {
-  const { title, body, timeStr, countdownStr } = options
+  const { title, body, timeStr } = options
   const titleEsc = escapeHtml(title)
   const bodyEsc = escapeHtml(body)
   const timeEsc = escapeHtml(timeStr)
-  const countdownEsc = escapeHtml(countdownStr ?? '')
   const layers = theme.layers ?? []
   const parts: string[] = []
   for (let i = 0; i < layers.length; i++) {
-    parts.push(renderLayerFragment(theme, layers[i]!, i, bodyEsc, timeEsc, countdownEsc, htmlDir))
+    parts.push(renderLayerFragment(theme, layers[i]!, i, bodyEsc, timeEsc, htmlDir))
   }
-  let stageInner = parts.join('\n')
-  if (theme.target === 'rest' && countdownEsc) {
-    stageInner += `\n${renderRestCountdownOverlayHtml(theme, Math.max(100, layers.length + 1), countdownEsc)}`
-  }
+  const stageInner = parts.join('\n')
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -434,8 +453,8 @@ function buildReminderHtmlWithLayers(options: ReminderPopupOptions, theme: Popup
   <title>${titleEsc}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { width: 100%; height: 100%; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; background: #000000; }
-    .stage { position: relative; width: 100%; height: 100%; overflow: hidden; }
+    html, body { width: 100%; height: 100%; min-height: 100%; margin: 0; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; background: #000000; }
+    .stage { position: fixed; inset: 0; width: 100%; height: 100%; overflow: hidden; }
     ${REMINDER_CLOSE_CSS}
   </style>
 </head>
@@ -452,6 +471,14 @@ function buildReminderHtml(options: ReminderPopupOptions, htmlDir?: string): str
   const { theme } = options
   if (!theme) return buildReminderHtmlLegacy(options)
   const t = ensureThemeLayers(theme)
+  /**
+   * `ensureThemeLayers` 在磁盘上 `layers: []` 时保留空栈（与「用户清空图层」一致），
+   * 但此时图层路径不会渲染任何绑定文案；预览侧未落盘空数组时会走 migrate，二者易不一致。
+   * 真弹窗统一回退 legacy：仍读主题根字段（content / time 等），与早期无 layers 行为一致。
+   */
+  if (!t.layers || t.layers.length === 0) {
+    return buildReminderHtmlLegacy({ ...options, theme: t })
+  }
   const dir = htmlDir ?? getPopupTempDir()
   return buildReminderHtmlWithLayers({ ...options, theme: t }, t, dir)
 }
@@ -488,7 +515,7 @@ function ensurePopupWindow(): BrowserWindow {
     skipTaskbar: true,
     fullscreenable: true,
     show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
+    webPreferences: { nodeIntegration: false, contextIsolation: true, zoomFactor: 1 },
   })
   win.on('closed', () => {
     if (reminderPopupWindow === win) reminderPopupWindow = null

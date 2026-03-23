@@ -23,10 +23,14 @@ import {
   POPUP_LAYER_BACKGROUND_ID,
   POPUP_LAYER_OVERLAY_ID,
   mergeContentThemePatchIntoBindingTextLayer,
+  removeThemeLayer,
   themePatchFromBindingTextLayer,
   updateDecorationLayer,
   updateTextLayer,
 } from '../../../shared/popupThemeLayers'
+
+/** 本机字体为 OS 级数据，与当前编辑的 theme.id 无关。勿在 theme.id 变化时清空：会与异步 IPC 回写竞态，出现「日志里 count>0 但下拉永远空」。 */
+let sharedSystemFontFamilies: string[] | null = null
 
 function layerTypographyKeys(sel: TextElementKey): {
   align: 'contentTextAlign' | 'timeTextAlign' | 'countdownTextAlign'
@@ -55,6 +59,13 @@ function layerEffectsKey(sel: TextElementKey): 'contentTextEffects' | 'timeTextE
 }
 
 export type ThemeSettingsPanelFilter = 'all' | 'text' | 'overlay' | 'background'
+
+export type ThemeEditHistoryBundle = {
+  undo: () => void
+  redo: () => void
+  canUndo: boolean
+  canRedo: boolean
+}
 
 export type PopupThemeEditorPanelProps = {
   theme: PopupTheme
@@ -89,16 +100,72 @@ export type PopupThemeEditorPanelProps = {
   /** 图层栏选中的背景 / 遮罩层 id */
   selectedStructuralLayerId?: string | null
   onSelectStructuralLayer?: (id: string | null) => void
+  /** 撤销栈深度（整主题快照）；默认 20 */
+  editHistoryMaxSteps?: number
+  /**
+   * 主题工坊分栏：由 ThemeStudioEditWorkspace 注入「mergeContent + 撤销栈」后的更新函数，
+   * 与左侧预览共用同一栈；传入时须同时传 `delegatedEditHistory`。
+   */
+  delegatedMergedOnUpdateTheme?: (themeId: string, patch: Partial<PopupTheme>) => void
+  delegatedEditHistory?: ThemeEditHistoryBundle
+}
+
+type PopupThemeEditorPanelCoreProps = PopupThemeEditorPanelProps & {
+  mergedWrappedOnUpdateTheme: (themeId: string, patch: Partial<PopupTheme>) => void
+  historyBundle: ThemeEditHistoryBundle
+}
+
+function PopupThemeEditorPanelWithHistory(props: PopupThemeEditorPanelProps) {
+  const { delegatedMergedOnUpdateTheme: _a, delegatedEditHistory: _b, editHistoryMaxSteps = 20, ...p } = props
+  const hist = usePopupThemeEditHistory(p.theme, p.onUpdateTheme, p.replaceThemeFull, editHistoryMaxSteps)
+  const mergedWrappedOnUpdateTheme = useCallback(
+    (id: string, patch: Partial<PopupTheme>) => {
+      if (id !== p.theme.id) {
+        hist.wrappedOnUpdateTheme(id, patch)
+        return
+      }
+      const layerSync = mergeContentThemePatchIntoBindingTextLayer(p.theme, patch)
+      hist.wrappedOnUpdateTheme(id, layerSync ? { ...patch, ...layerSync } : patch)
+    },
+    [p.theme.id, p.theme, hist.wrappedOnUpdateTheme],
+  )
+  const historyBundle: ThemeEditHistoryBundle = {
+    undo: hist.undo,
+    redo: hist.redo,
+    canUndo: hist.canUndo,
+    canRedo: hist.canRedo,
+  }
+  return (
+    <PopupThemeEditorPanelCore
+      {...p}
+      editHistoryMaxSteps={editHistoryMaxSteps}
+      mergedWrappedOnUpdateTheme={mergedWrappedOnUpdateTheme}
+      historyBundle={historyBundle}
+    />
+  )
 }
 
 /**
  * 弹窗主题完整编辑区：预览 + 参数区（按图层选中自动切换可见块）。
  * 设置页与子项全屏编辑器共用。
  */
-export function PopupThemeEditorPanel({
+export function PopupThemeEditorPanel(props: PopupThemeEditorPanelProps) {
+  if (props.delegatedMergedOnUpdateTheme != null && props.delegatedEditHistory != null) {
+    return (
+      <PopupThemeEditorPanelCore
+        {...props}
+        mergedWrappedOnUpdateTheme={props.delegatedMergedOnUpdateTheme}
+        historyBundle={props.delegatedEditHistory}
+      />
+    )
+  }
+  return <PopupThemeEditorPanelWithHistory {...props} />
+}
+
+function PopupThemeEditorPanelCore({
   theme,
-  onUpdateTheme,
-  replaceThemeFull,
+  onUpdateTheme: _onUpdateTheme,
+  replaceThemeFull: _replaceThemeFull,
   previewViewportWidth,
   previewImageUrlMap,
   popupPreviewAspect,
@@ -117,7 +184,12 @@ export function PopupThemeEditorPanel({
   className,
   selectedStructuralLayerId = null,
   onSelectStructuralLayer = () => {},
-}: PopupThemeEditorPanelProps) {
+  editHistoryMaxSteps: _editHistoryMaxSteps = 20,
+  delegatedMergedOnUpdateTheme: _delegatedMerged,
+  delegatedEditHistory: _delegatedHist,
+  mergedWrappedOnUpdateTheme,
+  historyBundle,
+}: PopupThemeEditorPanelCoreProps) {
   const themeId = theme.id
   const layoutContainerRef = useRef<HTMLDivElement>(null)
   const undoScopeRef: RefObject<HTMLElement | null> = editorSurfaceRef ?? layoutContainerRef
@@ -147,23 +219,7 @@ export function PopupThemeEditorPanel({
     },
     [layersPanelHeight],
   )
-  const { wrappedOnUpdateTheme, undo, redo, canUndo, canRedo } = usePopupThemeEditHistory(
-    theme,
-    onUpdateTheme,
-    replaceThemeFull,
-  )
-
-  const mergedWrappedOnUpdateTheme = useCallback(
-    (id: string, patch: Partial<PopupTheme>) => {
-      if (id !== themeId) {
-        wrappedOnUpdateTheme(id, patch)
-        return
-      }
-      const layerSync = mergeContentThemePatchIntoBindingTextLayer(theme, patch)
-      wrappedOnUpdateTheme(id, layerSync ? { ...patch, ...layerSync } : patch)
-    },
-    [themeId, theme, wrappedOnUpdateTheme],
-  )
+  const { undo, redo, canUndo, canRedo } = historyBundle
 
   const [fontUiMode, setFontUiMode] = useState<Record<PopupTextFontLayer, 'preset' | 'system'>>(() => ({
     content: popupFontLayerUsesSystemTab(theme, 'content') ? 'system' : 'preset',
@@ -188,27 +244,40 @@ export function PopupThemeEditorPanel({
     theme.popupFontFamilyPreset,
   ])
 
-  const [systemFonts, setSystemFonts] = useState<string[] | null>(null)
+  const [systemFonts, setSystemFonts] = useState<string[] | null>(() => sharedSystemFontFamilies)
   const [fontsLoading, setFontsLoading] = useState(false)
   const loadSystemFonts = useCallback(async (forceRefresh: boolean) => {
     const api = window.electronAPI
     if (!api?.getSystemFontFamilies) return
+    if (forceRefresh && api.clearSystemFontListCache) await api.clearSystemFontListCache()
+    if (forceRefresh) sharedSystemFontFamilies = null
+
+    if (
+      !forceRefresh &&
+      sharedSystemFontFamilies !== null &&
+      sharedSystemFontFamilies.length > 0
+    ) {
+      setSystemFonts(sharedSystemFontFamilies)
+      return
+    }
+
     setFontsLoading(true)
     try {
-      if (forceRefresh && api.clearSystemFontListCache) await api.clearSystemFontListCache()
       const r = await api.getSystemFontFamilies()
-      if (r.success) setSystemFonts(r.fonts)
-      else setSystemFonts([])
+      if (r?.success && Array.isArray(r.fonts) && r.fonts.length > 0) {
+        sharedSystemFontFamilies = r.fonts
+        setSystemFonts(r.fonts)
+      } else {
+        sharedSystemFontFamilies = null
+        setSystemFonts(Array.isArray(r?.fonts) ? r.fonts : [])
+      }
     } catch {
+      sharedSystemFontFamilies = null
       setSystemFonts([])
     } finally {
       setFontsLoading(false)
     }
   }, [])
-
-  useEffect(() => {
-    setSystemFonts(null)
-  }, [theme.id])
 
   const needsSystemFontList = fontUiMode.content === 'system' || fontUiMode.time === 'system'
   useEffect(() => {
@@ -223,21 +292,53 @@ export function PopupThemeEditorPanel({
     { layer: 'time', title: '时间' },
   ]
 
+  const tryDeleteSelectedDecoration = useCallback(() => {
+    if (selectedDecorationLayerId == null) return
+    const L = (theme.layers ?? []).find((l) => l.id === selectedDecorationLayerId)
+    if (!L) return
+    if (L.kind !== 'text' && L.kind !== 'image') return
+    if (L.kind === 'text' && (L as TextThemeLayer).bindsReminderBody) return
+    const patch = removeThemeLayer(theme, selectedDecorationLayerId)
+    if (!patch) return
+    mergedWrappedOnUpdateTheme(themeId, patch)
+    onSelectDecorationLayer(null)
+  }, [
+    selectedDecorationLayerId,
+    theme.layers,
+    theme,
+    mergedWrappedOnUpdateTheme,
+    themeId,
+    onSelectDecorationLayer,
+  ])
+
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
+      const root = undoScopeRef.current
+      if (!root) return
+      const t = e.target as HTMLElement | null
+      if (t?.closest?.('input, textarea, select, [contenteditable="true"]')) return
+      const ae = document.activeElement
+      const inScope =
+        (t instanceof HTMLElement && root.contains(t)) ||
+        (ae instanceof HTMLElement && root.contains(ae))
+      if (!inScope) return
+
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        if (e.ctrlKey || e.metaKey || e.altKey) return
+        e.preventDefault()
+        tryDeleteSelectedDecoration()
+        return
+      }
+
       if (!(e.ctrlKey || e.metaKey)) return
       if (e.key.toLowerCase() !== 'z') return
-      const t = e.target as HTMLElement | null
-      if (!t?.closest) return
-      if (t.closest('input, textarea, select, [contenteditable="true"]')) return
-      if (!undoScopeRef.current?.contains(t)) return
       e.preventDefault()
       if (e.shiftKey) redo()
       else undo()
     }
     document.addEventListener('keydown', fn, true)
     return () => document.removeEventListener('keydown', fn, true)
-  }, [undo, redo, undoScopeRef])
+  }, [undo, redo, undoScopeRef, tryDeleteSelectedDecoration])
 
   const decoLayer =
     selectedDecorationLayerId != null

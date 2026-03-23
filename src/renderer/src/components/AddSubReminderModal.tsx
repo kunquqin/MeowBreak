@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import type { PopupTheme, SubReminder } from '../types'
+import {
+  BUILTIN_MAIN_POPUP_FALLBACK_BODY,
+  BUILTIN_REST_POPUP_FALLBACK_BODY,
+  getDefaultPopupThemeIdForTarget,
+} from '../types'
 import { ThemePreviewEditor, type TextElementKey } from './ThemePreviewEditor'
 import { WheelColumn, parseTimeHHmm, formatHHmm, WHEEL_VIEW_H } from './TimePickerModal'
 import { StaticSplitPreviewSegment, StaticSinglePreviewBar } from './SegmentProgressBars'
@@ -163,12 +168,12 @@ function calcDefaultRestSeconds(totalMs: number, splitCount: number): number {
 /** 切换主题或新建时：把主题里的预览主文案落到当前子项（仅本地 state，不写回主题库） */
 function popupMainTextFromTheme(theme: PopupTheme | undefined): string {
   const s = (theme?.previewContentText ?? '').trim()
-  return s || '提醒'
+  return s || BUILTIN_MAIN_POPUP_FALLBACK_BODY
 }
 
 function popupRestTextFromTheme(theme: PopupTheme | undefined): string {
   const s = (theme?.previewContentText ?? '').trim()
-  return s || '休息一下'
+  return s || BUILTIN_REST_POPUP_FALLBACK_BODY
 }
 
 export function AddSubReminderModal({
@@ -215,7 +220,7 @@ export function AddSubReminderModal({
   const [restH, setRestH] = useState(0)
   const [restM, setRestM] = useState(0)
   const [restS, setRestS] = useState(0)
-  const [restContent, setRestContent] = useState('休息一下')
+  const [restContent, setRestContent] = useState(BUILTIN_REST_POPUP_FALLBACK_BODY)
   const [splitErr, setSplitErr] = useState<string | null>(null)
   const [fixedRangeErr, setFixedRangeErr] = useState<string | null>(null)
   const [mainPopupThemeId, setMainPopupThemeId] = useState('')
@@ -224,8 +229,8 @@ export function AddSubReminderModal({
   const [repeatCount, setRepeatCount] = useState<number | null>(1)
   const mainThemeOptions = popupThemes.filter((t) => t.target === 'main')
   const restThemeOptions = popupThemes.filter((t) => t.target === 'rest')
-  const defaultMainThemeId = mainThemeOptions[0]?.id ?? ''
-  const defaultRestThemeId = restThemeOptions[0]?.id ?? ''
+  const defaultMainThemeId = getDefaultPopupThemeIdForTarget(popupThemes, 'main')
+  const defaultRestThemeId = getDefaultPopupThemeIdForTarget(popupThemes, 'rest')
   const selectedMainTheme = useMemo(
     () => mainThemeOptions.find((t) => t.id === mainPopupThemeId),
     [mainThemeOptions, mainPopupThemeId],
@@ -274,7 +279,7 @@ export function AddSubReminderModal({
       setRestH(rh)
       setRestM(rm)
       setRestS(rs)
-      setRestContent(sourceItem.restContent ?? '休息一下')
+      setRestContent(sourceItem.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY)
       if (sourceItem.mode === 'fixed' || sourceItem.mode === 'interval') {
         const mid = sourceItem.mainPopupThemeId ?? defaultMainThemeId
         const rid = sourceItem.restPopupThemeId ?? defaultRestThemeId
@@ -527,7 +532,7 @@ export function AddSubReminderModal({
         ...(mainPopupThemeId ? { mainPopupThemeId } : {}),
         ...(restPopupThemeId ? { restPopupThemeId } : {}),
         weekdaysEnabled: weekdaysEnabled.slice(),
-        content: content.trim() || '提醒',
+        content: content.trim() || BUILTIN_MAIN_POPUP_FALLBACK_BODY,
         splitCount: splitN,
         restDurationSeconds: splitN > 1 && totalRestSec ? totalRestSec : undefined,
         restContent: splitN > 1 ? restContent.trim() || undefined : undefined,
@@ -542,7 +547,7 @@ export function AddSubReminderModal({
       intervalHours,
       intervalMinutes,
       intervalSeconds,
-      content: content.trim() || '提醒',
+      content: content.trim() || BUILTIN_MAIN_POPUP_FALLBACK_BODY,
       repeatCount,
       splitCount: splitN,
       restDurationSeconds: splitN > 1 && totalRestSec ? totalRestSec : undefined,

@@ -121,7 +121,7 @@ function bindingBodyTextFromTheme(theme: PopupTheme): Omit<TextThemeLayer, 'id' 
     bindsReminderBody: true,
     text: theme.previewContentText?.trim() ?? '',
     color: theme.contentColor || '#ffffff',
-    fontSize: Math.max(1, Math.min(8000, Math.floor(theme.contentFontSize ?? 56))),
+    fontSize: Math.max(1, Math.min(8000, Math.floor(theme.contentFontSize ?? 180))),
     fontWeight: theme.contentFontWeight ?? 600,
     textAlign: theme.contentTextAlign,
     letterSpacing: theme.contentLetterSpacing,
@@ -350,7 +350,17 @@ export function syncOverlayEnabledFromLayers(theme: PopupTheme): PopupTheme {
 export function syncThemeRootFromBindingTextLayer(theme: PopupTheme): PopupTheme {
   const tl = theme.layers?.find((l) => l.kind === 'text' && (l as TextThemeLayer).bindsReminderBody) as TextThemeLayer | undefined
   if (!tl) return theme
-  return { ...theme, ...themePatchFromBindingTextLayer(tl) }
+  const patch = themePatchFromBindingTextLayer(tl)
+  const pSz = patch.contentFontSize
+  const rootSz = theme.contentFontSize
+  /** 旧版 binding 缺省字号曾用 56，层快照会把根上大字覆盖成小字 */
+  if (typeof pSz === 'number' && typeof rootSz === 'number' && pSz === 56 && rootSz > 56) {
+    delete patch.contentFontSize
+  }
+  if (typeof pSz === 'number' && rootSz === undefined && pSz === 56) {
+    patch.contentFontSize = 180
+  }
+  return { ...theme, ...patch }
 }
 
 /** 预览/主题根字段变更时同步写入「提醒文案」文本层 */

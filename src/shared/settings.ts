@@ -20,6 +20,21 @@ export {
 export type CategoryKind = 'alarm' | 'countdown' | 'stopwatch'
 export type SubReminderMode = 'fixed' | 'interval' | 'stopwatch'
 export type PopupThemeTarget = 'main' | 'rest'
+
+/** 系统内置结束弹窗主题 id（normalize 保证存在，子项默认优先绑定） */
+export const SYSTEM_MAIN_POPUP_THEME_ID = 'theme_main_default' as const
+/** 系统内置休息弹窗主题 id */
+export const SYSTEM_REST_POPUP_THEME_ID = 'theme_rest_default' as const
+
+/**
+ * 子项主文案为空时弹窗显示的兜底，与系统默认结束主题的预览文案一致。
+ */
+export const BUILTIN_MAIN_POPUP_FALLBACK_BODY = '时间到！'
+
+/**
+ * 休息弹窗 restContent 为空时的兜底，与系统默认休息主题预览文案一致。
+ */
+export const BUILTIN_REST_POPUP_FALLBACK_BODY = '休息一下'
 export type PopupBackgroundType = 'solid' | 'image'
 export type PopupTextAlign = 'left' | 'center' | 'right'
 export type PopupImageSourceType = 'single' | 'folder'
@@ -330,11 +345,11 @@ export function getDefaultPresetPools(): PresetPools {
 
 function defaultMainTheme(): PopupTheme {
   return {
-    id: 'theme_main_default',
+    id: SYSTEM_MAIN_POPUP_THEME_ID,
     name: '结束壁纸默认',
     formatVersion: 1,
     target: 'main',
-    previewContentText: '文本',
+    previewContentText: BUILTIN_MAIN_POPUP_FALLBACK_BODY,
     backgroundType: 'solid',
     backgroundColor: '#000000',
     overlayEnabled: false,
@@ -355,11 +370,11 @@ function defaultMainTheme(): PopupTheme {
 
 function defaultRestTheme(): PopupTheme {
   return {
-    id: 'theme_rest_default',
+    id: SYSTEM_REST_POPUP_THEME_ID,
     name: '休息壁纸默认',
     formatVersion: 1,
     target: 'rest',
-    previewContentText: '文本',
+    previewContentText: BUILTIN_REST_POPUP_FALLBACK_BODY,
     backgroundType: 'solid',
     backgroundColor: '#000000',
     overlayEnabled: false,
@@ -380,6 +395,34 @@ function defaultRestTheme(): PopupTheme {
 
 export function getDefaultPopupThemes(): PopupTheme[] {
   return [ensureThemeLayers(defaultMainTheme()), ensureThemeLayers(defaultRestTheme())]
+}
+
+/**
+ * 保证 `theme_main_default` / `theme_rest_default` 各至少存在一条（缺则插入内置快照）。
+ * 用于主进程 normalize 与设置页删除主题后的本地列表修复。
+ */
+export function mergeSystemBuiltinPopupThemes(themes: PopupTheme[]): PopupTheme[] {
+  const defaults = getDefaultPopupThemes()
+  const mainSnap = defaults.find((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
+  const restSnap = defaults.find((t) => t.id === SYSTEM_REST_POPUP_THEME_ID)
+  if (!mainSnap || !restSnap) return themes.length > 0 ? themes : defaults
+  const hasMain = themes.some((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
+  const hasRest = themes.some((t) => t.id === SYSTEM_REST_POPUP_THEME_ID)
+  let next = [...themes]
+  if (!hasMain) next = [mainSnap, ...next]
+  if (!hasRest) {
+    const mainIdx = next.findIndex((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
+    if (mainIdx >= 0) next.splice(mainIdx + 1, 0, restSnap)
+    else next.push(restSnap)
+  }
+  return next
+}
+
+/** 新建子项 / 下拉缺省时：优先系统默认 id，否则同 target 首条，否则仍返回系统 id（待 normalize 补主题）。 */
+export function getDefaultPopupThemeIdForTarget(themes: PopupTheme[], target: PopupThemeTarget): string {
+  const systemId = target === 'main' ? SYSTEM_MAIN_POPUP_THEME_ID : SYSTEM_REST_POPUP_THEME_ID
+  if (themes.some((t) => t.id === systemId)) return systemId
+  return themes.find((t) => t.target === target)?.id ?? systemId
 }
 
 export function getDefaultEntitlements(): AppEntitlements {

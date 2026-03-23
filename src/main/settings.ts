@@ -9,6 +9,7 @@ import {
   getDefaultPopupThemes,
   getDefaultEntitlements,
   ensureThemeLayers,
+  mergeSystemBuiltinPopupThemes,
 } from '../shared/settings'
 
 export type { AppSettings, ReminderCategory, SubReminder } from '../shared/settings'
@@ -342,8 +343,8 @@ function normalizeTextTransform(raw: unknown): TextTransform | undefined {
 }
 
 function normalizePopupThemes(raw: unknown): PopupTheme[] {
-  if (!Array.isArray(raw)) return [...defaultPopupThemes]
-  if (raw.length === 0) return []
+  if (!Array.isArray(raw)) return mergeSystemBuiltinPopupThemes([])
+  if (raw.length === 0) return mergeSystemBuiltinPopupThemes([])
   const out: PopupTheme[] = raw
     .map((x): PopupTheme | null => {
       if (!x || typeof x !== 'object') return null
@@ -376,8 +377,8 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
         const v = Number.isFinite(n) ? n : fallback
         return Math.max(1, Math.min(8000, v))
       }
-      const contentFontSize = clampThemeFont(o.contentFontSize, 56)
-      const timeFontSize = clampThemeFont(o.timeFontSize, 30)
+      const contentFontSize = clampThemeFont(o.contentFontSize, 180)
+      const timeFontSize = clampThemeFont(o.timeFontSize, 100)
       const countdownFontSize = clampThemeFont(o.countdownFontSize, 180)
       const textAlign = o.textAlign === 'left' || o.textAlign === 'right' ? o.textAlign : 'center'
       const contentFontWeightNum = Number(o.contentFontWeight)
@@ -497,7 +498,7 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
       return ensureThemeLayers(base)
     })
     .filter((x): x is PopupTheme => x !== null)
-  return out.length > 0 ? out : [...defaultPopupThemes]
+  return mergeSystemBuiltinPopupThemes(out.length > 0 ? out : [])
 }
 
 function normalizeEntitlements(raw: unknown): AppEntitlements {

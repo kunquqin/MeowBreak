@@ -1,7 +1,7 @@
 import { useRef, useCallback, useEffect, useState } from 'react'
 import type { PopupTheme } from '../types'
 
-const MAX_HISTORY = 80
+const DEFAULT_MAX_HISTORY = 20
 
 /**
  * 主题编辑撤销 / 重做：在每次 `onUpdateTheme` 前压入当前主题快照，`replaceThemeFull` 恢复整主题。
@@ -11,6 +11,8 @@ export function usePopupThemeEditHistory(
   theme: PopupTheme,
   onUpdateTheme: (themeId: string, patch: Partial<PopupTheme>) => void,
   replaceThemeFull: (next: PopupTheme) => void,
+  /** 每步为整主题 structuredClone；默认 20 步控制内存 */
+  maxHistory: number = DEFAULT_MAX_HISTORY,
 ) {
   const themeRef = useRef(theme)
   themeRef.current = theme
@@ -31,10 +33,14 @@ export function usePopupThemeEditHistory(
     bump()
   }, [theme.id, bump])
 
+  const maxRef = useRef(maxHistory)
+  maxRef.current = maxHistory
+
   const pushPast = useCallback(() => {
     const snap = structuredClone(themeRef.current)
     pastRef.current.push(snap)
-    if (pastRef.current.length > MAX_HISTORY) pastRef.current.shift()
+    const cap = Math.max(1, maxRef.current)
+    if (pastRef.current.length > cap) pastRef.current.shift()
   }, [])
 
   const wrappedOnUpdateTheme = useCallback(

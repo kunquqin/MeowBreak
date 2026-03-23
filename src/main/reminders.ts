@@ -1,6 +1,13 @@
 import { getSettings, setSettings } from './settings'
 import type { ReminderCategory, SubReminder } from './settings'
-import type { ResetIntervalPayload, PopupTheme } from '../shared/settings'
+import {
+  type ResetIntervalPayload,
+  type PopupTheme,
+  SYSTEM_MAIN_POPUP_THEME_ID,
+  SYSTEM_REST_POPUP_THEME_ID,
+  BUILTIN_MAIN_POPUP_FALLBACK_BODY,
+  BUILTIN_REST_POPUP_FALLBACK_BODY,
+} from '../shared/settings'
 import { showReminderPopup, showRestEndCountdownPopup } from './reminderWindow'
 import { buildSplitSchedule } from '../shared/splitSchedule'
 
@@ -92,23 +99,17 @@ const fixedPreciseStartAt = new Map<string, number>()
 function resolvePopupThemeById(themeId: string | undefined, target: 'main' | 'rest'): PopupTheme | undefined {
   const s = getSettings()
   const all = s.popupThemes ?? []
+  const systemId = target === 'main' ? SYSTEM_MAIN_POPUP_THEME_ID : SYSTEM_REST_POPUP_THEME_ID
   if (themeId) {
     const matched = all.find((t) => t.id === themeId)
     if (matched) return matched
   }
+  const systemDefault = all.find((t) => t.id === systemId)
+  if (systemDefault) return systemDefault
   return all.find((t) => t.target === target)
 }
 
-/** 休息弹窗倒计时层用：剩余总毫秒 → m:ss */
-function formatRestCountdownLabel(remainingMs: number): string {
-  const ms = Math.max(0, remainingMs)
-  const totalSec = Math.floor(ms / 1000)
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-function showReminder(title: string, body: string, theme?: PopupTheme, countdownStr?: string) {
+function showReminder(title: string, body: string, theme?: PopupTheme) {
   const now = new Date()
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   reminderLog('弹窗', { title, bodyPreview: (body || '').slice(0, 40), timeStr })
@@ -117,7 +118,6 @@ function showReminder(title: string, body: string, theme?: PopupTheme, countdown
     body,
     timeStr,
     ...(theme ? { theme } : {}),
-    ...(countdownStr !== undefined && countdownStr !== '' ? { countdownStr } : {}),
   })
 }
 
@@ -346,9 +346,8 @@ function runFixedTimeCheck() {
             reminderLog('固定时间·休息段弹窗', { key, phaseIndex: i })
               showReminder(
                 cat.name,
-                item.restContent ?? '休息一下',
+                item.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY,
                 resolvePopupThemeById(item.restPopupThemeId, 'rest'),
-                formatRestCountdownLabel(restEndAt - Date.now()),
               )
             latest.firedBreakIndexes.add(i)
           }
@@ -420,7 +419,7 @@ function runFixedTimeCheck() {
       } else {
         reminderLog('固定时间整分触发', { key, startTime, endTime, cat: cat.name })
       }
-      showReminder(cat.name, item.content || '提醒', resolvePopupThemeById(item.mainPopupThemeId, 'main'))
+      showReminder(cat.name, item.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY, resolvePopupThemeById(item.mainPopupThemeId, 'main'))
     }
   }
 }
@@ -490,9 +489,8 @@ function scheduleNextPhase(key: string) {
         reminderLog('间隔·休息段弹窗', { key, phaseIndex: st.phaseIndex })
         showReminder(
           st.categoryName,
-          st.restContent || '休息一下',
+          st.restContent || BUILTIN_REST_POPUP_FALLBACK_BODY,
           resolvePopupThemeById(st.restPopupThemeId, 'rest'),
-          formatRestCountdownLabel(st.restDurationMs),
         )
         st.phase = 'rest'
         st.phaseStartTime = now
@@ -669,7 +667,7 @@ function scheduleIntervalReminders() {
         intervalMs,
         repeatCount,
         categoryName: cat.name,
-        content: item.content || '提醒',
+        content: item.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY,
         mainPopupThemeId: item.mainPopupThemeId,
         restPopupThemeId: item.restPopupThemeId,
         splitCount: effectiveSplitCount,
@@ -677,7 +675,7 @@ function scheduleIntervalReminders() {
         workDurationsMs: plan.workDurationsMs.slice(),
         restDurationMs: effectiveRestMs,
         cycleTotalMs: plan.cycleTotalMs,
-        restContent: item.restContent ?? '休息一下',
+        restContent: item.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY,
         phase,
         phaseIndex,
         phaseStartTime,
@@ -737,7 +735,7 @@ function removeIntervalTimerByKey(key: string): void {
 function buildIntervalPayload(cat: ReminderCategory, item: SubReminder & { mode: 'interval' }): ResetIntervalPayload {
   return {
     categoryName: cat.name,
-    content: item.content || '提醒',
+    content: item.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY,
     mainPopupThemeId: item.mainPopupThemeId,
     restPopupThemeId: item.restPopupThemeId,
     intervalHours: item.intervalHours,
@@ -813,10 +811,10 @@ export function syncIntervalTimersAfterSettingsChange(
       }
       const st = intervalState.get(key)
       if (st) {
-        st.content = iv.content || '提醒'
+        st.content = iv.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY
         st.categoryName = cat.name
         st.repeatCount = iv.repeatCount ?? null
-        st.restContent = iv.restContent ?? '休息一下'
+        st.restContent = iv.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY
         st.mainPopupThemeId = iv.mainPopupThemeId
         st.restPopupThemeId = iv.restPopupThemeId
       }
@@ -840,12 +838,12 @@ export function resetReminderProgress(key: string, payload?: ResetIntervalPayloa
     sec = payload.intervalSeconds ?? 0
     repeatCount = payload.repeatCount ?? null
     categoryName = payload.categoryName
-    content = payload.content || '提醒'
+    content = payload.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY
     mainPopupThemeId = payload.mainPopupThemeId
     restPopupThemeId = payload.restPopupThemeId
     splitCount = Math.max(1, Math.min(10, payload.splitCount ?? 1))
     restSec = Math.max(0, payload.restDurationSeconds ?? 0)
-    restContent = payload.restContent ?? '休息一下'
+    restContent = payload.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY
   } else {
     const s = getSettings()
     let cat: (typeof s.reminderCategories)[0] | undefined
@@ -868,12 +866,12 @@ export function resetReminderProgress(key: string, payload?: ResetIntervalPayloa
     sec = itemInterval.intervalSeconds ?? 0
     repeatCount = itemInterval.repeatCount ?? null
     categoryName = cat.name
-    content = itemInterval.content || '提醒'
+    content = itemInterval.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY
     mainPopupThemeId = itemInterval.mainPopupThemeId
     restPopupThemeId = itemInterval.restPopupThemeId
     splitCount = Math.max(1, Math.min(10, itemInterval.splitCount ?? 1))
     restSec = Math.max(0, itemInterval.restDurationSeconds ?? 0)
-    restContent = itemInterval.restContent ?? '休息一下'
+    restContent = itemInterval.restContent ?? BUILTIN_REST_POPUP_FALLBACK_BODY
   }
 
   const totalSec = Math.max(1, h * 3600 + m * 60 + sec)
@@ -967,7 +965,7 @@ export function resetAllReminderProgress(): void {
       } else if (item.mode === 'interval') {
         const payload: ResetIntervalPayload = {
           categoryName: cat.name,
-          content: item.content || '提醒',
+          content: item.content || BUILTIN_MAIN_POPUP_FALLBACK_BODY,
           mainPopupThemeId: item.mainPopupThemeId,
           restPopupThemeId: item.restPopupThemeId,
           intervalHours: item.intervalHours,

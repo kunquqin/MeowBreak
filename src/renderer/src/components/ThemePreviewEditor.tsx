@@ -7,7 +7,7 @@ import { layerTextEffectsReactStyle } from '../../../shared/popupTextEffects'
 import { resolvePopupFontFamilyCss, resolveDecoFontFamilyCss } from '../../../shared/popupThemeFonts'
 import { ensureThemeLayers } from '../../../shared/settings'
 import type { ImageThemeLayer, TextThemeLayer } from '../../../shared/popupThemeLayers'
-import { updateDecorationLayer } from '../../../shared/popupThemeLayers'
+import { POPUP_LAYER_BACKGROUND_ID, updateDecorationLayer } from '../../../shared/popupThemeLayers'
 
 export type TextElementKey = 'content' | 'time' | 'countdown'
 
@@ -1233,7 +1233,8 @@ export function ThemePreviewEditor({
       return
     }
     const t = e.target as HTMLElement
-    if (e.target === containerRef.current || t.dataset?.layer === 'bg') {
+    const onBg = t.dataset?.layer === 'bg'
+    if (e.target === containerRef.current || onBg) {
       const ek = editingTextKeyRef.current
       if (ek) {
         const node = getTargetRef(ek)?.current
@@ -1246,10 +1247,17 @@ export function ThemePreviewEditor({
         decoRefs.current[decoId]?.blur()
         return
       }
+      if (onBg) {
+        onSelectStructuralLayer?.(POPUP_LAYER_BACKGROUND_ID)
+        onSelectElements([])
+        onSelectDecorationLayer?.(null)
+        return
+      }
+      onSelectStructuralLayer?.(null)
       onSelectElements([])
       onSelectDecorationLayer?.(null)
     }
-  }, [readOnly, onSelectElements, getTargetRef, onSelectDecorationLayer])
+  }, [readOnly, onSelectElements, getTargetRef, onSelectDecorationLayer, onSelectStructuralLayer])
 
   const handleContainerMouseDown = useCallback((e: React.MouseEvent) => {
     if (readOnly) return
@@ -1396,17 +1404,41 @@ export function ThemePreviewEditor({
     { mode: 'bottom' as const, icon: ALIGN_ICONS.bottom, title: '底部对齐' },
   ], [])
 
-  /** 编辑文字时仍保留 Moveable，便于同时拖动 / 旋转 / 缩放 / 调文字框（把手在文字块外侧） */
-  const moveableTargets = useMemo(() => {
-    if (selectedDecorationLayerId) {
-      if (editingDecoLayerId && selectedDecorationLayerId === editingDecoLayerId) return []
-      const el = decoRefs.current[selectedDecorationLayerId]
-      return el ? [el] : []
+  /** 编辑文字时仍保留 Moveable；refs 在 commit 后才可用，useMemo 读 .current 会导致首帧无目标、且不随 ref 挂载重算 */
+  const [moveableTargets, setMoveableTargets] = useState<HTMLElement[]>([])
+  useLayoutEffect(() => {
+    if (readOnly) {
+      setMoveableTargets((p) => (p.length === 0 ? p : []))
+      return
     }
-    return selectedElements
+    if (selectedDecorationLayerId) {
+      if (editingDecoLayerId && selectedDecorationLayerId === editingDecoLayerId) {
+        setMoveableTargets((p) => (p.length === 0 ? p : []))
+        return
+      }
+      const el = decoRefs.current[selectedDecorationLayerId]
+      const next = el ? [el] : []
+      setMoveableTargets((p) => (p.length === next.length && p[0] === next[0] ? p : next))
+      return
+    }
+    const els = selectedElements
       .map((k) => getTargetRef(k)?.current)
       .filter((e): e is HTMLDivElement => e != null)
-  }, [selectedElements, selectedDecorationLayerId, getTargetRef, decoStyleTransformById, theme.layers, editingDecoLayerId])
+    setMoveableTargets((p) => {
+      if (p.length === els.length && p.every((x, i) => x === els[i])) return p
+      return els
+    })
+  }, [
+    readOnly,
+    selectedElements,
+    selectedDecorationLayerId,
+    editingDecoLayerId,
+    editingTextKey,
+    theme.layers,
+    theme.id,
+    decoStyleTransformById,
+    getTargetRef,
+  ])
 
   const moveableTarget = useMemo(
     () => moveableTargets.length === 1 ? moveableTargets[0] : moveableTargets,
@@ -1574,12 +1606,17 @@ export function ThemePreviewEditor({
     e.stopPropagation()
     const inSel = selectedElements.includes(key)
     const multi = selectedElements.length >= 2
+    const deferDrag = () => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => scheduleDragStart(e.nativeEvent))
+      })
+    }
     if (multi && inSel) {
       flushSync(() => {
         onSelectStructuralLayer?.(null)
         onSelectDecorationLayer?.(null)
       })
-      scheduleDragStart(e.nativeEvent)
+      deferDrag()
       return
     }
     if (!inSel || selectedElements.length !== 1 || selectedElements[0] !== key) {
@@ -1588,8 +1625,11 @@ export function ThemePreviewEditor({
         onSelectDecorationLayer?.(null)
         onSelectElements([key])
       })
+    } else {
+      onSelectStructuralLayer?.(null)
+      onSelectDecorationLayer?.(null)
     }
-    scheduleDragStart(e.nativeEvent)
+    deferDrag()
   }, [
     selectedElements,
     onSelectElements,
@@ -1600,6 +1640,7 @@ export function ThemePreviewEditor({
     effectiveEditableKeys,
     getTargetRef,
     editingDecoLayerIdRef,
+    onSelectStructuralLayer,
   ])
 
   const renderTextLayerForKey = (layerId: string, key: TextElementKey, zi: number): React.ReactNode => {
@@ -1632,10 +1673,6 @@ export function ThemePreviewEditor({
           left: 0, top: 0,
           transform: tf,
           transformOrigin: 'center',
-          /** 时间层叠在文本层之上且区域常重叠；未选中时间时让点击穿透，避免双击落在时间层上无法进入文本编辑 */
-          ...(key === 'time'
-            ? { pointerEvents: selectedElements.includes('time') ? ('auto' as const) : ('none' as const) }
-            : {}),
           willChange: selectedElements.includes(key) ? 'transform' : undefined,
           color, fontSize: `${toPreviewPx(fontSize)}px`, fontWeight: getFontWeight(key),
           lineHeight: lh, textAlign: ta,
@@ -1808,7 +1845,9 @@ export function ThemePreviewEditor({
         </>
       )}
 
-      <div ref={containerRef}
+      <div
+        ref={containerRef}
+        data-theme-preview-root
         className={`${previewBoxClass} ${editingTextKey || editingDecoLayerId ? '' : 'select-none'} ${readOnly ? 'pointer-events-none' : ''}`}
         style={
           fixedPreviewPixelSize
@@ -1901,6 +1940,7 @@ export function ThemePreviewEditor({
                       e.preventDefault()
                       e.stopPropagation()
                       flushSync(() => {
+                        onSelectStructuralLayer?.(null)
                         onSelectElements([])
                         onSelectDecorationLayer?.(L.id)
                       })
@@ -1914,10 +1954,13 @@ export function ThemePreviewEditor({
                     if (editingDecoLayerId === L.id) return
                     e.stopPropagation()
                     flushSync(() => {
+                      onSelectStructuralLayer?.(null)
                       onSelectElements([])
                       onSelectDecorationLayer?.(L.id)
                     })
-                    scheduleDragStart(e.nativeEvent)
+                    requestAnimationFrame(() => {
+                      requestAnimationFrame(() => scheduleDragStart(e.nativeEvent))
+                    })
                   }}
                   onBlur={(ev) => {
                     if (!isDecoEditing) return
@@ -1991,10 +2034,13 @@ export function ThemePreviewEditor({
                     if (e.shiftKey) return
                     e.stopPropagation()
                     flushSync(() => {
+                      onSelectStructuralLayer?.(null)
                       onSelectElements([])
                       onSelectDecorationLayer?.(L.id)
                     })
-                    scheduleDragStart(e.nativeEvent)
+                    requestAnimationFrame(() => {
+                      requestAnimationFrame(() => scheduleDragStart(e.nativeEvent))
+                    })
                   }}
                 />
               )

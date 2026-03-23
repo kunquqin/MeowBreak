@@ -4,8 +4,9 @@ import type { PopupTheme, PopupThemeTarget } from '../types'
 import { ThemePreviewEditor, type TextElementKey } from './ThemePreviewEditor'
 import { PopupThemeEditorPanel } from './PopupThemeEditorPanel'
 import { clonePopupThemeForFork, popupThemeContentEquals } from '../../../shared/popupThemeUtils'
-import { addImageDecorationLayer } from '../../../shared/popupThemeLayers'
+import { addImageDecorationLayer, mergeContentThemePatchIntoBindingTextLayer } from '../../../shared/popupThemeLayers'
 import { ensureThemeLayers } from '../../../shared/settings'
+import { usePopupThemeEditHistory } from '../hooks/usePopupThemeEditHistory'
 
 function themeDraftDirty(baseline: PopupTheme, draft: PopupTheme): boolean {
   if ((baseline.name ?? '').trim() !== (draft.name ?? '').trim()) return true
@@ -47,6 +48,29 @@ export function ThemeStudioEditWorkspace({
     setSelectedStructuralLayerId(null)
   }, [theme.id])
 
+  const { wrappedOnUpdateTheme, undo, redo, canUndo, canRedo, historyRev } = usePopupThemeEditHistory(
+    theme,
+    onUpdateTheme,
+    replaceThemeFull,
+    20,
+  )
+  const mergedWrappedOnUpdateTheme = useCallback(
+    (id: string, patch: Partial<PopupTheme>) => {
+      if (id !== theme.id) {
+        wrappedOnUpdateTheme(id, patch)
+        return
+      }
+      const layerSync = mergeContentThemePatchIntoBindingTextLayer(theme, patch)
+      wrappedOnUpdateTheme(id, layerSync ? { ...patch, ...layerSync } : patch)
+    },
+    [theme.id, theme, wrappedOnUpdateTheme],
+  )
+
+  const delegatedEditHistory = useMemo(
+    () => ({ undo, redo, canUndo, canRedo }),
+    [undo, redo, canUndo, canRedo, historyRev],
+  )
+
   /** 不传 previewLabels：由 ThemePreviewEditor 按 theme.preview* 与占位标签回落，避免 `pl` 强行写死「提醒」盖住主题内已保存的示例文案 */
   const handlePickDecoImage = useCallback(() => {
     void (async () => {
@@ -57,23 +81,32 @@ export function ThemeStudioEditWorkspace({
       const oldIds = new Set(layers.map((l) => l.id))
       const patch = addImageDecorationLayer(theme, r.path)
       if (!patch?.layers) return
-      onUpdateTheme(theme.id, patch)
+      mergedWrappedOnUpdateTheme(theme.id, patch)
       const added = patch.layers.find((l) => l.kind === 'image' && !oldIds.has(l.id))
       if (added) setSelectedDecorationLayerId(added.id)
     })()
-  }, [onUpdateTheme, theme])
+  }, [mergedWrappedOnUpdateTheme, theme])
 
   return (
     <div
       ref={surfaceRef as RefObject<HTMLDivElement>}
-      className="grid min-h-0 h-full min-w-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[7fr_3fr] lg:items-stretch"
+      tabIndex={-1}
+      className="grid min-h-0 h-full min-w-0 flex-1 grid-cols-1 gap-4 outline-none focus:outline-none lg:grid-cols-[7fr_3fr] lg:items-stretch"
     >
-      <div className="flex min-h-[min(200px,40vh)] min-w-0 flex-col lg:min-h-0">
+      <div
+        className="flex min-h-[min(200px,40vh)] min-w-0 flex-col lg:min-h-0"
+        onMouseDownCapture={(e) => {
+          const t = e.target as HTMLElement
+          if (t.closest('input, textarea, select, [contenteditable="true"]')) return
+          if (!t.closest('[data-theme-preview-root]')) return
+          surfaceRef.current?.focus({ preventScroll: true })
+        }}
+      >
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto overflow-x-hidden px-1 pb-2 pt-1">
           <div className="w-full min-w-0 shrink-0">
             <ThemePreviewEditor
               theme={theme}
-              onUpdateTheme={onUpdateTheme}
+              onUpdateTheme={mergedWrappedOnUpdateTheme}
               keyboardScopeRef={surfaceRef as RefObject<HTMLDivElement>}
               previewViewportWidth={previewViewportWidth}
               previewImageUrlMap={previewImageUrlMap}
@@ -95,6 +128,8 @@ export function ThemeStudioEditWorkspace({
           theme={theme}
           onUpdateTheme={onUpdateTheme}
           replaceThemeFull={replaceThemeFull}
+          delegatedMergedOnUpdateTheme={mergedWrappedOnUpdateTheme}
+          delegatedEditHistory={delegatedEditHistory}
           previewViewportWidth={previewViewportWidth}
           previewImageUrlMap={previewImageUrlMap}
           popupPreviewAspect={popupPreviewAspect}
@@ -295,7 +330,6 @@ export type ThemeStudioEditViewProps = {
   onDeleteTheme?: () => void
   canDelete?: boolean
   deleteDisabledTitle?: string
-  onOpenBatchApply?: () => void
 }
 
 export function ThemeStudioEditView({
@@ -314,7 +348,6 @@ export function ThemeStudioEditView({
   onDeleteTheme,
   canDelete,
   deleteDisabledTitle,
-  onOpenBatchApply,
 }: ThemeStudioEditViewProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
 
@@ -346,16 +379,6 @@ export function ThemeStudioEditView({
           >
             另存为新主题
           </button>
-          {onOpenBatchApply && (
-            <button
-              type="button"
-              onClick={onOpenBatchApply}
-              className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-50"
-              title="将当前主题批量应用到提醒子项"
-            >
-              应用到全部…
-            </button>
-          )}
           {onDeleteTheme && (
             <button
               type="button"
@@ -394,7 +417,8 @@ export type ThemeStudioFloatingEditorProps = {
   themes: PopupTheme[]
   themeId: string
   source: ThemeStudioFloatingSource
-  onClose: () => void
+  /** `saved: true` 表示已保存或确认保留主题；未传或 false 时由设置页决定是否丢弃新建草稿 */
+  onClose: (opts?: { saved?: boolean }) => void
   /** 列表内「另存为」后改为编辑新主题 */
   onSwitchEditingThemeId?: (newId: string) => void
   /** 子项「另存为」后把新 id 交给设置页写回表单 */
@@ -410,10 +434,11 @@ export type ThemeStudioFloatingEditorProps = {
   appendPopupTheme: (theme: PopupTheme) => void
   countPopupThemeReferences: (themeId: string, exclude?: { categoryId: string; itemId: string } | null) => number
   themeRefExclude: { categoryId: string; itemId: string } | null
-  onOpenBatchApply?: () => void
   onDeleteTheme?: () => void
   canDeleteTheme?: boolean
   deleteDisabledTitle?: string
+  /** 列表「+ 创建壁纸」进入的草稿：仅保留保存/取消，不显示「另存为」（尚无库内母题可 fork） */
+  isNewDraft?: boolean
 }
 
 export function ThemeStudioFloatingEditor({
@@ -433,10 +458,10 @@ export function ThemeStudioFloatingEditor({
   appendPopupTheme,
   countPopupThemeReferences,
   themeRefExclude,
-  onOpenBatchApply,
   onDeleteTheme,
   canDeleteTheme,
   deleteDisabledTitle,
+  isNewDraft = false,
 }: ThemeStudioFloatingEditorProps) {
   const surfaceRef = useRef<HTMLDivElement>(null)
   const baselineRef = useRef<PopupTheme | null>(null)
@@ -573,7 +598,7 @@ export function ThemeStudioFloatingEditor({
   const handleSave = () => {
     if (!baseline) return
     if (!themeDraftDirty(baseline, draft)) {
-      onClose()
+      onClose({ saved: true })
       return
     }
     const otherRefs = countPopupThemeReferences(baseline.id, themeRefExclude)
@@ -587,7 +612,7 @@ export function ThemeStudioFloatingEditor({
     const toSave: PopupTheme = { ...draft, id: baseline.id, name: nameResolved }
     replacePopupTheme(toSave)
     baselineRef.current = structuredClone(toSave) as PopupTheme
-    onClose()
+    onClose({ saved: true })
   }
 
   const handleSaveAs = () => {
@@ -599,7 +624,7 @@ export function ThemeStudioFloatingEditor({
     appendPopupTheme(forked)
     if (source.kind === 'subitem') {
       onAfterForkRebindSubitem?.(forked.id)
-      onClose()
+      onClose({ saved: true })
       return
     }
     onSwitchEditingThemeId?.(forked.id)
@@ -667,13 +692,6 @@ export function ThemeStudioFloatingEditor({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={tryCloseStable}
-              className="shrink-0 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100"
-            >
-              取消
-            </button>
             <span className="text-xs font-medium text-slate-600">主题名称</span>
             <input
               type="text"
@@ -707,41 +725,37 @@ export function ThemeStudioFloatingEditor({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={tryCloseStable}
+              className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              取消
+            </button>
+            <button
+              type="button"
               onClick={handleSave}
               className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
             >
               保存
             </button>
-            <button
-              type="button"
-              onClick={handleSaveAs}
-              className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-            >
-              另存为
-            </button>
-            {isStudioList && (
-              <>
-                {onOpenBatchApply && (
-                  <button
-                    type="button"
-                    onClick={onOpenBatchApply}
-                    className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
-                  >
-                    应用到全部…
-                  </button>
-                )}
-                {onDeleteTheme && (
-                  <button
-                    type="button"
-                    onClick={onDeleteTheme}
-                    disabled={canDeleteTheme === false}
-                    title={deleteDisabledTitle}
-                    className="rounded-md border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    删除
-                  </button>
-                )}
-              </>
+            {!isNewDraft && (
+              <button
+                type="button"
+                onClick={handleSaveAs}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                另存为
+              </button>
+            )}
+            {isStudioList && onDeleteTheme && (
+              <button
+                type="button"
+                onClick={onDeleteTheme}
+                disabled={canDeleteTheme === false}
+                title={deleteDisabledTitle}
+                className="rounded-md border border-red-200 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                删除
+              </button>
             )}
           </div>
         </div>

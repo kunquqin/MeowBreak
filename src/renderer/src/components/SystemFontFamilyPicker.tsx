@@ -7,6 +7,13 @@ type DropPos = { top: number; left: number; width: number }
 /** 仅列表区域限高，避免整页被原生 datalist 撑出屏外 */
 const LIST_SCROLL_MAX_CSS = 'min(40vh, 280px)'
 
+/**
+ * 必须高于全屏编辑层，否则列表渲染在 document.body 上仍会被压在遮罩下面「像没数据」。
+ * ThemeStudio z-[250000]、AddSubReminderModal z-[200000]
+ */
+const PORTAL_Z_BACKDROP = 280_000
+const PORTAL_Z_LIST = 280_001
+
 export type SystemFontFamilyPickerProps = {
   value: string
   onChange: (next: string) => void
@@ -123,16 +130,18 @@ export function SystemFontFamilyPicker({
           type="button"
           aria-hidden
           tabIndex={-1}
-          className="fixed inset-0 z-[10000] cursor-default bg-transparent"
+          className="fixed inset-0 cursor-default bg-transparent"
+          style={{ zIndex: PORTAL_Z_BACKDROP }}
           onClick={() => setOpen(false)}
         />
         <div
           role="listbox"
-          className="fixed z-[10001] flex flex-col rounded-md border border-slate-200 bg-white text-left shadow-lg"
+          className="fixed flex flex-col rounded-md border border-slate-200 bg-white text-left shadow-lg"
           style={{
             top: pos.top,
             left: pos.left,
             width: pos.width,
+            zIndex: PORTAL_Z_LIST,
           }}
         >
           <div className="shrink-0 border-b border-slate-100 p-1.5">
