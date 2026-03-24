@@ -11,6 +11,7 @@ import type {
   PopupTheme,
   TextTransform,
 } from './settings'
+import { MAIN_REST_LAYOUT_DEFAULTS } from './settings'
 import { normalizePopupTextOrientationMode, normalizePopupTextWritingMode } from './popupVerticalText'
 
 function sanitizeLayerTextEffects(raw: unknown): PopupLayerTextEffects | undefined {
@@ -141,8 +142,8 @@ function defaultFreeTextTransform(): TextTransform {
    * 不预置 textBoxWidth/Height，交给预览按内容尺寸自适应；
    * 用户手动拉框后再写入 textBox*Pct 持久化。
    */
-  /** y 与绑定主文案默认 42% 对齐，新建装饰句视觉中心接近主文案 */
-  return { ...baseTransform(), x: 50, y: 36 }
+  /** y 与绑定主文案默认 40% 对齐，新建装饰句视觉中心接近主文案 */
+  return { ...baseTransform(), x: 50, y: 40 }
 }
 
 function defaultImageTransform(): TextTransform {
@@ -155,7 +156,18 @@ function bindingBodyTextFromTheme(theme: PopupTheme): Omit<TextThemeLayer, 'id' 
     bindsReminderBody: true,
     text: theme.previewContentText?.trim() ?? '',
     color: theme.contentColor || '#ffffff',
-    fontSize: Math.max(1, Math.min(8000, Math.floor(theme.contentFontSize ?? 180))),
+    fontSize: Math.max(
+      1,
+      Math.min(
+        8000,
+        Math.floor(
+          theme.contentFontSize ??
+            (theme.target === 'main' || theme.target === 'rest'
+              ? MAIN_REST_LAYOUT_DEFAULTS.contentFontSize
+              : 180),
+        ),
+      ),
+    ),
     fontWeight: theme.contentFontWeight ?? 600,
     textAlign: theme.contentTextAlign,
     textVerticalAlign: theme.contentTextVerticalAlign,
@@ -163,7 +175,11 @@ function bindingBodyTextFromTheme(theme: PopupTheme): Omit<TextThemeLayer, 'id' 
     lineHeight: theme.contentLineHeight,
     fontFamilyPreset: theme.contentFontFamilyPreset,
     fontFamilySystem: theme.contentFontFamilySystem,
-    transform: theme.contentTransform ?? { x: 50, y: 36, rotation: 0, scale: 1 },
+    transform:
+      theme.contentTransform ??
+      (theme.target === 'main' || theme.target === 'rest'
+        ? { x: 50, y: 40, rotation: 0, scale: 1 }
+        : { x: 50, y: 36, rotation: 0, scale: 1 }),
     ...(te ? { textEffects: te } : {}),
   }
 }
@@ -473,6 +489,21 @@ export function ensureThemeLayers(theme: PopupTheme): PopupTheme {
   return syncOverlayEnabledFromLayers(next)
 }
 
+const BUILTIN_BINDING_PLACEHOLDER_BODIES = new Set([RESTORE_BINDING_BODY_MAIN, RESTORE_BINDING_BODY_REST])
+
+/** 主文案仍为内置「时间到啦 / 休息一下」之一或空：切换休息/结束 Tab 时可替换为对应用途默认句 */
+export function isBindingBodyStillDefaultPlaceholder(theme: PopupTheme): boolean {
+  const t = ensureThemeLayers(theme)
+  const raw = (t.previewContentText ?? '').trim()
+  if (raw === '') return true
+  return BUILTIN_BINDING_PLACEHOLDER_BODIES.has(raw)
+}
+
+/** 结束 / 休息壁纸绑定主文案的默认示例句（与 settings 内置兜底一致） */
+export function bindingDefaultBodyForMainRestTarget(target: 'main' | 'rest'): string {
+  return target === 'main' ? RESTORE_BINDING_BODY_MAIN : RESTORE_BINDING_BODY_REST
+}
+
 export function setLayerVisibility(theme: PopupTheme, layerId: string, visible: boolean): Partial<PopupTheme> {
   const layers = (theme.layers ?? migrateLegacyLayerStack(theme)).map((l) => (l.id === layerId ? { ...l, visible } : l))
   const patch: Partial<PopupTheme> = { layers }
@@ -498,7 +529,10 @@ export function addBindingContentLayer(theme: PopupTheme): Partial<PopupTheme> |
   const layers = [...(theme.layers ?? migrateLegacyLayerStack(theme))]
   if (layers.some((l) => l.kind === 'text' && (l as TextThemeLayer).bindsReminderBody)) return null
 
-  const bodyText = theme.target === 'rest' ? RESTORE_BINDING_BODY_REST : RESTORE_BINDING_BODY_MAIN
+  const bodyText =
+    theme.target === 'rest' || theme.target === 'desktop'
+      ? RESTORE_BINDING_BODY_REST
+      : RESTORE_BINDING_BODY_MAIN
   const draftTheme: PopupTheme = { ...theme, previewContentText: bodyText }
   const base = bindingBodyTextFromTheme(draftTheme)
   const L: TextThemeLayer = {
@@ -604,6 +638,57 @@ export function removeThemeLayers(theme: PopupTheme, layerIds: string[]): Partia
 
 export function removeThemeLayer(theme: PopupTheme, layerId: string): Partial<PopupTheme> | null {
   return removeThemeLayers(theme, [layerId])
+}
+
+/**
+ * 桌面壁纸编辑：去掉绑定主文案层，保证有日期绑定层；清空 previewContentText。
+ * 用于切换到 `target: desktop` 或新建桌面主题。
+ */
+export function stripBindingContentAndEnsureDateForDesktop(theme: PopupTheme): Partial<PopupTheme> {
+  let patch: Partial<PopupTheme> = { previewContentText: '' }
+  let cur: PopupTheme = { ...theme }
+  const rm = removeThemeLayer(cur, POPUP_LAYER_BINDING_CONTENT_ID)
+  if (rm?.layers) {
+    patch = { ...patch, ...rm }
+    cur = { ...cur, layers: rm.layers }
+  }
+  const hasDate = (cur.layers ?? []).some((l) => l.kind === 'bindingDate')
+  if (!hasDate) {
+    const addD = addDateLayer(cur)
+    if (addD) patch = { ...patch, ...addD }
+  }
+  return patch
+}
+
+/**
+ * 桌面壁纸无主文案层：新建/缺省回退用的时间·日期变换与字号（与产品约定一致，避免与弹窗 62/65 叠字）。
+ */
+export const DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS: Pick<
+  PopupTheme,
+  'timeTransform' | 'dateTransform' | 'timeFontSize' | 'dateFontSize'
+> = {
+  timeTransform: { x: 50, y: 46, rotation: 0, scale: 1 },
+  dateTransform: { x: 50, y: 55, rotation: 0, scale: 1 },
+  timeFontSize: 120,
+  dateFontSize: 45,
+}
+
+/** 新建桌面主题：在默认 migrate 栈基础上去主文案并补日期层（含 addDateLayer 写入的默认日期排版字段） */
+export function buildNewDesktopThemePatch(theme: PopupTheme): Partial<PopupTheme> {
+  const layers = migrateLegacyLayerStack(theme).filter((l) => l.id !== POPUP_LAYER_BINDING_CONTENT_ID)
+  let cur: PopupTheme = { ...theme, layers }
+  let patch: Partial<PopupTheme> = { layers }
+  if (!layers.some((x) => x.kind === 'bindingDate')) {
+    const addD = addDateLayer(cur)
+    if (addD) {
+      patch = { ...patch, ...addD }
+      if (addD.layers) {
+        patch.layers = addD.layers
+        cur = { ...cur, layers: addD.layers }
+      }
+    }
+  }
+  return { ...patch, ...DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS }
 }
 
 export function addBackgroundLayer(theme: PopupTheme): Partial<PopupTheme> | null {

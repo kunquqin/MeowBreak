@@ -9,8 +9,14 @@ import type {
   PopupTextVerticalAlign,
   TextTransform,
 } from '../shared/settings'
+import { MAIN_REST_LAYOUT_DEFAULTS } from '../shared/settings'
 import { ensureThemeLayers, POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX } from '../shared/settings'
-import type { ImageThemeLayer, PopupThemeLayer, TextThemeLayer } from '../shared/popupThemeLayers'
+import {
+  DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS,
+  type ImageThemeLayer,
+  type PopupThemeLayer,
+  type TextThemeLayer,
+} from '../shared/popupThemeLayers'
 import { layerTextEffectsCss, layerTextEffectsCssFromEffects } from '../shared/popupTextEffects'
 import { resolveDecoFontFamilyCss, resolvePopupFontFamilyCss } from '../shared/popupThemeFonts'
 import { formatPopupThemeDateString } from '../shared/popupThemeDateFormat'
@@ -20,6 +26,7 @@ import {
   textAlignForVerticalInner,
   verticalTextInnerBoxCss,
 } from '../shared/popupVerticalText'
+import { buildPopupOverlayBackgroundCss } from '../shared/popupOverlayGradient'
 
 export interface ReminderPopupOptions {
   title: string
@@ -31,6 +38,10 @@ export interface ReminderPopupOptions {
    * 保留字段仅为类型兼容，主进程不应再传入。
    */
   countdownStr?: string
+  /**
+   * 桌面壁纸导出页：在 HTML 内注入脚本，使时间与日期每秒与系统同步（标准设壁纸 API 仍为单帧位图）。
+   */
+  liveDesktopWallpaper?: boolean
 }
 
 function resolveThemeBodyText(theme: PopupTheme | undefined, fallbackBody: string): string {
@@ -73,13 +84,6 @@ function clampOpacity(v: number | undefined, fallback: number): number {
   return Math.max(0, Math.min(1, n))
 }
 
-function normalizeAngleDeg(v: number | undefined, fallback: number): number {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return fallback
-  const mod = n % 360
-  return mod < 0 ? mod + 360 : mod
-}
-
 function hexToRgba(hex: string, alpha: number): string {
   const a = clampOpacity(alpha, 1)
   const raw = (hex || '').trim()
@@ -95,25 +99,8 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 function overlayGradientCss(theme: PopupTheme | undefined): string {
-  const color = theme?.overlayColor || '#000000'
-  const mode = theme?.overlayMode === 'gradient' ? 'gradient' : 'solid'
-  if (mode !== 'gradient') {
-    return hexToRgba(color, clampOpacity(theme?.overlayOpacity, 0.45))
-  }
-  const start = clampOpacity(theme?.overlayGradientStartOpacity, 0.7)
-  const end = clampOpacity(theme?.overlayGradientEndOpacity, 0)
-  const dir = theme?.overlayGradientDirection ?? 'leftToRight'
-  const angle =
-    dir === 'custom' ? normalizeAngleDeg(theme?.overlayGradientAngleDeg, 90)
-      : dir === 'rightToLeft' ? 270
-        : dir === 'topToBottom' ? 180
-          : dir === 'bottomToTop' ? 0
-            : dir === 'topLeftToBottomRight' ? 135
-              : dir === 'topRightToBottomLeft' ? 225
-                : dir === 'bottomLeftToTopRight' ? 45
-                  : dir === 'bottomRightToTopLeft' ? 315
-                    : 90
-  return `linear-gradient(${angle}deg, ${hexToRgba(color, start)} 0%, ${hexToRgba(color, end)} 100%)`
+  if (!theme) return hexToRgba('#000000', clampOpacity(undefined, 0.45))
+  return buildPopupOverlayBackgroundCss(theme)
 }
 
 function readLocalImageAsDataUrl(imagePath: string): string | null {
@@ -265,13 +252,13 @@ function legacyBlurredBackgroundLayerHtml(theme: PopupTheme | undefined): string
   return `<div style="${escapeInlineStyleForHtmlAttribute(outer)}"><div style="${escapeInlineStyleForHtmlAttribute(inner)}"></div></div>`
 }
 
-function getPopupTempDir(): string {
+export function getPopupTempDir(): string {
   const dir = join(app.getPath('temp'), 'workbreak-popups')
   mkdirSync(dir, { recursive: true })
   return dir
 }
 
-function writePopupHtmlToTempFile(fileName: string, html: string): string {
+export function writePopupHtmlToTempFile(fileName: string, html: string): string {
   const dir = getPopupTempDir()
   const filePath = join(dir, fileName)
   writeFileSync(filePath, html, 'utf8')
@@ -447,8 +434,8 @@ function textBoxLayoutCss(t: TextTransform | undefined, layer: TextBoxLayer, ver
           ? ` height: ${hp}%; max-height: 100%; overflow-x: hidden; overflow-y: auto; min-width: 0;`
           : ` height: ${hp}%; max-height: 100%; overflow: auto;`
     } else {
-      // 时间/倒计时单行：高度随字行盒，textBoxHeightPct 仅作上限，与预览 Moveable 贴字边一致
-      s += ` height: auto; max-height: ${hp}%; overflow: hidden;`
+      // 时间/日期/倒计时：高度随字行盒，textBoxHeightPct 仅作上限。勿用 overflow:hidden，否则 max-width+nowrap 下易裁掉斜体/描边/阴影左右外延
+      s += ` height: auto; max-height: ${hp}%; overflow: visible;`
     }
   }
   if (vertical) return s
@@ -484,6 +471,8 @@ function verticalAlignForThemeLayer(theme: PopupTheme | undefined, layer: 'conte
 
 /** 预览中各绑定文字层有 `padding: toPreviewPx(3)`；全屏按逻辑像素 3px 对齐 */
 const BINDING_TEXT_PADDING_PX = 3
+/** 时间/日期等短行左右略增，减轻斜体、描边、阴影在 max-width+nowrap 下被裁掉（动态桌面日期首字缺笔） */
+const BINDING_SHORT_LAYER_PAD_INLINE_PX = 12
 
 function decoTypographyParts(
   theme: PopupTheme | undefined,
@@ -595,21 +584,33 @@ const REMINDER_CLOSE_HTML_SCRIPT = `
   </script>`
 
 /** 无主题或旧逻辑回退：背景在 body，遮罩 + 双文字层 */
-function buildReminderHtmlLegacy(options: ReminderPopupOptions, htmlDir?: string): string {
+export function buildReminderHtmlLegacy(options: ReminderPopupOptions, htmlDir?: string): string {
   const { title, body, timeStr, theme } = options
   const titleEsc = escapeHtml(title)
   const bodyEsc = escapeHtml(resolveThemeBodyText(theme, body))
   const timeEsc = escapeHtml(timeStr)
-  const contentFont = safeFontPx(theme?.contentFontSize, 180, 16)
-  const timeFont = safeFontPx(theme?.timeFontSize, 100, 14)
+  const contentFont = safeFontPx(theme?.contentFontSize, MAIN_REST_LAYOUT_DEFAULTS.contentFontSize, 16)
+  const timeFont = safeFontPx(
+    theme?.timeFontSize,
+    theme?.target === 'desktop'
+      ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+      : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize,
+    14,
+  )
   const contentColor = theme?.contentColor || '#ffffff'
-  const timeColor = theme?.timeColor || '#e2e8f0'
+  const timeColor = theme?.timeColor || '#ffffff'
   const overlayEnabled = Boolean(theme?.overlayEnabled)
   const bgStyle = getBackgroundStyle(theme)
   const contentFontFamilyCss = resolvePopupFontFamilyCss(theme, 'content')
   const timeFontFamilyCss = resolvePopupFontFamilyCss(theme, 'time')
-  const contentPos = transformStyle(theme?.contentTransform, 50, 36)
-  const timePos = transformStyle(theme?.timeTransform, 50, 62)
+  const contentPos = transformStyle(theme?.contentTransform, 50, MAIN_REST_LAYOUT_DEFAULTS.contentTransform.y)
+  const timePos = transformStyle(
+    theme?.timeTransform,
+    50,
+    theme?.target === 'desktop'
+      ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeTransform!.y
+      : MAIN_REST_LAYOUT_DEFAULTS.timeTransform.y,
+  )
   const contentWeight = theme?.contentFontWeight ?? 600
   const timeWeight = theme?.timeFontWeight ?? 400
   const contentItalic = theme?.contentFontItalic === true ? 'italic' : 'normal'
@@ -636,7 +637,7 @@ function buildReminderHtmlLegacy(options: ReminderPopupOptions, htmlDir?: string
     .overlay { position: fixed; inset: 0; z-index: 1; background: ${overlayGradientCss(theme)}; opacity: ${overlayEnabled ? 1 : 0}; pointer-events: none; }
     .content { position: relative; z-index: 2; width: 100%; height: 100%; }
     .line1 { ${contentPos} box-sizing: border-box; padding: ${BINDING_TEXT_PADDING_PX}px; display:flex; flex-direction:column; justify-content:${contentVA}; font-family: ${contentFontFamilyCss}; font-size: ${contentFont}px; color: ${contentColor}; ${tyContent} font-weight: ${contentWeight}; font-style: ${contentItalic}; text-decoration: ${contentUnderline}; ${textBoxLayoutCss(theme?.contentTransform, 'content', contentVert)} ${layerTextEffectsCss(theme, 'content')} }
-    .line2 { ${timePos} box-sizing: border-box; padding: ${BINDING_TEXT_PADDING_PX}px; display: flex; align-items: ${timeVA}; justify-content: ${flexJustifyForTextAlign(theme?.timeTextAlign ?? theme?.textAlign ?? 'center')}; font-family: ${timeFontFamilyCss}; font-size: ${timeFont}px; color: ${timeColor}; ${tyTime} font-weight: ${timeWeight}; font-style: ${timeItalic}; text-decoration: ${timeUnderline}; ${textBoxLayoutCss(theme?.timeTransform, 'time', timeVert)} ${layerTextEffectsCss(theme, 'time')} }
+    .line2 { ${timePos} box-sizing: border-box; padding: ${BINDING_TEXT_PADDING_PX}px ${BINDING_SHORT_LAYER_PAD_INLINE_PX}px; display: flex; align-items: ${timeVA}; justify-content: ${flexJustifyForTextAlign(theme?.timeTextAlign ?? theme?.textAlign ?? 'center')}; font-family: ${timeFontFamilyCss}; font-size: ${timeFont}px; color: ${timeColor}; ${tyTime} font-weight: ${timeWeight}; font-style: ${timeItalic}; text-decoration: ${timeUnderline}; ${textBoxLayoutCss(theme?.timeTransform, 'time', timeVert)} ${layerTextEffectsCss(theme, 'time')} }
     ${REMINDER_CLOSE_CSS}
   </style>
 </head>
@@ -656,6 +657,12 @@ function buildReminderHtmlLegacy(options: ReminderPopupOptions, htmlDir?: string
 </html>`
 }
 
+/** 动态桌面时钟：与 setInterval(1000) 不同，按「下一整秒」排程，避免与任务栏时钟稳定差一拍 */
+function buildDesktopLiveClockScript(theme: PopupTheme): string {
+  const loc = JSON.stringify((theme.dateLocale ?? '').trim() || 'zh-CN')
+  return `<script>(function(){var L=${loc};var timeOpts={hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false};var dateOpts={year:"numeric",month:"2-digit",day:"2-digit",weekday:"short"};function paint(){var n=new Date();var t=document.getElementById("wb-live-time");if(t)t.textContent=n.toLocaleTimeString(L,timeOpts);var d=document.getElementById("wb-live-date");if(d)d.textContent=n.toLocaleDateString(L,dateOpts)}function tick(){paint();var ms=Date.now()%1000;var dly=ms===0?1000:(1000-ms);setTimeout(tick,dly)}tick();})();</script>`
+}
+
 function renderLayerFragment(
   theme: PopupTheme,
   L: PopupThemeLayer,
@@ -663,6 +670,7 @@ function renderLayerFragment(
   timeEsc: string,
   dateEsc: string,
   htmlDir: string,
+  liveDesktop: boolean,
 ): string {
   if (!L.visible) return ''
   switch (L.kind) {
@@ -699,13 +707,14 @@ function renderLayerFragment(
     case 'text': {
       const tl = L as TextThemeLayer
       if (tl.bindsReminderBody) {
+        if (liveDesktop) return ''
         /** 文本内容不再从提醒项注入，统一以主题编辑内容为准。 */
         const srcEsc = escapeHtml((tl.text ?? '').trim())
         /** 与 ThemePreviewEditor.renderTextLayerForKey(content) 一致：排版以主题根字段为准，保证时间样式等与预览一致。 */
         const fs = safeFontPx(theme.contentFontSize, 180, 16)
         const col = theme.contentColor || '#ffffff'
         const ff = resolvePopupFontFamilyCss(theme, 'content')
-        const pos = transformStyle(theme.contentTransform, 50, 36)
+        const pos = transformStyle(theme.contentTransform, 50, MAIN_REST_LAYOUT_DEFAULTS.contentTransform.y)
         const fw = theme.contentFontWeight ?? 600
         const fi = theme.contentFontItalic === true ? 'italic' : 'normal'
         const td = theme.contentUnderline === true ? 'underline' : 'none'
@@ -734,10 +743,22 @@ function renderLayerFragment(
       return `<div style="${escapeInlineStyleForHtmlAttribute(stDeco)}">${innerD}</div>`
     }
     case 'bindingTime': {
-      const timeFont = safeFontPx(theme.timeFontSize, 100, 14)
-      const timeColor = theme.timeColor || '#e2e8f0'
+      const timeFont = safeFontPx(
+        theme.timeFontSize,
+        theme.target === 'desktop'
+          ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+          : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize,
+        14,
+      )
+      const timeColor = theme.timeColor || '#ffffff'
       const timeFontFamilyCss = resolvePopupFontFamilyCss(theme, 'time')
-      const timePos = transformStyle(theme.timeTransform, 50, 62)
+      const timePos = transformStyle(
+        theme.timeTransform,
+        50,
+        theme.target === 'desktop'
+          ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeTransform!.y
+          : MAIN_REST_LAYOUT_DEFAULTS.timeTransform.y,
+      )
       const timeWeight = theme.timeFontWeight ?? 400
       const timeItalic = theme.timeFontItalic === true ? 'italic' : 'normal'
       const timeUnderline = theme.timeUnderline === true ? 'underline' : 'none'
@@ -745,16 +766,25 @@ function renderLayerFragment(
       const tj = flexJustifyForTextAlign(theme?.timeTextAlign ?? theme?.textAlign ?? 'center')
       const tv = flexAlignForTextVerticalAlign(verticalAlignForThemeLayer(theme, 'time'))
       const tVert = isThemeLayerVertical(theme, 'time')
-      const innerT = wrapThemeTextVerticalInner(theme, 'time', true, timeEsc)
-      const stTime = `${timePos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px; display:flex; align-items:${tv}; justify-content:${tj}; font-family:${timeFontFamilyCss}; font-size:${timeFont}px; color:${timeColor}; ${tyTime} font-weight:${timeWeight}; font-style:${timeItalic}; text-decoration:${timeUnderline}; ${textBoxLayoutCss(theme.timeTransform, 'time', tVert)} ${layerTextEffectsCss(theme, 'time')}`
+      const timeCore = liveDesktop ? `<span id="wb-live-time">${timeEsc}</span>` : timeEsc
+      const innerT = wrapThemeTextVerticalInner(theme, 'time', true, timeCore)
+      const stTime = `${timePos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px ${BINDING_SHORT_LAYER_PAD_INLINE_PX}px; display:flex; align-items:${tv}; justify-content:${tj}; font-family:${timeFontFamilyCss}; font-size:${timeFont}px; color:${timeColor}; ${tyTime} font-weight:${timeWeight}; font-style:${timeItalic}; text-decoration:${timeUnderline}; ${textBoxLayoutCss(theme.timeTransform, 'time', tVert)} ${layerTextEffectsCss(theme, 'time')}`
       return `<div style="${escapeInlineStyleForHtmlAttribute(stTime)}">${innerT}</div>`
     }
     case 'bindingDate': {
-      if (!dateEsc) return ''
-      const dateFont = safeFontPx(theme.dateFontSize, 72, 14)
+      if (!dateEsc && !liveDesktop) return ''
+      const dateFont = safeFontPx(
+        theme.dateFontSize,
+        theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize! : 72,
+        14,
+      )
       const dateColor = theme.dateColor || '#e2e8f0'
       const dateFontFamilyCss = resolvePopupFontFamilyCss(theme, 'date')
-      const datePos = transformStyle(theme.dateTransform, 50, 65)
+      const datePos = transformStyle(
+        theme.dateTransform,
+        50,
+        theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateTransform!.y : 65,
+      )
       const dateWeight = theme.dateFontWeight ?? 400
       const dateItalic = theme.dateFontItalic === true ? 'italic' : 'normal'
       const dateUnderline = theme.dateUnderline === true ? 'underline' : 'none'
@@ -762,8 +792,9 @@ function renderLayerFragment(
       const dj = flexJustifyForTextAlign(theme?.dateTextAlign ?? theme?.textAlign ?? 'center')
       const dv = flexAlignForTextVerticalAlign(verticalAlignForThemeLayer(theme, 'date'))
       const dVert = isThemeLayerVertical(theme, 'date')
-      const innerDt = wrapThemeTextVerticalInner(theme, 'date', true, dateEsc)
-      const stDate = `${datePos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px; display:flex; align-items:${dv}; justify-content:${dj}; font-family:${dateFontFamilyCss}; font-size:${dateFont}px; color:${dateColor}; ${tyDate} font-weight:${dateWeight}; font-style:${dateItalic}; text-decoration:${dateUnderline}; ${textBoxLayoutCss(theme.dateTransform, 'date', dVert)} ${layerTextEffectsCss(theme, 'date')}`
+      const dateCore = liveDesktop ? `<span id="wb-live-date">${dateEsc}</span>` : dateEsc
+      const innerDt = wrapThemeTextVerticalInner(theme, 'date', true, dateCore)
+      const stDate = `${datePos} z-index:${z}; pointer-events:none; box-sizing:border-box; padding:${BINDING_TEXT_PADDING_PX}px ${BINDING_SHORT_LAYER_PAD_INLINE_PX}px; display:flex; align-items:${dv}; justify-content:${dj}; font-family:${dateFontFamilyCss}; font-size:${dateFont}px; color:${dateColor}; ${tyDate} font-weight:${dateWeight}; font-style:${dateItalic}; text-decoration:${dateUnderline}; ${textBoxLayoutCss(theme.dateTransform, 'date', dVert)} ${layerTextEffectsCss(theme, 'date')}`
       return `<div style="${escapeInlineStyleForHtmlAttribute(stDate)}">${innerDt}</div>`
     }
     case 'image': {
@@ -788,7 +819,8 @@ function renderLayerFragment(
 }
 
 function buildReminderHtmlWithLayers(options: ReminderPopupOptions, theme: PopupTheme, htmlDir: string): string {
-  const { title, timeStr } = options
+  const { title, timeStr, liveDesktopWallpaper } = options
+  const liveDesktop = Boolean(liveDesktopWallpaper)
   const titleEsc = escapeHtml(title)
   const timeEsc = escapeHtml(timeStr)
   const at = new Date()
@@ -796,9 +828,10 @@ function buildReminderHtmlWithLayers(options: ReminderPopupOptions, theme: Popup
   const layers = theme.layers ?? []
   const parts: string[] = []
   for (let i = 0; i < layers.length; i++) {
-    parts.push(renderLayerFragment(theme, layers[i]!, i, timeEsc, dateEsc, htmlDir))
+    parts.push(renderLayerFragment(theme, layers[i]!, i, timeEsc, dateEsc, htmlDir, liveDesktop))
   }
   const stageInner = parts.join('\n')
+  const liveScript = liveDesktop ? buildDesktopLiveClockScript(theme) : ''
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -815,12 +848,13 @@ function buildReminderHtmlWithLayers(options: ReminderPopupOptions, theme: Popup
   <div class="stage">
 ${stageInner}
   </div>
+  ${liveScript}
   ${REMINDER_CLOSE_HTML_SCRIPT}
 </body>
 </html>`
 }
 
-function buildReminderHtml(options: ReminderPopupOptions, htmlDir?: string): string {
+export function buildReminderHtml(options: ReminderPopupOptions, htmlDir?: string): string {
   const { theme } = options
   if (!theme) return buildReminderHtmlLegacy(options, htmlDir)
   const t = ensureThemeLayers(theme)

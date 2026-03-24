@@ -18,6 +18,8 @@ export function usePopupThemeEditHistory(
   replaceThemeFull: (next: PopupTheme) => void,
   /** 每步为整主题 structuredClone；默认 20 步控制内存 */
   maxHistory: number = DEFAULT_MAX_HISTORY,
+  /** 递增时清空撤销/重做栈（如「恢复默认」整主题替换） */
+  editHistoryResetSignal: number = 0,
 ) {
   const themeRef = useRef(theme)
   themeRef.current = theme
@@ -36,7 +38,7 @@ export function usePopupThemeEditHistory(
     pastRef.current = []
     futureRef.current = []
     bump()
-  }, [theme.id, bump])
+  }, [theme.id, editHistoryResetSignal, bump])
 
   const maxRef = useRef(maxHistory)
   maxRef.current = maxHistory

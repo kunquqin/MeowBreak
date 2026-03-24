@@ -65,6 +65,7 @@ export function SystemFontFamilyPicker({
   disabled = false,
 }: SystemFontFamilyPickerProps) {
   const anchorRef = useRef<HTMLDivElement>(null)
+  const listScrollRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [listFilter, setListFilter] = useState('')
   const [pos, setPos] = useState<DropPos | null>(null)
@@ -82,6 +83,7 @@ export function SystemFontFamilyPicker({
 
   const openPicker = useCallback(() => {
     if (disabled) return
+    setListFilter('')
     updatePos()
     setOpen(true)
   }, [disabled, updatePos])
@@ -98,10 +100,20 @@ export function SystemFontFamilyPicker({
     }
   }, [open, updatePos])
 
-  useEffect(() => {
+  /** 展开后将当前选中项滚到列表可视区顶部，避免每次从上往下翻 */
+  useLayoutEffect(() => {
     if (!open) return
-    setListFilter('')
-  }, [open])
+    const sc = listScrollRef.current
+    if (!sc) return
+    const sel = sc.querySelector<HTMLElement>('[data-font-picker-active="true"]')
+    if (!sel) {
+      sc.scrollTop = 0
+      return
+    }
+    const scRect = sc.getBoundingClientRect()
+    const selRect = sel.getBoundingClientRect()
+    sc.scrollTop += selRect.top - scRect.top
+  }, [open, mode, value, presetValue, fonts, fontsLoading])
 
   useEffect(() => {
     if (!open) return
@@ -202,6 +214,7 @@ export function SystemFontFamilyPicker({
             />
           </div>
           <div
+            ref={listScrollRef}
             className="overflow-y-auto overflow-x-hidden overscroll-contain py-1"
             style={{ maxHeight: LIST_SCROLL_MAX_CSS }}
           >
@@ -215,6 +228,7 @@ export function SystemFontFamilyPicker({
                     key={item.id}
                     type="button"
                     role="option"
+                    data-font-picker-active={presetValue === item.id ? 'true' : undefined}
                     className={`block w-full truncate px-2.5 py-2 text-left text-sm leading-snug hover:bg-slate-100 ${
                       presetValue === item.id ? 'bg-slate-100 text-slate-900' : 'text-slate-800'
                     }`}
@@ -245,6 +259,7 @@ export function SystemFontFamilyPicker({
                     key={f}
                     type="button"
                     role="option"
+                    data-font-picker-active={f === value ? 'true' : undefined}
                     className="block w-full truncate px-2.5 py-2 text-left text-[15px] leading-snug text-slate-900 hover:bg-slate-100"
                     style={{ fontFamily: systemFontListPreviewStackCss(f) }}
                     title={f}

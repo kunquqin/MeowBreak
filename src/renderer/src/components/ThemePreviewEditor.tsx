@@ -5,9 +5,15 @@ import type { PopupTheme, TextTransform } from '../types'
 import { rendererSafePreviewImageUrl } from '../utils/popupThemePreview'
 import { layerTextEffectsReactStyle } from '../../../shared/popupTextEffects'
 import { resolvePopupFontFamilyCss, resolveDecoFontFamilyCss } from '../../../shared/popupThemeFonts'
-import { ensureThemeLayers, POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX } from '../../../shared/settings'
+import {
+  ensureThemeLayers,
+  MAIN_REST_LAYOUT_DEFAULTS,
+  POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX,
+} from '../../../shared/settings'
+import { buildPopupOverlayBackgroundCss } from '../../../shared/popupOverlayGradient'
 import type { ImageThemeLayer, TextThemeLayer } from '../../../shared/popupThemeLayers'
 import {
+  DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS,
   POPUP_LAYER_BACKGROUND_ID,
   POPUP_LAYER_BINDING_CONTENT_ID,
   POPUP_LAYER_BINDING_DATE_ID,
@@ -121,52 +127,8 @@ function buildTransform(tx: number, ty: number, rotation: number, scale: number)
   return `translate(${tx}px, ${ty}px) rotate(${rotation}deg) scale(${scale})`
 }
 
-function clamp01(v: number | undefined, fallback: number): number {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(0, Math.min(1, n))
-}
-
-function normalizeAngleDeg(v: number | undefined, fallback: number): number {
-  const n = Number(v)
-  if (!Number.isFinite(n)) return fallback
-  const mod = n % 360
-  return mod < 0 ? mod + 360 : mod
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const a = clamp01(alpha, 1)
-  const raw = (hex || '').trim()
-  const m = raw.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
-  if (!m) return `rgba(0,0,0,${a})`
-  const h = m[1].length === 3
-    ? m[1].split('').map((c) => c + c).join('')
-    : m[1]
-  const r = Number.parseInt(h.slice(0, 2), 16)
-  const g = Number.parseInt(h.slice(2, 4), 16)
-  const b = Number.parseInt(h.slice(4, 6), 16)
-  return `rgba(${r},${g},${b},${a})`
-}
-
 function getOverlayBackground(theme: PopupTheme): string {
-  const color = theme.overlayColor || '#000000'
-  if ((theme.overlayMode ?? 'solid') !== 'gradient') {
-    return hexToRgba(color, clamp01(theme.overlayOpacity, 0.45))
-  }
-  const start = clamp01(theme.overlayGradientStartOpacity, 0.7)
-  const end = clamp01(theme.overlayGradientEndOpacity, 0)
-  const dir = theme.overlayGradientDirection ?? 'leftToRight'
-  const angle =
-    dir === 'custom' ? normalizeAngleDeg(theme.overlayGradientAngleDeg, 90)
-      : dir === 'rightToLeft' ? 270
-        : dir === 'topToBottom' ? 180
-          : dir === 'bottomToTop' ? 0
-            : dir === 'topLeftToBottomRight' ? 135
-              : dir === 'topRightToBottomLeft' ? 225
-                : dir === 'bottomLeftToTopRight' ? 45
-                  : dir === 'bottomRightToTopLeft' ? 315
-                    : 90
-  return `linear-gradient(${angle}deg, ${hexToRgba(color, start)} 0%, ${hexToRgba(color, end)} 100%)`
+  return buildPopupOverlayBackgroundCss(theme)
 }
 
 /** 元素本地四角（相对 transform-origin 中心、缩放后）映射到预览容器内像素；旋转后≠AABB 四角 */
@@ -328,15 +290,20 @@ const DEFAULT_EDITABLE_ALL_LAYERS: TextElementKey[] = ['content']
 
 /** 结束 / 休息壁纸共用同一套默认层变换，仅 `target` 决定子项关联用途 */
 export const DEFAULT_LAYER_TRANSFORMS: Record<TextElementKey, TextTransform> = {
-  content: { x: 50, y: 36, rotation: 0, scale: 1 },
+  content: { ...MAIN_REST_LAYOUT_DEFAULTS.contentTransform },
   /** 时间单行：不设 textBoxHeightPct，高度随字行高，避免预览 Moveable 上下留白过大 */
-  time: { x: 50, y: 62, rotation: 0, scale: 1 },
+  time: { ...MAIN_REST_LAYOUT_DEFAULTS.timeTransform },
   date: { x: 50, y: 65, rotation: 0, scale: 1 },
   countdown: { x: 50, y: 78, rotation: 0, scale: 1 },
 }
-export const DEFAULT_TRANSFORMS: Record<'main' | 'rest', Record<TextElementKey, TextTransform>> = {
+export const DEFAULT_TRANSFORMS: Record<'main' | 'rest' | 'desktop', Record<TextElementKey, TextTransform>> = {
   main: DEFAULT_LAYER_TRANSFORMS,
   rest: DEFAULT_LAYER_TRANSFORMS,
+  desktop: {
+    ...DEFAULT_LAYER_TRANSFORMS,
+    time: DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeTransform,
+    date: DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateTransform,
+  },
 }
 
 const ALIGN_ICONS = {
@@ -656,6 +623,11 @@ export function ThemePreviewEditor({
   const [editingDecoLayerId, setEditingDecoLayerId] = useState<string | null>(null)
   const editingDecoLayerIdRef = useRef<string | null>(null)
   editingDecoLayerIdRef.current = editingDecoLayerId
+  /** 内联编辑时关闭 Moveable 拖拽/旋转/等比缩放，避免抢走 contentEditable 的指针与焦点 */
+  const moveableTransformGesturesEnabled = !(
+    useInlineTextEditing &&
+    (editingTextKey != null || editingDecoLayerId != null)
+  )
   /** 框选得到的装饰层多选（text/image）；单选仍走 selectedDecorationLayerId */
   const [marqueeDecorationLayerIds, setMarqueeDecorationLayerIds] = useState<string[]>([])
   /** 避免：点空白 blur 后同一次点击又执行 onSelectElements([]) 清掉选中 */
@@ -718,17 +690,70 @@ export function ThemePreviewEditor({
   }, [previewContainerWidth, previewContainerHeight])
 
   /** 预览用逻辑字号：与松手缩放烘焙一致用整数 px，避免先小数再 floor/归一化导致轻微跳变 */
-  const contentFontPx = Math.max(1, Math.min(8000, Math.round(theme.contentFontSize ?? 180)))
-  const timeFontPx = Math.max(1, Math.min(8000, Math.round(theme.timeFontSize ?? 100)))
-  const dateFontPx = Math.max(1, Math.min(8000, Math.round(theme.dateFontSize ?? 72)))
+  const contentFontPx = Math.max(
+    1,
+    Math.min(
+      8000,
+      Math.round(
+        theme.contentFontSize ??
+          (theme.target === 'main' || theme.target === 'rest'
+            ? MAIN_REST_LAYOUT_DEFAULTS.contentFontSize
+            : 180),
+      ),
+    ),
+  )
+  const timeFontPx = Math.max(
+    1,
+    Math.min(
+      8000,
+      Math.round(
+        theme.timeFontSize ??
+          (theme.target === 'desktop'
+            ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+            : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize),
+      ),
+    ),
+  )
+  const dateFontPx = Math.max(
+    1,
+    Math.min(
+      8000,
+      Math.round(
+        theme.dateFontSize ??
+          (theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize! : 72),
+      ),
+    ),
+  )
   const countdownFontPx = Math.max(1, Math.min(8000, Math.round(theme.countdownFontSize ?? 180)))
 
-  /** 日期预览：定时刷新以便跨日与「仅星期」等仍随真实日期变 */
+  /** 日期预览：定时刷新以便跨日与「仅星期」等仍随真实日期变；桌面目标按整秒边界排程，避免与任务栏时钟差一拍 */
   const [datePreviewTick, setDatePreviewTick] = useState(0)
   useEffect(() => {
+    if (theme.target === 'desktop') {
+      let cancelled = false
+      let tid: ReturnType<typeof window.setTimeout> | undefined
+      const tickAligned = () => {
+        if (cancelled) return
+        setDatePreviewTick((n) => n + 1)
+        const ms = Date.now() % 1000
+        const dly = ms === 0 ? 1000 : 1000 - ms
+        tid = window.setTimeout(tickAligned, dly)
+      }
+      tickAligned()
+      return () => {
+        cancelled = true
+        if (tid !== undefined) window.clearTimeout(tid)
+      }
+    }
     const id = window.setInterval(() => setDatePreviewTick((n) => n + 1), 30000)
     return () => clearInterval(id)
-  }, [])
+  }, [theme.target])
+
+  /** 切换休息/结束/桌面等导致图层与 DOM 重建时，退出编辑态，避免 contentEditable 挂在已卸载节点上 */
+  useEffect(() => {
+    setEditingTextKey(null)
+    setEditingDecoLayerId(null)
+  }, [theme.target, theme.id])
 
   const getTransform = useCallback((key: TextElementKey): TextTransform => {
     const t =
@@ -739,8 +764,11 @@ export function ThemePreviewEditor({
           : key === 'date'
             ? theme.dateTransform
             : theme.countdownTransform
-    return t ?? DEFAULT_LAYER_TRANSFORMS[key] ?? { x: 50, y: 50, rotation: 0, scale: 1 }
-  }, [theme.contentTransform, theme.timeTransform, theme.dateTransform, theme.countdownTransform])
+    const fallbackTarget: 'main' | 'rest' | 'desktop' =
+      theme.target === 'rest' || theme.target === 'desktop' ? theme.target : 'main'
+    const layerDefaults = DEFAULT_TRANSFORMS[fallbackTarget]
+    return t ?? layerDefaults[key] ?? { x: 50, y: 50, rotation: 0, scale: 1 }
+  }, [theme.contentTransform, theme.timeTransform, theme.dateTransform, theme.countdownTransform, theme.target])
 
   const getTransformRef = useRef(getTransform)
   getTransformRef.current = getTransform
@@ -891,6 +919,15 @@ export function ThemePreviewEditor({
         return fallback
       }
       if (key === 'time') {
+        if (theme.target === 'desktop') {
+          const loc = (theme.dateLocale ?? '').trim() || 'zh-CN'
+          return new Date().toLocaleTimeString(loc, {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+          })
+        }
         if (theme.previewTimeText?.trim()) return theme.previewTimeText.trim()
         if (pl != null && pl !== '') return pl
         return fallback
@@ -919,16 +956,18 @@ export function ThemePreviewEditor({
       theme.dateDayFormat,
       theme.dateWeekdayFormat,
       datePreviewTick,
+      theme.target,
     ],
   )
 
   const textLayerPairs = useMemo((): { key: TextElementKey; ref: React.RefObject<HTMLDivElement | null> }[] => {
     const ly = ensureThemeLayers(theme).layers ?? []
     const hasDate = ly.some((l) => l.kind === 'bindingDate')
-    const out: { key: TextElementKey; ref: React.RefObject<HTMLDivElement | null> }[] = [
-      { key: 'content', ref: contentRef },
-      { key: 'time', ref: timeRef },
-    ]
+    const out: { key: TextElementKey; ref: React.RefObject<HTMLDivElement | null> }[] = []
+    if (theme.target !== 'desktop') {
+      out.push({ key: 'content', ref: contentRef })
+    }
+    out.push({ key: 'time', ref: timeRef })
     if (hasDate) out.push({ key: 'date', ref: dateRef })
     return out
   }, [theme])
@@ -1479,6 +1518,8 @@ export function ThemePreviewEditor({
       const t = e.target as HTMLElement | null
       if (!t?.closest) return
       if (t.closest('input, textarea, select, [contenteditable="true"]')) return
+      const aeArrow = document.activeElement as HTMLElement | null
+      if (aeArrow?.closest?.('input, textarea, select, [contenteditable="true"]')) return
       const scope = keyboardScopeRef?.current ?? containerRef.current
       if (!scope?.contains(t)) return
       if (selectedElements.length === 0 && !selectedDecorationLayerId) return
@@ -1506,6 +1547,8 @@ export function ThemePreviewEditor({
       if (editingDecoLayerIdRef.current) return
       const t = e.target as HTMLElement | null
       if (t?.closest?.('input, textarea, select, [contenteditable="true"]')) return
+      const aeDel = document.activeElement as HTMLElement | null
+      if (aeDel?.closest?.('input, textarea, select, [contenteditable="true"]')) return
       const scope = keyboardScopeRef?.current ?? containerRef.current
       if (!scope) return
       const ae = document.activeElement
@@ -1985,7 +2028,7 @@ export function ThemePreviewEditor({
   const snapShortLayerTightContent = useCallback(
     (k: TextElementKey, el: HTMLElement) => {
       if (k !== 'time' && k !== 'date' && k !== 'countdown') return
-      if (k === 'countdown' && theme.target !== 'rest') return
+      if (k === 'countdown' && theme.target !== 'rest' && theme.target !== 'desktop') return
       const measureEl = getTextLayoutRoot(el)
       const container = containerRef.current
       if (!container) return
@@ -2737,9 +2780,40 @@ export function ThemePreviewEditor({
       const yPct = Math.max(0, Math.min(100, (anchorCy / cHo) * 100))
       const current = getTransform(k)
       /** 与预览 `*FontPx` 一致：按当前**已渲染的整数字号**乘缩放比再四舍五入，不写小数，避免与 floor/持久化归整打架 */
-      const baseContentPx = Math.max(1, Math.min(8000, Math.round(theme.contentFontSize ?? 180)))
-      const baseTimePx = Math.max(1, Math.min(8000, Math.round(theme.timeFontSize ?? 100)))
-      const baseDatePx = Math.max(1, Math.min(8000, Math.round(theme.dateFontSize ?? 72)))
+      const baseContentPx = Math.max(
+        1,
+        Math.min(
+          8000,
+          Math.round(
+            theme.contentFontSize ??
+              (theme.target === 'main' || theme.target === 'rest'
+                ? MAIN_REST_LAYOUT_DEFAULTS.contentFontSize
+                : 180),
+          ),
+        ),
+      )
+      const baseTimePx = Math.max(
+        1,
+        Math.min(
+          8000,
+          Math.round(
+            theme.timeFontSize ??
+              (theme.target === 'desktop'
+                ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+                : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize),
+          ),
+        ),
+      )
+      const baseDatePx = Math.max(
+        1,
+        Math.min(
+          8000,
+          Math.round(
+            theme.dateFontSize ??
+              (theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize! : 72),
+          ),
+        ),
+      )
       const baseCountdownPx = Math.max(1, Math.min(8000, Math.round(theme.countdownFontSize ?? 180)))
       const fontPatch: Partial<PopupTheme> = {}
       if (k === 'content') {
@@ -3414,6 +3488,7 @@ export function ThemePreviewEditor({
       scheduleDragStart(e.nativeEvent)
       return
     }
+    const wasAlreadyOnlySelected = selectedElements.length === 1 && selectedElements[0] === key && inSel
     if (!inSel || selectedElements.length !== 1 || selectedElements[0] !== key) {
       flushSync(() => {
         setMarqueeDecorationLayerIds([])
@@ -3428,7 +3503,15 @@ export function ThemePreviewEditor({
       onSelectDecorationLayer?.(null)
       setMoveableTargets([targetEl])
     }
-    scheduleDragStart(e.nativeEvent)
+    /** 可双击内联编辑的层：第一次单击只选中不启 Moveable 拖拽，避免双击第一下误开 drag 抢走第二下 */
+    const skipDragUntilReclick =
+      useInlineTextEditing &&
+      effectiveEditableKeys.includes(key) &&
+      e.detail === 1 &&
+      !wasAlreadyOnlySelected
+    if (!skipDragUntilReclick) {
+      scheduleDragStart(e.nativeEvent)
+    }
   }, [
     selectedElements,
     onSelectElements,
@@ -3441,6 +3524,7 @@ export function ThemePreviewEditor({
     editingDecoLayerIdRef,
     onSelectStructuralLayer,
     setMarqueeDecorationLayerIds,
+    useInlineTextEditing,
   ])
 
   const renderTextLayerForKey = (layerId: string, key: TextElementKey, zi: number): React.ReactNode => {
@@ -3460,10 +3544,10 @@ export function ThemePreviewEditor({
       key === 'content'
         ? theme.contentColor
         : key === 'countdown'
-          ? (theme.countdownColor || theme.timeColor)
+          ? (theme.countdownColor || theme.timeColor || '#ffffff')
           : key === 'date'
-            ? (theme.dateColor || theme.timeColor)
-            : theme.timeColor
+            ? (theme.dateColor || theme.timeColor || '#ffffff')
+            : theme.timeColor || '#ffffff'
     const tf = styleTransformByKey[key] ?? 'translate(0px,0px) rotate(0deg) scale(1)'
     const displayText = getDisplayText(key, label)
     const ta = alignForKey(theme, key)
@@ -3478,7 +3562,9 @@ export function ThemePreviewEditor({
     const wm = writingModeForKey(theme, key)
     const isVertical = isVerticalWritingMode(wm)
     const shortLineLayer =
-      key === 'time' || key === 'date' || (key === 'countdown' && theme.target === 'rest')
+      key === 'time' ||
+      key === 'date' ||
+      (key === 'countdown' && (theme.target === 'rest' || theme.target === 'desktop'))
     const shortLayerLockW = shortLineLayer && tform.shortLayerTextBoxLockWidth === true
     const tv = verticalAlignForKey(theme, key)
     const shortLayerFlexJustify = justifyFromTextAlign(ta)
@@ -3581,7 +3667,10 @@ export function ThemePreviewEditor({
           textDecoration: getTextDecoration(key),
           ...(isVertical ? {} : { textAlign: ta, letterSpacing: `${toPreviewPx(ls)}px` }),
           zIndex: zi,
-          padding: `${toPreviewPx(3)}px`,
+          /** 与 reminderWindow 绑定短行一致：左右略增，避免斜体/描边在 max-width+nowrap 下被裁 */
+          padding: shortLineLayer
+            ? `${toPreviewPx(3)}px ${toPreviewPx(12)}px`
+            : `${toPreviewPx(3)}px`,
           ...(shortLineLayer
             ? {
                 display: 'flex',
@@ -3624,14 +3713,14 @@ export function ThemePreviewEditor({
               : { maxWidth: `${CONTENT_TEXT_AUTO_FIT_MAX_RATIO * 100}%` }),
           ...(shortLineLayer
             ? bh != null && Number.isFinite(bh) && isEditing && useInlineTextEditing
-              ? { minHeight: `${bh}%`, height: 'auto', maxHeight: '100%', overflow: 'hidden' as const }
+              ? { minHeight: `${bh}%`, height: 'auto', maxHeight: '100%', overflow: 'visible' as const }
               : {
                   height: 'auto' as const,
                   maxHeight:
                     bh != null && Number.isFinite(bh)
                       ? `${Math.min(100, Math.max(3, bh))}%`
                       : '100%',
-                  overflow: 'hidden' as const,
+                  overflow: 'visible' as const,
                 }
             : !shortLineLayer && isVertical
               ? verticalEditColumnHeightPct != null
@@ -3775,8 +3864,9 @@ export function ThemePreviewEditor({
 
   const outerWrapClass =
     !showToolbar ? 'w-full' : outerChrome === 'none' ? 'w-full min-w-0' : 'rounded-md border border-slate-200 bg-white p-2'
+  /** 主题工坊缩略图：仅此处使用 fixedPreviewPixelSize；底色跟主题，避免露缝时一条纯黑边 */
   const previewBoxClass = fixedPreviewPixelSize
-    ? 'relative overflow-hidden rounded border border-slate-300 bg-black'
+    ? 'relative overflow-hidden rounded-none border-0 bg-transparent'
     : previewWidthMode === 'fill'
       ? 'relative w-full max-w-full overflow-hidden rounded border border-slate-300 bg-black'
       : showToolbar
@@ -3816,7 +3906,11 @@ export function ThemePreviewEditor({
         className={`${previewBoxClass} ${editingTextKey || editingDecoLayerId ? '' : 'select-none'} ${readOnly ? 'pointer-events-none' : ''}`}
         style={
           fixedPreviewPixelSize
-            ? { width: fixedPreviewPixelSize.width, height: fixedPreviewPixelSize.height }
+            ? {
+                width: fixedPreviewPixelSize.width,
+                height: fixedPreviewPixelSize.height,
+                backgroundColor: theme.backgroundColor?.trim() || '#000000',
+              }
             : { aspectRatio: popupPreviewAspect === '16:9' ? '16 / 9' : '4 / 3' }
         }
         onClick={handleContainerClick} onMouseDown={handleContainerMouseDown}>
@@ -3831,7 +3925,7 @@ export function ThemePreviewEditor({
                 Number.isFinite(blurRaw) ? Math.max(0, Math.min(POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX, blurRaw)) : 0
               const blurOut = bgBlur > 0 ? Math.min(200, Math.ceil(bgBlur * 2.5)) : 0
               if (
-                !readOnly &&
+                (!readOnly || theme.target === 'desktop') &&
                 theme.imageSourceType === 'folder' &&
                 folderPreviewUrls.length >= 2
               ) {
@@ -4066,6 +4160,7 @@ export function ThemePreviewEditor({
                     if (e.detail >= 2) return
                     if (decoInlineEditing) return
                     e.stopPropagation()
+                    const wasOnlyThisDeco = selectedDecorationLayerId === L.id
                     flushSync(() => {
                       setMarqueeDecorationLayerIds([])
                       onSelectStructuralLayer?.(null)
@@ -4073,7 +4168,10 @@ export function ThemePreviewEditor({
                       onSelectDecorationLayer?.(L.id)
                     })
                     setMoveableTargets([e.currentTarget as HTMLDivElement])
-                    scheduleDragStart(e.nativeEvent)
+                    const skipDecoFirstPickDrag = useInlineTextEditing && e.detail === 1 && !wasOnlyThisDeco
+                    if (!skipDecoFirstPickDrag) {
+                      scheduleDragStart(e.nativeEvent)
+                    }
                   }}
                 >
                   <span
@@ -4289,9 +4387,9 @@ export function ThemePreviewEditor({
             individualGroupable={false}
             useResizeObserver={false}
             defaultGroupOrigin="50% 50%"
-            draggable={true}
-            rotatable={true}
-            scalable={{ keepRatio: true }}
+            draggable={moveableTransformGesturesEnabled}
+            rotatable={moveableTransformGesturesEnabled}
+            scalable={moveableTransformGesturesEnabled ? { keepRatio: true } : false}
             resizable={resizableForTextBounds ? { throttleResize: 0, keepRatio: false } : false}
             snappable={true}
             snapDirections={{ top: true, left: true, bottom: true, right: true, center: true, middle: true }}

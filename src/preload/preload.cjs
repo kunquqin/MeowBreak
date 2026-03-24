@@ -17,6 +17,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pickPopupImageFolder: () => ipcRenderer.invoke('pickPopupImageFolder'),
   getSystemFontFamilies: () => ipcRenderer.invoke('getSystemFontFamilies'),
   clearSystemFontListCache: () => ipcRenderer.invoke('clearSystemFontListCache'),
+  startDesktopLiveWallpaper: (theme) => ipcRenderer.invoke('startDesktopLiveWallpaper', theme),
+  waitDesktopLiveWallpaperApplyDone: (requestId) =>
+    new Promise((resolve) => {
+      const onDone = (_e, result) => {
+        if (result.requestId !== requestId) return
+        ipcRenderer.removeListener('desktop-live-wallpaper-apply-done', onDone)
+        clearTimeout(timeoutId)
+        if (result.success) resolve({ success: true })
+        else resolve({ success: false, error: result.error || '设置失败' })
+      }
+      const timeoutId = setTimeout(() => {
+        ipcRenderer.removeListener('desktop-live-wallpaper-apply-done', onDone)
+        resolve({ success: false, error: '等待超时或已中断' })
+      }, 300000)
+      ipcRenderer.on('desktop-live-wallpaper-apply-done', onDone)
+    }),
+  stopDesktopLiveWallpaper: () => ipcRenderer.invoke('stopDesktopLiveWallpaper'),
+  isDesktopLiveWallpaperActive: () => ipcRenderer.invoke('isDesktopLiveWallpaperActive'),
+  getDesktopLiveWallpaperState: () => ipcRenderer.invoke('getDesktopLiveWallpaperState'),
   onMenuUndo: (cb) => {
     const fn = () => cb()
     ipcRenderer.on('menu-edit-undo', fn)

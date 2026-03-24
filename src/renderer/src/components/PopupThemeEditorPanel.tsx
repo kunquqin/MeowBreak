@@ -20,6 +20,7 @@ import { SystemFontFamilyPicker } from './SystemFontFamilyPicker'
 import { PopupThemeColorSwatch } from './PopupThemeColorSwatch'
 import { PopupThemeLayersBar } from './PopupThemeLayersBar'
 import {
+  MAIN_REST_LAYOUT_DEFAULTS,
   POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX,
   POPUP_FOLDER_CROSSFADE_MAX_SEC,
   type PopupTextOrientationMode,
@@ -27,6 +28,7 @@ import {
 } from '../../../shared/settings'
 import type { ImageThemeLayer, TextThemeLayer } from '../../../shared/popupThemeLayers'
 import {
+  DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS,
   POPUP_LAYER_BACKGROUND_ID,
   POPUP_LAYER_OVERLAY_ID,
   mergeContentThemePatchIntoBindingTextLayer,
@@ -34,6 +36,7 @@ import {
   updateTextLayer,
 } from '../../../shared/popupThemeLayers'
 import { popupThemeDatePresetPatch, type PopupThemeDatePresetId } from '../../../shared/popupThemeDateFormat'
+import { clampOverlayGradientRangePct } from '../../../shared/popupOverlayGradient'
 
 /** 本机字体为 OS 级数据，与当前编辑的 theme.id 无关。勿在 theme.id 变化时清空：会与异步 IPC 回写竞态，出现「日志里 count>0 但下拉永远空」。 */
 let sharedSystemFontFamilies: string[] | null = null
@@ -251,7 +254,7 @@ type PopupThemeEditorPanelCoreProps = PopupThemeEditorPanelProps & {
 
 function PopupThemeEditorPanelWithHistory(props: PopupThemeEditorPanelProps) {
   const { delegatedMergedOnUpdateTheme: _a, delegatedEditHistory: _b, editHistoryMaxSteps = 20, ...p } = props
-  const hist = usePopupThemeEditHistory(p.theme, p.onUpdateTheme, p.replaceThemeFull, editHistoryMaxSteps)
+  const hist = usePopupThemeEditHistory(p.theme, p.onUpdateTheme, p.replaceThemeFull, editHistoryMaxSteps, 0)
   const mergedWrappedOnUpdateTheme = useCallback(
     (id: string, patch: Partial<PopupTheme>, meta?: PopupThemeEditUpdateMeta) => {
       if (id !== p.theme.id) {
@@ -494,6 +497,8 @@ function PopupThemeEditorPanelCore({
       if (!root) return
       const t = e.target as HTMLElement | null
       if (t?.closest?.('input, textarea, select, [contenteditable="true"]')) return
+      const aeFocus = document.activeElement as HTMLElement | null
+      if (aeFocus?.closest?.('input, textarea, select, [contenteditable="true"]')) return
       const ae = document.activeElement
       const inScope =
         (t instanceof HTMLElement && root.contains(t)) ||
@@ -1427,7 +1432,16 @@ function PopupThemeEditorPanelCore({
                     min={1}
                     max={300}
                     step={1}
-                    value={Math.max(1, Math.min(300, theme.contentFontSize))}
+                    value={Math.max(
+                      1,
+                      Math.min(
+                        300,
+                        theme.contentFontSize ??
+                          (theme.target === 'main' || theme.target === 'rest'
+                            ? MAIN_REST_LAYOUT_DEFAULTS.contentFontSize
+                            : 180),
+                      ),
+                    )}
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       if (!Number.isFinite(n)) return
@@ -1439,7 +1453,12 @@ function PopupThemeEditorPanelCore({
                     type="number"
                     min={1}
                     max={8000}
-                    value={theme.contentFontSize}
+                    value={
+                      theme.contentFontSize ??
+                      (theme.target === 'main' || theme.target === 'rest'
+                        ? MAIN_REST_LAYOUT_DEFAULTS.contentFontSize
+                        : 180)
+                    }
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       mergedWrappedOnUpdateTheme(themeId, {
@@ -1458,7 +1477,16 @@ function PopupThemeEditorPanelCore({
                     min={1}
                     max={300}
                     step={1}
-                    value={Math.max(1, Math.min(300, theme.timeFontSize))}
+                    value={Math.max(
+                      1,
+                      Math.min(
+                        300,
+                        theme.timeFontSize ??
+                          (theme.target === 'desktop'
+                            ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+                            : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize),
+                      ),
+                    )}
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       if (!Number.isFinite(n)) return
@@ -1470,7 +1498,12 @@ function PopupThemeEditorPanelCore({
                     type="number"
                     min={1}
                     max={8000}
-                    value={theme.timeFontSize}
+                    value={
+                      theme.timeFontSize ??
+                      (theme.target === 'desktop'
+                        ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize!
+                        : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize)
+                    }
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       mergedWrappedOnUpdateTheme(themeId, {
@@ -1489,7 +1522,16 @@ function PopupThemeEditorPanelCore({
                     min={1}
                     max={300}
                     step={1}
-                    value={Math.max(1, Math.min(300, theme.dateFontSize ?? 72))}
+                    value={Math.max(
+                      1,
+                      Math.min(
+                        300,
+                        theme.dateFontSize ??
+                          (theme.target === 'desktop'
+                            ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize!
+                            : 72),
+                      ),
+                    )}
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       if (!Number.isFinite(n)) return
@@ -1501,7 +1543,10 @@ function PopupThemeEditorPanelCore({
                     type="number"
                     min={1}
                     max={8000}
-                    value={theme.dateFontSize ?? 72}
+                    value={
+                      theme.dateFontSize ??
+                      (theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize! : 72)
+                    }
                     onChange={(e) => {
                       const n = Number(e.target.value)
                       mergedWrappedOnUpdateTheme(themeId, {
@@ -2344,6 +2389,12 @@ function PopupThemeEditorPanelCore({
                   date: { x: 50, y: 65, rotation: 0, scale: 1 },
                   countdown: { x: 50, y: 78, rotation: 0, scale: 1 },
                 },
+                desktop: {
+                  content: { x: 50, y: 36, rotation: 0, scale: 1 },
+                  time: { x: 50, y: 62, rotation: 0, scale: 1 },
+                  date: { x: 50, y: 65, rotation: 0, scale: 1 },
+                  countdown: { x: 50, y: 78, rotation: 0, scale: 1 },
+                },
               }
               const def = defaults[theme.target]?.[sel] ?? { x: 50, y: 50, rotation: 0, scale: 1 }
               const t: TextTransform = (theme[tField as keyof PopupTheme] as TextTransform | undefined) ?? def
@@ -2430,6 +2481,7 @@ function PopupThemeEditorPanelCore({
             const overlayMode = theme.overlayMode === 'gradient' ? 'gradient' : 'solid'
             const overlayOpacity = Math.max(0, Math.min(1, theme.overlayOpacity ?? 0.45))
             const gradientStartOpacity = Math.max(0, Math.min(1, theme.overlayGradientStartOpacity ?? 0.7))
+            const gradientRangePct = clampOverlayGradientRangePct(theme.overlayGradientRangePct)
             const gradientEndOpacity = Math.max(0, Math.min(1, theme.overlayGradientEndOpacity ?? 0))
             const directionRaw = theme.overlayGradientDirection ?? 'leftToRight'
             const gradientAngle =
@@ -2662,6 +2714,46 @@ function PopupThemeEditorPanelCore({
                 className="w-full rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
               />
           </div>
+              <div className="grid grid-cols-[60px_minmax(0,1fr)_72px] items-center gap-2 text-xs text-slate-600">
+                <span
+                  className="leading-tight"
+                  title="沿渐变方向，从起点到该百分比处完成过渡到「终点透明度」；100% 表示过渡铺满整幅遮罩（与原先行为一致）。"
+                >
+                  渐变范围
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={gradientRangePct}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    if (!Number.isFinite(n)) return
+                    mergedWrappedOnUpdateTheme(themeId, {
+                      overlayGradientRangePct: Math.max(1, Math.min(100, Math.round(n))),
+                    })
+                  }}
+                  disabled={disabled}
+                  className="w-full accent-indigo-600 disabled:opacity-50"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={gradientRangePct}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    if (!Number.isFinite(n)) return
+                    mergedWrappedOnUpdateTheme(themeId, {
+                      overlayGradientRangePct: Math.max(1, Math.min(100, Math.round(n))),
+                    })
+                  }}
+                  disabled={disabled}
+                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+                />
+              </div>
               <div className="grid grid-cols-[60px_minmax(0,1fr)_72px] items-center gap-2 text-xs text-slate-600">
                 <span>终点透明</span>
                 <input

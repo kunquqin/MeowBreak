@@ -366,29 +366,20 @@ export function AddSubReminderModal({
     defaultRestThemeId,
   ])
 
+  /**
+   * 仅在校验「当前选中的主题 id 是否仍存在于列表」时回退默认。
+   * 勿在编辑态把用户在下拉框里选中的 id 强行改回 sourceItem，否则预览会一直显示旧主题、与下拉选择不一致。
+   */
   useEffect(() => {
     if (!open) return
-    const isEditReminder =
-      variant === 'edit' && sourceItem && (sourceItem.mode === 'fixed' || sourceItem.mode === 'interval')
-    const sourceMainId = isEditReminder ? sourceItem.mainPopupThemeId : undefined
-    const sourceRestId = isEditReminder ? sourceItem.restPopupThemeId : undefined
-
-    // 编辑态优先回填子项已绑定主题；仅当源主题不存在时才回退默认。
-    if (sourceMainId && mainThemeOptions.some((t) => t.id === sourceMainId)) {
-      if (mainPopupThemeId !== sourceMainId) setMainPopupThemeId(sourceMainId)
-    } else if (!mainThemeOptions.some((t) => t.id === mainPopupThemeId)) {
+    if (!mainThemeOptions.some((t) => t.id === mainPopupThemeId)) {
       setMainPopupThemeId(defaultMainThemeId)
     }
-
-    if (sourceRestId && restThemeOptions.some((t) => t.id === sourceRestId)) {
-      if (restPopupThemeId !== sourceRestId) setRestPopupThemeId(sourceRestId)
-    } else if (!restThemeOptions.some((t) => t.id === restPopupThemeId)) {
+    if (!restThemeOptions.some((t) => t.id === restPopupThemeId)) {
       setRestPopupThemeId(defaultRestThemeId)
     }
   }, [
     open,
-    variant,
-    sourceItem,
     mainPopupThemeId,
     restPopupThemeId,
     mainThemeOptions,

@@ -1,10 +1,15 @@
-# 会话交接（**当前包版本 `0.0.16`** · 延续 v0.0.10u 主题/图层大改）
+# 会话交接（**当前包版本 `0.0.17`** · 延续 v0.0.10u 主题/图层大改）
 
 > 下一段「粘贴用交接提示」见文末代码块。
 
 ## 0.1 文字参数区布局重构（本轮）
 
-- **主题工坊列表（本次）**：缩略图卡片底部 **休息→浅蓝底/字**、**结束→浅绿底/字**，与顶栏蓝/绿语义一致；**主题名 `font-bold`**；筛选 chip **顺序**为 全部 → 休息 → 结束，且选中态 **蓝/绿** 高亮。`getDefaultPopupThemes` / `mergeSystemBuiltinPopupThemes` 默认 **休息系统主题在前、结束在后**。列表支持 **@dnd-kit `rectSortingStrategy` 拖拽排序**（左侧六点手柄，`onReorderThemes` 写回 `popupThemes`）。`npm run build` 已通过。
+- **动态桌面 WorkerW 性能 + 图标层回归修复（本次）**：仍用 **`userData/wb-desk-wallpaper-v1.dll`** 缓存 `WbDesk`。**Attach** 阶段恢复 **120ms + 280ms** sleep（过短易枚举错 WorkerW → 图标被挡）；首次附着失败则 **450ms 后重试一次**。附着成功后 **`resize`/`move` 550ms 防抖** Sync（避免 Chromium 显示后错位；比旧版短防抖少起 PowerShell），并保留 **400ms + 1200ms** 两次定时补同步 + **`display-metrics-changed`**。`npm run build` 已通过。
+- **桌面壁纸预览：时间/日期默认（本次）**：新建桌面主题用统一常量 **`DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS`**（`shared/popupThemeLayers.ts`）：时间 **X50 Y46** 字号 **120**、日期 **X50 Y55** 字号 **45**（旋转 0、缩放 1）；**`buildNewDesktopThemePatch`** 落盘；**`ThemePreviewEditor`** / **`PopupThemeEditorPanel`** / **`reminderWindow`** 在 **`target==='desktop'`** 时对缺省变换与字号一致回退。`npm run build` 已通过。
+- **主题工坊 · 桌面壁纸类型（本次）**：`PopupThemeTarget` 增加 **`desktop`**（`shared/settings.ts` + `main/settings.ts` normalize 三值，避免落盘被压成 `main`）。主题工坊列表筛选 **桌面壁纸**（浅紫 chip / 卡片底条），浮动编辑顶栏在 **工坊入口** 增加第三 Tab **桌面壁纸**（子项入口仍仅休息/结束）。**「+ 创建壁纸」** 按当前筛选创建对应 `target`（筛选「全部」时默认 **结束**）。**「设为桌面壁纸」** 在 `draft.target === 'desktop'` 时显示于「取消」右侧，**IPC `applyDesktopWallpaper`** 传当前草稿 JSON；**`main/desktopWallpaper.ts`**：文件夹背景导出 **固定首张**；隐藏 **`BrowserWindow`** 铺满 **主显示器 `bounds`**，`buildReminderHtml` + 失败回 **`buildReminderHtmlLegacy`**，`capturePage` → **`userData/wallpaper-export/desktop-wallpaper-*.png`**；**仅 Windows** 用 PowerShell 调 **`SystemParametersInfo`（SPI_SETDESKWALLPAPER）** 设壁纸，非 Windows 返回明确错误文案。`reminderWindow` 导出 **`buildReminderHtml` / `buildReminderHtmlLegacy` / `getPopupTempDir` / `writePopupHtmlToTempFile`** 供导出复用。`ThemePreviewEditor` / `PopupThemeEditorPanel` / `popupThemeLayers` 对 **desktop** 与 **rest** 对齐倒计时层与恢复绑定文案语义。`npm run build` 已通过。
+
+- **主题工坊列表（本次）**：缩略图卡片底部 **休息→浅蓝底/字**、**结束→浅绿底/字**、**桌面→浅紫底/字**，与顶栏语义一致；**主题名 `font-bold`**；筛选 chip **顺序**为 全部 → 休息 → 结束 → 桌面，且选中态 **蓝/绿/紫** 高亮。`getDefaultPopupThemes` / `mergeSystemBuiltinPopupThemes` 默认 **休息系统主题在前、结束在后**（无强制系统桌面主题）。列表支持 **@dnd-kit `rectSortingStrategy` 拖拽排序**（左侧六点手柄，`onReorderThemes` 写回 `popupThemes`）。`npm run build` 已通过。
+- **主题工坊列表 · 重命名与拖拽预览（本次续）**：**重命名**为 **卡片标题行内联 `input`**（菜单「重命名」后原位编辑，**Enter** 保存、**Esc** 取消、**失焦**保存；**trim 为空**则取消不写库）；**`truncate`** 单行溢出省略。设置页 **`onCommitThemeName`** → **`updatePopupTheme(id, { name })`**，已移除独立重命名弹窗。列表卡 **hover 仍不整体缩放**；**拖拽浮层**保留 **双 `requestAnimationFrame` 后 `scale-[1.08]` + 阴影** 与 **`h-full min-h-0`** 布局。**更多操作 ···** 在 **标题行右侧**；**悬停缩略图或标题行** 显示，**离开缩略图+标题区** 隐藏（**菜单打开 / 正在重命名** 时保持）；**悬停三点**打开菜单，定位 **`r.bottom + 1`**。`npm run build` 已通过。
 - **预览区拖拽吸附（本次）**：`previewSnapGuidelines` 改为依赖 **`previewContainerWidth/Height` 状态**（`ResizeObserver` + `useLayoutEffect` 同步高），不再在 `useMemo` 内读 `containerRef`（首帧常为 null → 吸附线为空、贴边无磁力）。`Moveable` 补 **`snapHorizontalThreshold` / `snapVerticalThreshold`（14）`**：`react-moveable` 0.56 以二者为准，单独设 `snapThreshold` 已弃用且默认仅 5px 不易感知。
 - **主弹窗兜底文案与默认层间距（本次）**：`BUILTIN_MAIN_POPUP_FALLBACK_BODY` / `RESTORE_BINDING_BODY_MAIN` 与预设池「提醒内容」条目改为 **「时间到啦」**；系统默认结束/休息主题、新建用户主题、`ThemePreviewEditor` / 面板「变换」默认、legacy `transformStyle` 回退、装饰默认 y：**主文案 y 36%、时间 y 62%**（原 42/55），**休息倒计时 y 78%**（原 70），**日期 y 65%**（原 58）。`npm run build` 已通过。
 - **装饰图片层：操作框贴图边 + 拖拽更顺（本次）**：`contain` 下 **`max-width`/`max-height` 仅写在 `<img>`**（theme 上限换 px 或 %），外层 `inline-block` **不再**设 max-height：避免父盒被 max-height 钳短而子图仍按宽度算出更高、上下溢出，Moveable 量高偏矮。`onLoad` **仅当宽高比偏差 >~1.2%** 时写回 **`textBox*Pct`**。`cover` 仍为定比 div + 满铺。拖拽 **rAF 不刷 state**、松手 **sync**；手势起止 **同步 `transformSyncLockedRef`**。`npm run build` 已通过。
@@ -255,7 +260,7 @@
 
 ## 11. 版本信息
 
-- **当前 package 版本**：**`0.0.16`**（见根目录 `package.json`；git tag 以你本地打标为准）
+- **当前 package 版本**：**`0.0.17`**（见根目录 `package.json`；git tag 以你本地打标为准）
 - **内容概览**：主题工坊「+ 创建壁纸」、浮动编辑顶栏 **休息壁纸（蓝）/ 结束壁纸（绿）**（左→右）切换 `target`；子项「编辑主题」**锁定用途**；休息主题预览含 **content + time + countdown（绑定层）**；**休息结束最后几秒**仍固定黑底（`buildRestEndCountdownHtml`），与主题图层硬切；`ThemeStudioFloatingEditor` 保留 **`bannerMain`** 别名避免 HMR 残留 `ReferenceError`
 - **图层 V1**：数据 + 主进程按序渲染 + 工坊/Panel 图层栏与预览 Moveable 已接（见 **§1 · 弹窗主题 · 图层 V1**）；**待办**：全链路手测、`AddSubReminderModal` 小预览是否需显式传图层相关 props、`POPUP_THEME_PLAN` 里程碑勾选与 V1.5 浮动工具栏等
 
@@ -373,12 +378,42 @@
 - **结果**：按住对象可直接拖拽，减少“先点后拖”的顿挫。
 - **涉及文件**：`src/renderer/src/components/ThemePreviewEditor.tsx`
 
+### 预览区内联编辑与 Moveable 冲突（本轮修复）
+
+- **现象**：双击进入主文案/装饰文本编辑后无法输入、再点无反应、编辑态下一拖整块移动；休息/结束/桌面 Tab 切换后偶发同类问题。
+- **根因**：内联编辑时 Moveable 仍开启拖拽/旋转/等比缩放抢指针；双击第一下会 `scheduleDragStart` 误开拖拽；切换 `theme.target` / `theme.id` 后编辑态未清导致焦点挂在已卸载节点。
+- **处理**：
+  1) `editingTextKey` 或 `editingDecoLayerId` 非空时关闭 Moveable `draggable` / `rotatable` / `scalable`（保留 `resizable` 供拉栏宽）；
+  2) 可内联编辑的绑定层：首次单击仅选中、不 `scheduleDragStart`，已是唯一选中同一层时再允许按下拖拽；
+  3) 装饰文本层同样「首次选中不启拖、再次按下再启拖」；
+  4) `useEffect([theme.target, theme.id])` 清空两处编辑态。
+- **涉及文件**：`src/renderer/src/components/ThemePreviewEditor.tsx`
+
+### 子项弹窗主题下拉与预览不一致（本轮修复）
+
+- **根因**：`AddSubReminderModal` 中曾用 `useEffect` 在「当前选中的主题 id ≠ sourceItem 绑定 id」时强行写回 `sourceItem`，用户在下拉框里换休息/结束主题后立刻被覆盖，预览仍显示旧主题。
+- **处理**：同一 effect 仅保留「当前 id 不在主题列表里则回退默认」；初始绑定仍由打开时的 hydrate effect 负责。
+- **涉及文件**：`src/renderer/src/components/AddSubReminderModal.tsx`
+
+### 主题工坊浮动编辑顶栏名称输入异常（本轮缓解）
+
+- **现象**：新建/编辑时顶栏「主题名称」偶发点击无反应、输入延迟；可能与预览区控件层叠或焦点在 `surface` 上有关。
+- **处理**：浮动卡片 `relative`；Tab 与名称行 `z-[60] isolate`，预览工作区 `z-0`；新建草稿名称框 `autoFocus`；`PopupThemeEditorPanel` 撤销快捷键与 `ThemePreviewEditor` 方向键/删层快捷键增加对 `document.activeElement` 是否在 `input/textarea/select/contenteditable` 的判断（与 `e.target` 双保险）。
+- **涉及文件**：`ThemeStudio.tsx`、`PopupThemeEditorPanel.tsx`、`ThemePreviewEditor.tsx`
+
+### 主题工坊列表缩略图拖拽（本轮）
+
+- **需求**：缩略图勿拖出视口引发横向滚动条；拖拽时与子项类似的轻微放大、松手恢复；拖拽跟随勿被列表 `overflow` 裁切；去掉六点手柄，按住缩略图拖拽、点击进入编辑。
+- **处理**：`@dnd-kit/modifiers` 的 `restrictToWindowEdges`；`DragOverlay` 内层无 ring 描边，仅与列表一致的 `border`；`scale` 过渡约 300ms、长尾缓出；**`dropAnimation={null}`**；`useSortable` **680ms · cubic-bezier(0.22,1,0.32,1)**，松手后占位卡 **opacity 0.6s** 淡入；列表内项拖拽中 `opacity: 0`；列表容器 `overflow-x-hidden`；`listeners`+`attributes` 仅绑缩略图，`PointerSensor` `distance: 8`。
+- **依赖**：`@dnd-kit/modifiers@^9`
+- **涉及文件**：`ThemeStudio.tsx`、`package.json`
+
 ---
 
 ## 12. 新会话开头可粘贴的交接提示
 
 ```
-【WorkBreak — 新会话交接（package **0.0.16** · 图层 V1 已接主链路）】
+【WorkBreak — 新会话交接（package **0.0.17** · 图层 V1 已接主链路）】
 
 请先读：
 - AGENTS.md：**4.11–4.16**（含 4.15 图层 V1 规格、4.16 ThemeStudio 重构注意、4.12 休息结束倒计时与主弹窗图层说明）

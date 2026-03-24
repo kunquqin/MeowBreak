@@ -3,7 +3,11 @@
  */
 
 import type { PopupThemeLayer } from './popupThemeLayers'
-import { ensureThemeLayers } from './popupThemeLayers'
+import {
+  buildNewDesktopThemePatch,
+  DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS,
+  ensureThemeLayers,
+} from './popupThemeLayers'
 
 export { ensureThemeLayers } from './popupThemeLayers'
 export type { PopupThemeLayer } from './popupThemeLayers'
@@ -19,12 +23,14 @@ export {
 /** 大类下仅允许一种子项：闹钟 / 倒计时 / 秒表（无提醒弹窗，仅界面计时） */
 export type CategoryKind = 'alarm' | 'countdown' | 'stopwatch'
 export type SubReminderMode = 'fixed' | 'interval' | 'stopwatch'
-export type PopupThemeTarget = 'main' | 'rest'
+export type PopupThemeTarget = 'main' | 'rest' | 'desktop'
 
 /** 系统内置结束弹窗主题 id（normalize 保证存在，子项默认优先绑定） */
 export const SYSTEM_MAIN_POPUP_THEME_ID = 'theme_main_default' as const
 /** 系统内置休息弹窗主题 id */
 export const SYSTEM_REST_POPUP_THEME_ID = 'theme_rest_default' as const
+/** 系统内置桌面壁纸主题 id */
+export const SYSTEM_DESKTOP_POPUP_THEME_ID = 'theme_desktop_default' as const
 
 /**
  * 子项主文案为空时弹窗显示的兜底，与系统默认结束主题的预览文案一致。
@@ -107,6 +113,15 @@ export interface TextTransform {
   contentTextBoxUserSized?: boolean
 }
 
+/** 结束 / 休息弹窗：新建用户主题与系统内置默认的主文案、时间层（时间纯白） */
+export const MAIN_REST_LAYOUT_DEFAULTS = {
+  contentTransform: { x: 50, y: 40, rotation: 0, scale: 1 } as TextTransform,
+  timeTransform: { x: 50, y: 60, rotation: 0, scale: 1 } as TextTransform,
+  contentFontSize: 140,
+  timeFontSize: 120,
+  timeColor: '#ffffff',
+} as const
+
 export function defaultTextTransform(): TextTransform {
   return { x: 50, y: 50, rotation: 0, scale: 1 }
 }
@@ -151,6 +166,8 @@ export interface PopupTheme {
   overlayGradientDirection?: PopupOverlayGradientDirection
   overlayGradientAngleDeg?: number
   overlayGradientStartOpacity?: number
+  /** 渐变模式下：从起点到该百分比（1–100）完成过渡到「终点透明度」，100 即过渡铺满（与旧行为一致） */
+  overlayGradientRangePct?: number
   overlayGradientEndOpacity?: number
   contentColor: string
   timeColor: string
@@ -455,15 +472,10 @@ function defaultMainTheme(): PopupTheme {
     overlayGradientStartOpacity: 0.7,
     overlayGradientEndOpacity: 0,
     contentColor: '#ffffff',
-    timeColor: '#e2e8f0',
     countdownColor: '#ffffff',
-    contentFontSize: 180,
-    timeFontSize: 100,
     countdownFontSize: 180,
     textAlign: 'center',
-    contentTransform: { x: 50, y: 36, rotation: 0, scale: 1 },
-    /** 时间单行高度随字，不设 textBoxHeightPct，与预览 Moveable 贴边一致 */
-    timeTransform: { x: 50, y: 62, rotation: 0, scale: 1 },
+    ...MAIN_REST_LAYOUT_DEFAULTS,
   }
 }
 
@@ -485,34 +497,93 @@ function defaultRestTheme(): PopupTheme {
     overlayGradientStartOpacity: 0.7,
     overlayGradientEndOpacity: 0,
     contentColor: '#ffffff',
-    timeColor: '#e2e8f0',
     countdownColor: '#ffffff',
-    contentFontSize: 180,
-    timeFontSize: 100,
     countdownFontSize: 180,
     textAlign: 'center',
-    contentTransform: { x: 50, y: 36, rotation: 0, scale: 1 },
-    timeTransform: { x: 50, y: 62, rotation: 0, scale: 1 },
+    ...MAIN_REST_LAYOUT_DEFAULTS,
     countdownTransform: { x: 50, y: 78, rotation: 0, scale: 1, textBoxHeightPct: 20 },
   }
 }
 
+function defaultDesktopTheme(): PopupTheme {
+  const seed: PopupTheme = {
+    id: SYSTEM_DESKTOP_POPUP_THEME_ID,
+    name: '桌面壁纸默认',
+    formatVersion: 2,
+    target: 'desktop',
+    previewContentText: '',
+    backgroundType: 'solid',
+    backgroundColor: '#000000',
+    imageSourceType: 'single',
+    overlayEnabled: false,
+    overlayColor: '#000000',
+    overlayOpacity: 0.45,
+    overlayMode: 'solid',
+    overlayGradientDirection: 'leftToRight',
+    overlayGradientAngleDeg: 90,
+    overlayGradientStartOpacity: 0.7,
+    overlayGradientEndOpacity: 0,
+    contentColor: '#ffffff',
+    timeColor: '#ffffff',
+    dateColor: '#ffffff',
+    countdownColor: '#ffffff',
+    contentFontSize: MAIN_REST_LAYOUT_DEFAULTS.contentFontSize,
+    timeFontSize: DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeFontSize,
+    dateFontSize: DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize,
+    countdownFontSize: 180,
+    textAlign: 'center',
+    imageFolderPlayMode: 'sequence',
+    imageFolderIntervalSec: 30,
+    contentTransform: { ...MAIN_REST_LAYOUT_DEFAULTS.contentTransform },
+    timeTransform: { ...DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.timeTransform! },
+    dateTransform: { ...DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateTransform! },
+    countdownTransform: { x: 50, y: 78, rotation: 0, scale: 1, textBoxHeightPct: 20 },
+  }
+  return ensureThemeLayers({ ...seed, ...buildNewDesktopThemePatch(seed) })
+}
+
 export function getDefaultPopupThemes(): PopupTheme[] {
-  /** 休息默认在前、结束默认在后，与主题工坊列表/筛选习惯一致 */
-  return [ensureThemeLayers(defaultRestTheme()), ensureThemeLayers(defaultMainTheme())]
+  /** 休息 → 结束 → 桌面系统默认，与主题工坊列表习惯一致 */
+  return [ensureThemeLayers(defaultRestTheme()), ensureThemeLayers(defaultMainTheme()), defaultDesktopTheme()]
 }
 
 /**
- * 保证 `theme_main_default` / `theme_rest_default` 各至少存在一条（缺则插入内置快照）。
+ * 将主题恢复为「该 target」的内置默认快照（与 `getDefaultPopupThemes` 中对应项一致），保留 `id` 与 `name`。
+ */
+export function cloneDefaultPopupThemePreservingIdentity(theme: {
+  id: string
+  name: string
+  target: PopupThemeTarget
+}): PopupTheme {
+  const list = getDefaultPopupThemes()
+  const snap = list.find((t) => t.target === theme.target)
+  if (!snap) {
+    const fb = list[0]
+    const out = structuredClone(fb) as PopupTheme
+    out.id = theme.id
+    out.name = (theme.name ?? '').trim() || fb.name
+    out.target = theme.target
+    return ensureThemeLayers(out)
+  }
+  const out = structuredClone(snap) as PopupTheme
+  out.id = theme.id
+  out.name = (theme.name ?? '').trim() || snap.name
+  return ensureThemeLayers(out)
+}
+
+/**
+ * 保证 `theme_main_default` / `theme_rest_default` / `theme_desktop_default` 各至少存在一条（缺则插入内置快照）。
  * 用于主进程 normalize 与设置页删除主题后的本地列表修复。
  */
 export function mergeSystemBuiltinPopupThemes(themes: PopupTheme[]): PopupTheme[] {
   const defaults = getDefaultPopupThemes()
   const mainSnap = defaults.find((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
   const restSnap = defaults.find((t) => t.id === SYSTEM_REST_POPUP_THEME_ID)
-  if (!mainSnap || !restSnap) return themes.length > 0 ? themes : defaults
+  const desktopSnap = defaults.find((t) => t.id === SYSTEM_DESKTOP_POPUP_THEME_ID)
+  if (!mainSnap || !restSnap || !desktopSnap) return themes.length > 0 ? themes : defaults
   const hasMain = themes.some((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
   const hasRest = themes.some((t) => t.id === SYSTEM_REST_POPUP_THEME_ID)
+  const hasDesktop = themes.some((t) => t.id === SYSTEM_DESKTOP_POPUP_THEME_ID)
   let next = [...themes]
   if (!hasRest) {
     const mainIdx = next.findIndex((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
@@ -524,11 +595,24 @@ export function mergeSystemBuiltinPopupThemes(themes: PopupTheme[]): PopupTheme[
     if (restIdx >= 0) next.splice(restIdx + 1, 0, mainSnap)
     else next.unshift(mainSnap)
   }
+  if (!hasDesktop) {
+    const mainIdx = next.findIndex((t) => t.id === SYSTEM_MAIN_POPUP_THEME_ID)
+    if (mainIdx >= 0) next.splice(mainIdx + 1, 0, desktopSnap)
+    else {
+      const restIdx = next.findIndex((t) => t.id === SYSTEM_REST_POPUP_THEME_ID)
+      if (restIdx >= 0) next.splice(restIdx + 1, 0, desktopSnap)
+      else next.push(desktopSnap)
+    }
+  }
   return next
 }
 
 /** 新建子项 / 下拉缺省时：优先系统默认 id，否则同 target 首条，否则仍返回系统 id（待 normalize 补主题）。 */
 export function getDefaultPopupThemeIdForTarget(themes: PopupTheme[], target: PopupThemeTarget): string {
+  if (target === 'desktop') {
+    if (themes.some((t) => t.id === SYSTEM_DESKTOP_POPUP_THEME_ID)) return SYSTEM_DESKTOP_POPUP_THEME_ID
+    return themes.find((t) => t.target === 'desktop')?.id ?? SYSTEM_DESKTOP_POPUP_THEME_ID
+  }
   const systemId = target === 'main' ? SYSTEM_MAIN_POPUP_THEME_ID : SYSTEM_REST_POPUP_THEME_ID
   if (themes.some((t) => t.id === systemId)) return systemId
   return themes.find((t) => t.target === target)?.id ?? systemId

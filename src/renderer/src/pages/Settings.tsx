@@ -13,7 +13,16 @@ import type { Transform } from '@dnd-kit/utilities'
 // Framer Motion Reorder 已移除——其 layout 投影系统在混合类型列表中
 // 会导致兄弟卡片位置不随内容高度变化而更新（秒表打点后下方卡重叠）。
 // 大类排序现统一使用 @dnd-kit/sortable。
-import type { AppSettings, CategoryKind, PresetPools, ReminderCategory, SubReminder, CountdownItem, PopupTheme } from '../types'
+import type {
+  AppSettings,
+  CategoryKind,
+  PresetPools,
+  ReminderCategory,
+  SubReminder,
+  CountdownItem,
+  PopupTheme,
+  PopupThemeTarget,
+} from '../types'
 import {
   getDefaultPresetPools,
   getStableDefaultCategories,
@@ -24,8 +33,10 @@ import {
   BUILTIN_REST_POPUP_FALLBACK_BODY,
   mergeSystemBuiltinPopupThemes,
   getDefaultPopupThemeIdForTarget,
+  MAIN_REST_LAYOUT_DEFAULTS,
   SYSTEM_MAIN_POPUP_THEME_ID,
   SYSTEM_REST_POPUP_THEME_ID,
+  SYSTEM_DESKTOP_POPUP_THEME_ID,
 } from '../types'
 import {
   AddSubReminderModal,
@@ -49,7 +60,11 @@ import { type TextElementKey } from '../components/ThemePreviewEditor'
 import { ThemeStudioListView, ThemeStudioFloatingEditor, type ThemeStudioFloatingSource } from '../components/ThemeStudio'
 import { buildSplitSchedule } from '../../../shared/splitSchedule'
 import { collectPopupThemeImagePathsForPreview } from '../utils/popupThemePreview'
-import { mergeContentThemePatchIntoBindingTextLayer } from '../../../shared/popupThemeLayers'
+import {
+  buildNewDesktopThemePatch,
+  mergeContentThemePatchIntoBindingTextLayer,
+} from '../../../shared/popupThemeLayers'
+import { clonePopupThemeForFork } from '../../../shared/popupThemeUtils'
 
 /** 每次使用时读取，避免模块加载时 preload 尚未注入 */
 function getApi() {
@@ -2342,7 +2357,8 @@ export function Settings() {
   const restContentPresets = settings.presetPools.restContent ?? []
   const subTitlePresets = settings.presetPools.subTitle ?? getDefaultPresetPools().subTitle
   const popupThemes = Array.isArray(settings.popupThemes) ? settings.popupThemes : getDefaultPopupThemes()
-  const getFirstThemeIdByTarget = (target: 'main' | 'rest') => getDefaultPopupThemeIdForTarget(popupThemes, target)
+  const getFirstThemeIdByTarget = (target: PopupThemeTarget) =>
+    getDefaultPopupThemeIdForTarget(popupThemes, target)
 
   const getCategoryTitlePresets = (kind: CategoryKind) => settings.presetPools.categoryTitle?.[kind] ?? []
   const setCategoryTitlePresets = (kind: CategoryKind, presets: string[]) => {
@@ -2360,13 +2376,19 @@ export function Settings() {
     setSaveError('')
   }
 
-  const addPopupTheme = (target: 'main' | 'rest'): string => {
+  const addPopupTheme = (target: PopupThemeTarget): string => {
     const id = genId()
+    const defaultName =
+      target === 'main' ? '未命名结束壁纸' : target === 'rest' ? '未命名休息壁纸' : '未命名桌面壁纸'
+    const defaultPreview =
+      target === 'main'
+        ? BUILTIN_MAIN_POPUP_FALLBACK_BODY
+        : BUILTIN_REST_POPUP_FALLBACK_BODY
     const newTheme: PopupTheme = {
       id,
-      name: target === 'main' ? '结束壁纸' : '休息壁纸',
+      name: defaultName,
       target,
-      previewContentText: target === 'main' ? BUILTIN_MAIN_POPUP_FALLBACK_BODY : BUILTIN_REST_POPUP_FALLBACK_BODY,
+      previewContentText: defaultPreview,
       backgroundType: 'solid',
       backgroundColor: '#000000',
       imageSourceType: 'single',
@@ -2374,20 +2396,28 @@ export function Settings() {
       overlayColor: '#000000',
       overlayOpacity: 0.45,
       contentColor: '#ffffff',
-      timeColor: '#e2e8f0',
       countdownColor: '#ffffff',
-      contentFontSize: 180,
-      timeFontSize: 100,
       countdownFontSize: 180,
       textAlign: 'center',
       imageFolderPlayMode: 'sequence',
       imageFolderIntervalSec: 30,
-      formatVersion: 1,
-      contentTransform: { x: 50, y: 36, rotation: 0, scale: 1 },
-      timeTransform: { x: 50, y: 62, rotation: 0, scale: 1 },
-      ...(target === 'rest'
+      formatVersion: target === 'desktop' ? 2 : 1,
+      ...(target === 'main' || target === 'rest' ? MAIN_REST_LAYOUT_DEFAULTS : {}),
+      ...(target === 'desktop'
+        ? {
+            timeColor: '#ffffff',
+            timeTransform: { x: 50, y: 62, rotation: 0, scale: 1 },
+            timeFontSize: 100,
+          }
+        : {}),
+      ...(target === 'rest' || target === 'desktop'
         ? { countdownTransform: { x: 50, y: 78, rotation: 0, scale: 1, textBoxHeightPct: 20 } }
         : {}),
+    }
+    if (target === 'desktop') {
+      Object.assign(newTheme, buildNewDesktopThemePatch(newTheme))
+      newTheme.previewContentText = ''
+      newTheme.formatVersion = 2
     }
     setPopupThemes(mergeSystemBuiltinPopupThemes([newTheme, ...popupThemes]))
     return id
@@ -2477,8 +2507,10 @@ export function Settings() {
     if (!theme) return
     const siblings = popupThemes.filter((t) => t.target === theme.target)
     const fallback =
-      siblings.find((t) => t.id !== themeId)?.id ??
-      (theme.target === 'main' ? SYSTEM_MAIN_POPUP_THEME_ID : SYSTEM_REST_POPUP_THEME_ID)
+      theme.target === 'desktop'
+        ? (siblings.find((t) => t.id !== themeId)?.id ?? SYSTEM_DESKTOP_POPUP_THEME_ID)
+        : siblings.find((t) => t.id !== themeId)?.id ??
+          (theme.target === 'main' ? SYSTEM_MAIN_POPUP_THEME_ID : SYSTEM_REST_POPUP_THEME_ID)
     const nextThemes = mergeSystemBuiltinPopupThemes(popupThemes.filter((t) => t.id !== themeId))
     const nextCategories = settings.reminderCategories.map((cat) => ({
       ...cat,
@@ -2661,8 +2693,40 @@ export function Settings() {
 
         {themeStudioNav ? (
           <div className="box-border flex min-h-[calc(100vh-280px)] w-full min-w-0 flex-1 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="mb-3 border-b border-slate-100 pb-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
               <h2 className="text-lg font-semibold text-slate-800">主题工坊</h2>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = addPopupTheme('rest')
+                    setFloatingThemeEdit({ themeId: id, source: { kind: 'studio-list' }, isNewDraft: true })
+                  }}
+                  className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-900 hover:bg-blue-100"
+                >
+                  +休息壁纸
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = addPopupTheme('main')
+                    setFloatingThemeEdit({ themeId: id, source: { kind: 'studio-list' }, isNewDraft: true })
+                  }}
+                  className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100"
+                >
+                  +结束壁纸
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = addPopupTheme('desktop')
+                    setFloatingThemeEdit({ themeId: id, source: { kind: 'studio-list' }, isNewDraft: true })
+                  }}
+                  className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1.5 text-xs font-medium text-violet-900 hover:bg-violet-100"
+                >
+                  +桌面壁纸
+                </button>
+              </div>
             </div>
             <ThemeStudioListView
               themes={popupThemes}
@@ -2670,9 +2734,16 @@ export function Settings() {
               previewViewportWidth={previewViewportWidthStudio}
               popupPreviewAspect={popupPreviewAspect}
               onOpenEdit={(id) => setFloatingThemeEdit({ themeId: id, source: { kind: 'studio-list' } })}
-              onAddTheme={() => {
-                const id = addPopupTheme('main')
-                setFloatingThemeEdit({ themeId: id, source: { kind: 'studio-list' }, isNewDraft: true })
+              onCommitThemeName={(themeId, name) => updatePopupTheme(themeId, { name })}
+              onDuplicateTheme={(themeId) => {
+                const th = popupThemes.find((x) => x.id === themeId)
+                if (!th) return
+                appendPopupTheme(clonePopupThemeForFork(th, '（副本）'))
+              }}
+              onRemoveTheme={(themeId) => {
+                if (!window.confirm('确定删除该壁纸？使用中的子项将自动切换到同类型的其他壁纸。')) return
+                setFloatingThemeEdit((prev) => (prev?.themeId === themeId ? null : prev))
+                removePopupTheme(themeId)
               }}
               onReorderThemes={setPopupThemes}
             />
@@ -2937,6 +3008,11 @@ export function Settings() {
           const previewViewportWidth =
             primaryDisplaySize?.width ?? (popupPreviewAspect === '16:9' ? 1920 : 1600)
           if (!th) return null
+          const canDeleteFloating =
+            fe.source.kind === 'studio-list' &&
+            fe.themeId !== SYSTEM_MAIN_POPUP_THEME_ID &&
+            fe.themeId !== SYSTEM_REST_POPUP_THEME_ID &&
+            fe.themeId !== SYSTEM_DESKTOP_POPUP_THEME_ID
           return (
             <ThemeStudioFloatingEditor
               themes={popupThemes}
@@ -2992,7 +3068,7 @@ export function Settings() {
                     }
                   : undefined
               }
-              canDeleteTheme
+              canDeleteTheme={canDeleteFloating}
             />
           )
         })()}

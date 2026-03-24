@@ -2,7 +2,7 @@ import { app, BrowserWindow, Menu, dialog, ipcMain, Notification, screen, type O
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { createTray, destroyTray } from './tray'
+import { createTray, destroyTray, setLiveWallpaperTrayHooks } from './tray'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -20,8 +20,37 @@ import {
   syncIntervalTimersAfterSettingsChange,
 } from './reminders'
 import { clearSystemFontListCache, getSystemFontFamilies } from './systemFonts'
+import type { PopupTheme } from '../shared/settings'
+import {
+  startDesktopLiveWallpaper,
+  stopDesktopLiveWallpaper,
+  isDesktopLiveWallpaperActive,
+  getDesktopLiveWallpaperState,
+  registerDesktopLiveWallpaperQuitHook,
+} from './desktopWallpaperPlayer'
 
 let mainWindow: BrowserWindow | null = null
+
+/** 动态壁纸异步应用：新一次「设为壁纸」或「关闭」会使进行中的完成回调失效，避免乱序通知 */
+let desktopWallpaperApplyNonce = 0
+let desktopWallpaperApplyRequestSeq = 0
+/** 进行中的「设为桌面壁纸」requestId；nonce 递增时必须通知，否则渲染进程会空等至超时 */
+let pendingDesktopWallpaperRequestId: number | null = null
+
+type DesktopWallpaperApplyDonePayload =
+  | { requestId: number; success: true }
+  | { requestId: number; success: false; error: string }
+
+function broadcastDesktopLiveWallpaperApplyDone(payload: DesktopWallpaperApplyDonePayload) {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue
+    try {
+      w.webContents.send('desktop-live-wallpaper-apply-done', payload)
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
 
 function installAppMenu() {
   const mod = process.platform === 'darwin' ? 'Cmd' : 'Ctrl'
@@ -174,6 +203,7 @@ function createWindow() {
 }
 
 ;(globalThis as unknown as { workbreakQuit?: () => void }).workbreakQuit = () => {
+  stopDesktopLiveWallpaper()
   destroyTray()
   mainWindow = null
   app.quit()
@@ -195,6 +225,11 @@ if (!gotLock) {
 app.whenReady().then(() => {
   installAppMenu()
   createWindow()
+  setLiveWallpaperTrayHooks({
+    isActive: isDesktopLiveWallpaperActive,
+    stop: stopDesktopLiveWallpaper,
+  })
+  registerDesktopLiveWallpaperQuitHook()
   startReminders()
 })
 
@@ -289,6 +324,63 @@ ipcMain.handle('getSystemFontFamilies', async () => {
 ipcMain.handle('clearSystemFontListCache', () => {
   clearSystemFontListCache()
 })
+ipcMain.handle('startDesktopLiveWallpaper', (_e, theme: PopupTheme) => {
+  if (process.platform !== 'win32') {
+    return { success: false as const, error: '动态桌面壁纸当前仅支持 Windows。' }
+  }
+  if (pendingDesktopWallpaperRequestId !== null) {
+    const prev = pendingDesktopWallpaperRequestId
+    pendingDesktopWallpaperRequestId = null
+    broadcastDesktopLiveWallpaperApplyDone({
+      requestId: prev,
+      success: false,
+      error: '已有新的桌面壁纸请求，已取消上一次操作',
+    })
+  }
+  const requestId = ++desktopWallpaperApplyRequestSeq
+  const nonce = ++desktopWallpaperApplyNonce
+  pendingDesktopWallpaperRequestId = requestId
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const result = await startDesktopLiveWallpaper(theme)
+        if (nonce !== desktopWallpaperApplyNonce) return
+        if (pendingDesktopWallpaperRequestId === requestId) {
+          pendingDesktopWallpaperRequestId = null
+        }
+        broadcastDesktopLiveWallpaperApplyDone(
+          result.success
+            ? { requestId, success: true as const }
+            : { requestId, success: false as const, error: result.error },
+        )
+      } catch (err) {
+        if (nonce !== desktopWallpaperApplyNonce) return
+        if (pendingDesktopWallpaperRequestId === requestId) {
+          pendingDesktopWallpaperRequestId = null
+        }
+        const message = err instanceof Error ? err.message : String(err)
+        broadcastDesktopLiveWallpaperApplyDone({ requestId, success: false as const, error: message })
+      }
+    })()
+  })
+  return { pending: true as const, requestId }
+})
+ipcMain.handle('stopDesktopLiveWallpaper', () => {
+  desktopWallpaperApplyNonce++
+  if (pendingDesktopWallpaperRequestId !== null) {
+    const rid = pendingDesktopWallpaperRequestId
+    pendingDesktopWallpaperRequestId = null
+    broadcastDesktopLiveWallpaperApplyDone({
+      requestId: rid,
+      success: false,
+      error: '已取消桌面壁纸操作',
+    })
+  }
+  stopDesktopLiveWallpaper()
+  return { success: true as const }
+})
+ipcMain.handle('isDesktopLiveWallpaperActive', () => isDesktopLiveWallpaperActive())
+ipcMain.handle('getDesktopLiveWallpaperState', () => getDesktopLiveWallpaperState())
 ipcMain.handle('pickPopupImageFolder', async () => {
   const win = mainWindow ?? BrowserWindow.getFocusedWindow()
   const options: OpenDialogOptions = {

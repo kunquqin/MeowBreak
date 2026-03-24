@@ -319,8 +319,20 @@ function runFixedTimeCheck() {
       const splitCount = Math.max(1, Math.min(10, item.splitCount ?? 1))
       const restDurationMs = Math.max(0, item.restDurationSeconds ?? 0) * 1000
       if (context.state !== 'ended' && splitCount > 1 && restDurationMs > 0) {
-        const cycleStartAt = context.windowStartAt
-        const cycleSpanMs = Math.max(1, context.windowEndAt - context.windowStartAt)
+        // 与 getReminderCountdowns 一致：「当前时间」起点用毫秒级 fixedPreciseStartAt，周期为 结束时间 − 实际起点
+        let effectiveCycleStart = context.windowStartAt
+        const preciseStart = fixedPreciseStartAt.get(key)
+        if (
+          item.useNowAsStart === true &&
+          preciseStart != null &&
+          context.state === 'running' &&
+          preciseStart >= context.windowStartAt &&
+          preciseStart <= context.windowEndAt
+        ) {
+          effectiveCycleStart = preciseStart
+        }
+        const cycleStartAt = effectiveCycleStart
+        const cycleSpanMs = Math.max(1, context.windowEndAt - effectiveCycleStart)
         const plan = buildSplitSchedule(cycleSpanMs, splitCount, restDurationMs)
         if (plan.workDurationsMs.length <= 1) continue
         const cycleSignature = `fixed-rest|${startTime}|${endTime}|${splitCount}|${restDurationMs}|${cycleStartAt}`

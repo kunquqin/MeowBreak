@@ -358,7 +358,8 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
       const o = x as Record<string, unknown>
       const id = typeof o.id === 'string' && o.id.trim() ? o.id : `theme_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
       const name = typeof o.name === 'string' && o.name.trim() ? o.name.trim() : '未命名主题'
-      const target = o.target === 'rest' ? 'rest' : 'main'
+      const target =
+        o.target === 'rest' ? 'rest' : o.target === 'desktop' ? 'desktop' : 'main'
       const backgroundType = o.backgroundType === 'image' ? 'image' : 'solid'
       const backgroundColor = typeof o.backgroundColor === 'string' && o.backgroundColor ? o.backgroundColor : '#000000'
       const imageSourceType = o.imageSourceType === 'folder' ? 'folder' : 'single'
@@ -417,8 +418,13 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
       const overlayGradientEndOpacity = Number.isFinite(overlayGradientEndOpacityNum)
         ? Math.max(0, Math.min(1, overlayGradientEndOpacityNum))
         : 0
+      let overlayGradientRangePct: number | undefined
+      if (o.overlayGradientRangePct !== undefined && o.overlayGradientRangePct !== null) {
+        const rn = Number(o.overlayGradientRangePct)
+        if (Number.isFinite(rn)) overlayGradientRangePct = Math.max(1, Math.min(100, Math.round(rn)))
+      }
       const contentColor = typeof o.contentColor === 'string' && o.contentColor ? o.contentColor : '#ffffff'
-      const timeColor = typeof o.timeColor === 'string' && o.timeColor ? o.timeColor : '#e2e8f0'
+      const timeColor = typeof o.timeColor === 'string' && o.timeColor ? o.timeColor : '#ffffff'
       const dateColor = typeof o.dateColor === 'string' && o.dateColor ? o.dateColor : '#e2e8f0'
       const countdownColor = typeof o.countdownColor === 'string' && o.countdownColor ? o.countdownColor : '#ffffff'
       const clampThemeFont = (raw: unknown, fallback: number) => {
@@ -581,6 +587,7 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
         overlayGradientDirection,
         overlayGradientAngleDeg,
         overlayGradientStartOpacity,
+        ...(overlayGradientRangePct !== undefined ? { overlayGradientRangePct } : {}),
         overlayGradientEndOpacity,
         contentColor,
         timeColor,

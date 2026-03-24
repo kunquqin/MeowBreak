@@ -7,20 +7,33 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   DndContext,
+  DragOverlay,
+  type DragCancelEvent,
   type DragEndEvent,
+  type DragStartEvent,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
 } from '@dnd-kit/core'
+import { restrictToWindowEdges } from '@dnd-kit/modifiers'
 import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import type { Transform } from '@dnd-kit/utilities'
 import { collectPopupThemeImagePathsForPreview } from '../utils/popupThemePreview'
-import type { PopupTheme, PopupThemeTarget } from '../types'
+import {
+  cloneDefaultPopupThemePreservingIdentity,
+  SYSTEM_DESKTOP_POPUP_THEME_ID,
+  SYSTEM_MAIN_POPUP_THEME_ID,
+  SYSTEM_REST_POPUP_THEME_ID,
+  type PopupTheme,
+  type PopupThemeTarget,
+} from '../types'
 import { ThemePreviewEditor, type TextElementKey } from './ThemePreviewEditor'
 import { PopupThemeEditorPanel } from './PopupThemeEditorPanel'
 import { clonePopupThemeForFork, popupThemeContentEquals } from '../../../shared/popupThemeUtils'
@@ -35,6 +48,227 @@ function sortableTranslateOnly(t: Transform | null): string | undefined {
   const y = t.y ?? 0
   if (x === 0 && y === 0) return undefined
   return `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`
+}
+
+/** 与设置页主题工坊「+休息/结束/桌面壁纸」按钮底色、描边一致；hover 略加深（整张卡 group-hover） */
+function themeStudioListCardFooterClasses(target: PopupThemeTarget): {
+  footerTone: string
+  footerHoverTone: string
+  subTone: string
+} {
+  if (target === 'main') {
+    return {
+      footerTone: 'border-emerald-200 bg-emerald-50',
+      footerHoverTone: 'group-hover:border-emerald-300 group-hover:bg-emerald-100',
+      subTone: 'text-emerald-900',
+    }
+  }
+  if (target === 'desktop') {
+    return {
+      footerTone: 'border-violet-200 bg-violet-50',
+      footerHoverTone: 'group-hover:border-violet-300 group-hover:bg-violet-100',
+      subTone: 'text-violet-900',
+    }
+  }
+  return {
+    footerTone: 'border-blue-200 bg-blue-50',
+    footerHoverTone: 'group-hover:border-blue-300 group-hover:bg-blue-100',
+    subTone: 'text-blue-900',
+  }
+}
+
+function isStudioListBuiltinThemeId(id: string): boolean {
+  return (
+    id === SYSTEM_MAIN_POPUP_THEME_ID ||
+    id === SYSTEM_REST_POPUP_THEME_ID ||
+    id === SYSTEM_DESKTOP_POPUP_THEME_ID
+  )
+}
+
+const STUDIO_LIST_MENU_W = 168
+const STUDIO_LIST_MENU_CLOSE_MS = 280
+
+type StudioListOverflowMenuProps = {
+  onOpen: () => void
+  onRename: () => void
+  onDuplicate: () => void
+  onRemove: () => void
+  canDelete: boolean
+  deleteDisabledTitle?: string
+  /** 菜单开关：用于缩略图角标在弹出层打开时保持可见 */
+  onOpenChange?: (open: boolean) => void
+}
+
+function StudioListOverflowMenu({
+  onOpen,
+  onRename,
+  onDuplicate,
+  onRemove,
+  canDelete,
+  deleteDisabledTitle,
+  onOpenChange,
+}: StudioListOverflowMenuProps) {
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const emitOpen = useCallback(
+    (next: boolean) => {
+      onOpenChange?.(next)
+      setOpen(next)
+    },
+    [onOpenChange],
+  )
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = window.setTimeout(() => emitOpen(false), STUDIO_LIST_MENU_CLOSE_MS)
+  }, [clearCloseTimer, emitOpen])
+
+  const [coords, setCoords] = useState({ top: 0, left: 0 })
+
+  const measureAndSetCoords = useCallback(() => {
+    const el = btnRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const margin = 8
+    let left = r.right - STUDIO_LIST_MENU_W
+    left = Math.max(margin, Math.min(left, window.innerWidth - STUDIO_LIST_MENU_W - margin))
+    const estH = 200
+    let top = r.bottom + 1
+    if (top + estH > window.innerHeight - margin) {
+      top = Math.max(margin, r.top - estH - 1)
+    }
+    setCoords({ top, left })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    measureAndSetCoords()
+    const onReposition = () => measureAndSetCoords()
+    window.addEventListener('scroll', onReposition, true)
+    window.addEventListener('resize', onReposition)
+    return () => {
+      window.removeEventListener('scroll', onReposition, true)
+      window.removeEventListener('resize', onReposition)
+    }
+  }, [open, measureAndSetCoords])
+
+  useEffect(() => {
+    if (!open) return
+    const onDocDown = (e: globalThis.MouseEvent) => {
+      const n = e.target as Node
+      if (btnRef.current?.contains(n) || menuRef.current?.contains(n)) return
+      emitOpen(false)
+    }
+    document.addEventListener('mousedown', onDocDown)
+    return () => document.removeEventListener('mousedown', onDocDown)
+  }, [open, emitOpen])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') emitOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, emitOpen])
+
+  const itemCls =
+    'block w-full px-3 py-2 text-left text-sm text-slate-800 transition-colors hover:bg-slate-50 focus:bg-slate-50 focus:outline-none'
+
+  const run = (fn: () => void) => {
+    clearCloseTimer()
+    emitOpen(false)
+    fn()
+  }
+
+  const onTriggerClick = (e: ReactMouseEvent) => {
+    e.stopPropagation()
+    setOpen((v) => {
+      const next = !v
+      onOpenChange?.(next)
+      if (next) queueMicrotask(() => measureAndSetCoords())
+      return next
+    })
+  }
+
+  const menu =
+    open &&
+    createPortal(
+      <div
+        ref={menuRef}
+        role="menu"
+        className="fixed z-[300000] w-[168px] rounded-md border border-slate-200 bg-white py-1 shadow-lg"
+        style={{ top: coords.top, left: coords.left }}
+        onMouseEnter={clearCloseTimer}
+        onMouseLeave={scheduleClose}
+      >
+        <button type="button" role="menuitem" className={itemCls} onClick={() => run(onOpen)}>
+          打开
+        </button>
+        <button type="button" role="menuitem" className={itemCls} onClick={() => run(onRename)}>
+          重命名
+        </button>
+        <button type="button" role="menuitem" className={itemCls} onClick={() => run(onDuplicate)}>
+          创建副本
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!canDelete}
+          title={deleteDisabledTitle}
+          className={`${itemCls} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent ${
+            canDelete ? 'text-red-600 hover:bg-red-50 focus:bg-red-50' : 'text-slate-400'
+          }`}
+          onClick={() => {
+            if (!canDelete) return
+            run(onRemove)
+          }}
+        >
+          删除壁纸
+        </button>
+      </div>,
+      document.body,
+    )
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="flex h-6 w-6 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-400"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="更多操作"
+        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={onTriggerClick}
+        onMouseEnter={() => {
+          clearCloseTimer()
+          onOpenChange?.(true)
+          setOpen(true)
+          queueMicrotask(() => measureAndSetCoords())
+        }}
+        onMouseLeave={scheduleClose}
+      >
+        <span className="flex items-center gap-0.5" aria-hidden>
+          <span className="h-1 w-1 rounded-full bg-current" />
+          <span className="h-1 w-1 rounded-full bg-current" />
+          <span className="h-1 w-1 rounded-full bg-current" />
+        </span>
+      </button>
+      {menu}
+    </>
+  )
 }
 
 function themeDraftDirty(baseline: PopupTheme, draft: PopupTheme): boolean {
@@ -69,19 +303,21 @@ export function ThemeStudioEditWorkspace({
   onSelectElements,
   onPickImageFile,
   onPickImageFolder,
+  editHistoryResetSignal = 0,
 }: ThemeStudioEditWorkspaceProps) {
   const [selectedDecorationLayerId, setSelectedDecorationLayerId] = useState<string | null>(null)
   const [selectedStructuralLayerId, setSelectedStructuralLayerId] = useState<string | null>(null)
   useEffect(() => {
     setSelectedDecorationLayerId(null)
     setSelectedStructuralLayerId(null)
-  }, [theme.id])
+  }, [theme.id, editHistoryResetSignal])
 
   const { wrappedOnUpdateTheme, undo, redo, canUndo, canRedo, historyRev } = usePopupThemeEditHistory(
     theme,
     onUpdateTheme,
     replaceThemeFull,
     20,
+    editHistoryResetSignal,
   )
   const mergedWrappedOnUpdateTheme = useCallback(
     (id: string, patch: Partial<PopupTheme>, meta?: PopupThemeEditUpdateMeta) => {
@@ -201,18 +437,23 @@ function ThemeStudioThumbnail({
   popupPreviewAspect,
 }: ThemeStudioThumbnailProps) {
   const slotRef = useRef<HTMLDivElement>(null)
-  const [slotW, setSlotW] = useState(0)
+  const [slotRect, setSlotRect] = useState({ w: 0, h: 0 })
 
   const vw = Math.max(1, Math.round(previewViewportWidth))
-  const ar = popupPreviewAspect === '16:9' ? 16 / 9 : 4 / 3
-  const vh = Math.max(1, Math.round(vw / ar))
+  const vh = Math.max(
+    1,
+    Math.round(vw / (popupPreviewAspect === '16:9' ? 16 / 9 : 4 / 3)),
+  )
 
   useLayoutEffect(() => {
     const el = slotRef.current
     if (!el) return
     const read = () => {
-      const w = Math.round(el.getBoundingClientRect().width)
-      if (w > 0) setSlotW((p) => (p === w ? p : w))
+      const r = el.getBoundingClientRect()
+      const w = r.width
+      const h = r.height
+      if (w <= 0 || h <= 0) return
+      setSlotRect((p) => (p.w === w && p.h === h ? p : { w, h }))
     }
     read()
     const ro = new ResizeObserver(() => read())
@@ -220,23 +461,32 @@ function ThemeStudioThumbnail({
     return () => ro.disconnect()
   }, [])
 
-  const scale = slotW > 0 ? slotW / vw : 1
+  /**
+   * 槽位用实测宽高做 cover 缩放，并略放大（1.02）盖住亚像素缝；顶对齐避免裁掉预览顶部文案区。
+   */
+  const coverScale =
+    slotRect.w > 0 && vh > 0
+      ? Math.max(slotRect.w / vw, slotRect.h / vh) * 1.02
+      : 1
+
+  const slotBg = theme.backgroundColor?.trim() || '#000000'
 
   return (
     <div
       ref={slotRef}
-      className="relative w-full overflow-hidden bg-black"
+      className="relative w-full overflow-hidden"
       style={{
         aspectRatio: popupPreviewAspect === '16:9' ? '16 / 9' : '4 / 3',
+        backgroundColor: slotBg,
       }}
     >
-      {slotW > 0 && (
+      {slotRect.w > 0 && (
         <div
-          className="absolute left-1/2 top-0"
+          className="absolute left-1/2 top-0 [backface-visibility:hidden]"
           style={{
             width: vw,
             height: vh,
-            transform: `translateX(-50%) scale(${scale})`,
+            transform: `translate3d(-50%, 0, 0) scale(${coverScale})`,
             transformOrigin: 'top center',
             willChange: 'transform',
           }}
@@ -259,25 +509,71 @@ function ThemeStudioThumbnail({
   )
 }
 
-function ThemeStudioSortGrip() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" className="text-slate-400" aria-hidden>
-      <circle cx="9" cy="6" r="1.5" />
-      <circle cx="15" cy="6" r="1.5" />
-      <circle cx="9" cy="12" r="1.5" />
-      <circle cx="15" cy="12" r="1.5" />
-      <circle cx="9" cy="18" r="1.5" />
-      <circle cx="15" cy="18" r="1.5" />
-    </svg>
-  )
-}
-
 type SortableThemeStudioCardProps = {
   theme: PopupTheme
   previewImageUrlMap: Record<string, string>
   previewViewportWidth: number
   popupPreviewAspect: '16:9' | '4:3'
   onOpenEdit: (themeId: string) => void
+  onCommitThemeName: (themeId: string, name: string) => void
+  onDuplicateTheme: (themeId: string) => void
+  onRemoveTheme: (themeId: string) => void
+  deskLive: { active: boolean; themeId: string | null }
+  deskBusyId: string | null
+  onToggleDesktopWallpaper: (theme: PopupTheme) => void | Promise<void>
+}
+
+/**
+ * 拖拽浮层内容：须铺满 DragOverlay 外层（dnd-kit 已按源卡片量好 width/height）。
+ * 之前写死 w-72，网格列更宽时浮层比列表里的卡片窄，会像「变小」。
+ */
+function ThemeStudioDragOverlayCard({
+  theme: t,
+  previewImageUrlMap,
+  previewViewportWidth,
+  popupPreviewAspect,
+}: {
+  theme: PopupTheme
+  previewImageUrlMap: Record<string, string>
+  previewViewportWidth: number
+  popupPreviewAspect: '16:9' | '4:3'
+}) {
+  const [zoomed, setZoomed] = useState(false)
+  useLayoutEffect(() => {
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setZoomed(true))
+    })
+    return () => cancelAnimationFrame(id)
+  }, [])
+
+  const { footerTone, subTone } = themeStudioListCardFooterClasses(t.target)
+  const subLabel =
+    t.target === 'main' ? '结束壁纸' : t.target === 'desktop' ? '桌面壁纸' : '休息壁纸'
+
+  return (
+    <div className="pointer-events-none box-border flex h-full min-h-0 w-full overflow-visible">
+      <div
+        className={`box-border flex h-full min-h-0 w-full max-w-full origin-center flex-col overflow-visible rounded-xl border-0 bg-white text-left will-change-transform transition-[transform,box-shadow] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          zoomed
+            ? 'scale-[1.08] shadow-[0_20px_50px_-14px_rgba(15,23,42,0.16)]'
+            : 'scale-100 shadow-none'
+        }`}
+      >
+        <div className="min-h-0 w-full shrink-0 overflow-hidden rounded-t-xl">
+          <ThemeStudioThumbnail
+            theme={t}
+            previewImageUrlMap={previewImageUrlMap}
+            previewViewportWidth={previewViewportWidth}
+            popupPreviewAspect={popupPreviewAspect}
+          />
+        </div>
+        <div className={`flex min-h-0 flex-1 flex-col rounded-b-xl border-t p-2.5 ${footerTone}`}>
+          <p className="truncate text-sm font-bold text-slate-900">{t.name || t.id}</p>
+          <p className={`mt-0.5 text-[11px] font-medium ${subTone}`}>{subLabel}</p>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function SortableThemeStudioCard({
@@ -286,21 +582,54 @@ function SortableThemeStudioCard({
   previewViewportWidth,
   popupPreviewAspect,
   onOpenEdit,
+  onCommitThemeName,
+  onDuplicateTheme,
+  onRemoveTheme,
+  deskLive,
+  deskBusyId,
+  onToggleDesktopWallpaper,
 }: SortableThemeStudioCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: t.id,
+    /** 主题网格：较长时长 + 长尾缓出，落版更柔 */
     animateLayoutChanges: () => false,
+    transition: {
+      duration: 680,
+      easing: 'cubic-bezier(0.22, 1, 0.32, 1)',
+    },
   })
+  const settleEase = 'cubic-bezier(0.22, 1, 0.36, 1)'
+  const baseT = typeof transition === 'string' ? transition : undefined
   const dragStyle: CSSProperties = {
     transform: sortableTranslateOnly(transform),
-    transition,
+    transition: isDragging
+      ? [baseT, 'opacity 0.12s ease-out'].filter(Boolean).join(', ')
+      : [baseT, `opacity 0.6s ${settleEase}`].filter(Boolean).join(', '),
+    opacity: isDragging ? 0 : 1,
     zIndex: isDragging ? 50 : undefined,
   }
-  const isMain = t.target === 'main'
-  const footerTone = isMain
-    ? 'border-emerald-100 bg-emerald-50/90'
-    : 'border-sky-100 bg-sky-50/90'
-  const subTone = isMain ? 'text-emerald-800' : 'text-sky-800'
+  const { footerTone, footerHoverTone, subTone } = themeStudioListCardFooterClasses(t.target)
+  const subLabel =
+    t.target === 'main' ? '结束壁纸' : t.target === 'desktop' ? '桌面壁纸' : '休息壁纸'
+
+  const electronDesk = Boolean(window.electronAPI?.getDesktopLiveWallpaperState)
+  const isDesktopLiveThis = t.target === 'desktop' && deskLive.active && deskLive.themeId === t.id
+  const builtinTheme = isStudioListBuiltinThemeId(t.id)
+
+  /** 热区：缩略图 + 标题行（不含副标题行），便于从图移到右侧 ···；离开该热区即隐藏（菜单打开时保持） */
+  const [studioThumbHeaderHot, setStudioThumbHeaderHot] = useState(false)
+  const [studioMenuOpen, setStudioMenuOpen] = useState(false)
+  const studioMenuOpenRef = useRef(false)
+  const syncStudioMenuOpen = useCallback((v: boolean) => {
+    studioMenuOpenRef.current = v
+    setStudioMenuOpen(v)
+  }, [])
+  const [titleRenaming, setTitleRenaming] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+  const skipRenameBlurRef = useRef(false)
+
+  const titleMenuChromeVisible = studioThumbHeaderHot || studioMenuOpen || titleRenaming
 
   const open = () => onOpenEdit(t.id)
   const onThumbKey = (e: KeyboardEvent) => {
@@ -310,48 +639,177 @@ function SortableThemeStudioCard({
     }
   }
 
+  useEffect(() => {
+    setTitleRenaming(false)
+  }, [t.id])
+
+  useLayoutEffect(() => {
+    if (!titleRenaming) return
+    const el = renameInputRef.current
+    if (!el) return
+    el.focus()
+    el.select()
+  }, [titleRenaming])
+
+  const startTitleRename = useCallback(() => {
+    setRenameDraft(t.name ?? '')
+    setTitleRenaming(true)
+  }, [t.name])
+
+  const endTitleRenameBlur = useCallback(() => {
+    if (skipRenameBlurRef.current) {
+      skipRenameBlurRef.current = false
+      return
+    }
+    const s = renameDraft.trim()
+    if (!s) {
+      setTitleRenaming(false)
+      return
+    }
+    const prev = (t.name ?? '').trim()
+    if (s !== prev) onCommitThemeName(t.id, s)
+    setTitleRenaming(false)
+  }, [renameDraft, t.id, t.name, onCommitThemeName])
+
+  const onRenameDraftKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      skipRenameBlurRef.current = true
+      const s = renameDraft.trim()
+      if (s) {
+        const prev = (t.name ?? '').trim()
+        if (s !== prev) onCommitThemeName(t.id, s)
+      }
+      setTitleRenaming(false)
+      requestAnimationFrame(() => {
+        skipRenameBlurRef.current = false
+      })
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      skipRenameBlurRef.current = true
+      setTitleRenaming(false)
+      requestAnimationFrame(() => {
+        skipRenameBlurRef.current = false
+      })
+    }
+  }
+
   return (
-    <div
-      ref={setNodeRef}
-      style={dragStyle}
-      className={`group flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-sm transition-shadow hover:border-slate-300 hover:shadow-md ${
-        isDragging ? 'opacity-95 shadow-lg ring-2 ring-slate-300' : ''
-      }`}
-    >
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={open}
-        onKeyDown={onThumbKey}
-        className="min-h-0 shrink-0 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400"
-      >
-        <ThemeStudioThumbnail
-          theme={t}
-          previewImageUrlMap={previewImageUrlMap}
-          previewViewportWidth={previewViewportWidth}
-          popupPreviewAspect={popupPreviewAspect}
-        />
-      </div>
-      <div className={`flex items-start gap-1 border-t p-2.5 ${footerTone}`}>
-        <button
-          type="button"
-          className="mt-0.5 shrink-0 touch-none rounded p-0.5 text-slate-500 hover:bg-black/5 active:cursor-grabbing cursor-grab"
-          aria-label="拖动排序"
-          {...listeners}
-          {...attributes}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <ThemeStudioSortGrip />
-        </button>
+    <div ref={setNodeRef} style={dragStyle} className="w-full min-h-0 self-start">
+      <div className="group flex w-full flex-col overflow-visible rounded-xl border-0 bg-white text-left shadow-none transition-shadow duration-200 ease-out hover:shadow-[0_10px_36px_-12px_rgba(15,23,42,0.11)] [backface-visibility:hidden]">
         <div
-          role="button"
-          tabIndex={0}
-          className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-slate-400 rounded-sm"
-          onClick={open}
-          onKeyDown={onThumbKey}
+          className="flex min-h-0 w-full flex-col overflow-visible"
+          onMouseEnter={() => setStudioThumbHeaderHot(true)}
+          onMouseLeave={() => {
+            requestAnimationFrame(() => {
+              if (!studioMenuOpenRef.current) setStudioThumbHeaderHot(false)
+            })
+          }}
         >
-          <p className="truncate text-sm font-bold text-slate-900">{t.name || t.id}</p>
-          <p className={`text-[11px] font-medium ${subTone}`}>{isMain ? '结束壁纸' : '休息壁纸'}</p>
+          <div className="relative w-full shrink-0 overflow-hidden rounded-t-xl">
+            <div
+              {...listeners}
+              {...attributes}
+              role="button"
+              tabIndex={0}
+              aria-label="拖动排序，点击进入编辑"
+              onClick={open}
+              onKeyDown={onThumbKey}
+              className="w-full cursor-grab touch-none outline-none active:cursor-grabbing focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400"
+            >
+              <ThemeStudioThumbnail
+                theme={t}
+                previewImageUrlMap={previewImageUrlMap}
+                previewViewportWidth={previewViewportWidth}
+                popupPreviewAspect={popupPreviewAspect}
+              />
+            </div>
+          </div>
+          <div
+            className={`shrink-0 border-t px-2.5 pb-0 pt-2.5 transition-colors duration-200 ${footerTone} ${footerHoverTone}`}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-0.5">
+                {titleRenaming ? (
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    aria-label="壁纸名称"
+                    className="min-w-0 flex-1 truncate rounded-sm border-0 bg-white/90 py-0.5 pl-0.5 pr-1 text-sm font-bold text-slate-900 shadow-none outline-none ring-1 ring-slate-300/90 focus:ring-slate-400"
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onKeyDown={onRenameDraftKeyDown}
+                    onBlur={endTitleRenameBlur}
+                  />
+                ) : (
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    className="min-w-0 flex-1 cursor-pointer truncate rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                    onClick={open}
+                    onKeyDown={onThumbKey}
+                  >
+                    <p className="truncate text-sm font-bold text-slate-900">{t.name || t.id}</p>
+                  </div>
+                )}
+                <div
+                  className={`shrink-0 transition-opacity duration-150 ${
+                    titleMenuChromeVisible
+                      ? 'pointer-events-auto opacity-100'
+                      : 'pointer-events-none opacity-0'
+                  }`}
+                >
+                  <StudioListOverflowMenu
+                    onOpen={open}
+                    onRename={startTitleRename}
+                    onDuplicate={() => onDuplicateTheme(t.id)}
+                    onRemove={() => onRemoveTheme(t.id)}
+                    canDelete={!builtinTheme}
+                    deleteDisabledTitle={builtinTheme ? '内置壁纸不可删除' : undefined}
+                    onOpenChange={syncStudioMenuOpen}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div
+          className={`shrink-0 rounded-b-xl px-2.5 pb-2.5 pt-0 transition-colors duration-200 ${footerTone} ${footerHoverTone}`}
+        >
+          <div className="min-w-0 flex-1">
+            <div className="mt-0.5 flex min-w-0 items-center justify-between gap-2">
+              <div
+                role="button"
+                tabIndex={0}
+                className="min-w-0 flex-1 cursor-pointer rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                onClick={open}
+                onKeyDown={onThumbKey}
+              >
+                <p className={`truncate text-left text-[11px] font-medium ${subTone}`}>{subLabel}</p>
+              </div>
+              {t.target === 'desktop' && electronDesk && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void onToggleDesktopWallpaper(t)
+                  }}
+                  disabled={deskBusyId === t.id}
+                  className={`shrink-0 whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] font-semibold transition-colors disabled:cursor-wait disabled:opacity-50 ${
+                    isDesktopLiveThis
+                      ? 'border-red-200 bg-red-50 text-red-800 hover:bg-red-100'
+                      : 'border-violet-200 bg-white text-violet-800 hover:bg-violet-50'
+                  }`}
+                >
+                  {isDesktopLiveThis ? '关闭桌面壁纸' : '设为桌面壁纸'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -364,8 +822,9 @@ export type ThemeStudioListViewProps = {
   previewViewportWidth: number
   popupPreviewAspect: '16:9' | '4:3'
   onOpenEdit: (themeId: string) => void
-  /** 打开浮动编辑弹窗；在弹窗内选择结束/休息壁纸类型 */
-  onAddTheme: () => void
+  onCommitThemeName: (themeId: string, name: string) => void
+  onDuplicateTheme: (themeId: string) => void
+  onRemoveTheme: (themeId: string) => void
   /** 拖拽调整 `popupThemes` 顺序（与筛选无关：按 id 在全量列表中移动） */
   onReorderThemes: (next: PopupTheme[]) => void
 }
@@ -376,19 +835,87 @@ export function ThemeStudioListView({
   previewViewportWidth,
   popupPreviewAspect,
   onOpenEdit,
-  onAddTheme,
+  onCommitThemeName,
+  onDuplicateTheme,
+  onRemoveTheme,
   onReorderThemes,
 }: ThemeStudioListViewProps) {
-  const [filter, setFilter] = useState<'all' | 'main' | 'rest'>('all')
+  const [filter, setFilter] = useState<'all' | 'main' | 'rest' | 'desktop'>('all')
+  const [deskLive, setDeskLive] = useState<{ active: boolean; themeId: string | null }>({
+    active: false,
+    themeId: null,
+  })
+  const [deskBusyId, setDeskBusyId] = useState<string | null>(null)
+
+  const refreshDeskLive = useCallback(async () => {
+    const api = window.electronAPI?.getDesktopLiveWallpaperState
+    if (!api) {
+      setDeskLive({ active: false, themeId: null })
+      return
+    }
+    setDeskLive(await api())
+  }, [])
+
+  useEffect(() => {
+    void refreshDeskLive()
+    const id = window.setInterval(() => void refreshDeskLive(), 2000)
+    return () => clearInterval(id)
+  }, [refreshDeskLive])
+
+  const toggleDesktopWallpaperFromList = useCallback(
+    async (t: PopupTheme) => {
+      const api = window.electronAPI
+      if (
+        !api?.getDesktopLiveWallpaperState ||
+        !api?.startDesktopLiveWallpaper ||
+        !api?.stopDesktopLiveWallpaper ||
+        !api?.waitDesktopLiveWallpaperApplyDone
+      ) {
+        window.alert('请在 Electron 应用内使用此功能。')
+        return
+      }
+      setDeskBusyId(t.id)
+      try {
+        const st = await api.getDesktopLiveWallpaperState()
+        if (st.active && st.themeId === t.id) {
+          await api.stopDesktopLiveWallpaper()
+        } else {
+          const r = await api.startDesktopLiveWallpaper(structuredClone(t) as PopupTheme)
+          if ('pending' in r && r.pending) {
+            const done = await api.waitDesktopLiveWallpaperApplyDone(r.requestId)
+            if (!done.success) window.alert(done.error || '设置失败')
+          } else if (!r.success) {
+            window.alert(r.error || '设置失败')
+          }
+        }
+        await refreshDeskLive()
+      } finally {
+        setDeskBusyId(null)
+      }
+    },
+    [refreshDeskLive],
+  )
+
   const filtered = useMemo(() => {
     if (filter === 'all') return themes
     return themes.filter((t) => t.target === filter)
   }, [themes, filter])
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
+  const [activeDragTheme, setActiveDragTheme] = useState<PopupTheme | null>(null)
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
+
+  const onDragStart = (event: DragStartEvent) => {
+    const id = String(event.active.id)
+    const t = themes.find((x) => x.id === id)
+    setActiveDragTheme(t ?? null)
+  }
+
+  const clearDragOverlay = () => setActiveDragTheme(null)
 
   const onDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
+    clearDragOverlay()
     if (!over || active.id === over.id) return
     const activeId = String(active.id)
     const overId = String(over.id)
@@ -396,6 +923,10 @@ export function ThemeStudioListView({
     const newFull = themes.findIndex((t) => t.id === overId)
     if (oldFull < 0 || newFull < 0) return
     onReorderThemes(arrayMove(themes, oldFull, newFull))
+  }
+
+  const onDragCancel = (_event: DragCancelEvent) => {
+    clearDragOverlay()
   }
 
   const chip = (id: typeof filter, label: string) => {
@@ -408,6 +939,9 @@ export function ThemeStudioListView({
     } else if (id === 'main') {
       activeCls = 'bg-emerald-600 text-white shadow-sm'
       inactiveCls = 'bg-white text-emerald-900 ring-1 ring-emerald-200 hover:bg-emerald-50/80'
+    } else if (id === 'desktop') {
+      activeCls = 'bg-violet-500 text-white shadow-sm'
+      inactiveCls = 'bg-white text-violet-900 ring-1 ring-violet-200 hover:bg-violet-50/80'
     }
     return (
       <button
@@ -423,22 +957,21 @@ export function ThemeStudioListView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {chip('all', '全部')}
-          {chip('rest', '休息壁纸')}
-          {chip('main', '结束壁纸')}
-        </div>
-        <button
-          type="button"
-          onClick={() => onAddTheme()}
-          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-        >
-          + 创建壁纸
-        </button>
+      <div className="flex flex-wrap items-center gap-2">
+        {chip('all', '全部')}
+        {chip('rest', '休息壁纸')}
+        {chip('main', '结束壁纸')}
+        {chip('desktop', '桌面壁纸')}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-3">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToWindowEdges]}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onDragCancel={onDragCancel}
+        >
           <SortableContext items={filtered.map((t) => t.id)} strategy={rectSortingStrategy}>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {filtered.map((t) => (
@@ -449,10 +982,27 @@ export function ThemeStudioListView({
                   previewViewportWidth={previewViewportWidth}
                   popupPreviewAspect={popupPreviewAspect}
                   onOpenEdit={onOpenEdit}
+                  onCommitThemeName={onCommitThemeName}
+                  onDuplicateTheme={onDuplicateTheme}
+                  onRemoveTheme={onRemoveTheme}
+                  deskLive={deskLive}
+                  deskBusyId={deskBusyId}
+                  onToggleDesktopWallpaper={toggleDesktopWallpaperFromList}
                 />
               ))}
             </div>
           </SortableContext>
+          {/* 不做「飞回槽位」的 dropAnimation；松手即消失，落版仅靠 Sortable 的 transition（同子项） */}
+          <DragOverlay className="overflow-visible" style={{ overflow: 'visible' }} dropAnimation={null}>
+            {activeDragTheme ? (
+              <ThemeStudioDragOverlayCard
+                theme={activeDragTheme}
+                previewImageUrlMap={previewImageUrlMap}
+                previewViewportWidth={previewViewportWidth}
+                popupPreviewAspect={popupPreviewAspect}
+              />
+            ) : null}
+          </DragOverlay>
         </DndContext>
         {filtered.length === 0 && (
           <p className="py-12 text-center text-sm text-slate-500">当前筛选下没有主题。</p>
@@ -501,7 +1051,7 @@ export function ThemeStudioEditView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
+      <div className="relative z-20 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <button
             type="button"
@@ -585,7 +1135,7 @@ export type ThemeStudioFloatingEditorProps = {
   onDeleteTheme?: () => void
   canDeleteTheme?: boolean
   deleteDisabledTitle?: string
-  /** 列表「+ 创建壁纸」进入的草稿：仅保留保存/取消，不显示「另存为」（尚无库内母题可 fork） */
+  /** 主题工坊「创建 * 壁纸」进入的草稿：仅保留保存/取消，不显示「另存为」（尚无库内母题可 fork） */
   isNewDraft?: boolean
 }
 
@@ -616,7 +1166,28 @@ export function ThemeStudioFloatingEditor({
   const themesRef = useRef(themes)
   themesRef.current = themes
   const [draft, setDraft] = useState<PopupTheme | null>(null)
+  const [editHistoryResetSignal, setEditHistoryResetSignal] = useState(0)
   const [draftImageUrlMap, setDraftImageUrlMap] = useState<Record<string, string>>({})
+  const [applyingWallpaper, setApplyingWallpaper] = useState(false)
+  const [deskLive, setDeskLive] = useState<{ active: boolean; themeId: string | null }>({
+    active: false,
+    themeId: null,
+  })
+
+  const refreshDeskLiveFloating = useCallback(async () => {
+    const api = window.electronAPI?.getDesktopLiveWallpaperState
+    if (!api) {
+      setDeskLive({ active: false, themeId: null })
+      return
+    }
+    setDeskLive(await api())
+  }, [])
+
+  useEffect(() => {
+    void refreshDeskLiveFloating()
+    const id = window.setInterval(() => void refreshDeskLiveFloating(), 2000)
+    return () => clearInterval(id)
+  }, [refreshDeskLiveFloating])
 
   useEffect(() => {
     if (!draft) {
@@ -660,6 +1231,26 @@ export function ThemeStudioFloatingEditor({
     onClose()
   }, [draft, onClose])
 
+  const handleRestoreDefault = useCallback(() => {
+    if (!draft) return
+    const tgt = draft.target
+    const label = tgt === 'main' ? '结束' : tgt === 'desktop' ? '桌面' : '休息'
+    if (
+      !window.confirm(
+        `确定将当前壁纸恢复为「${label}」类型的内置默认样式吗？\n\n所有自定义图层、装饰及参数将被清空，仅保留当前主题名称与 ID。需点击「保存」后才会写入主题库。`,
+      )
+    )
+      return
+    const next = cloneDefaultPopupThemePreservingIdentity({
+      id: draft.id,
+      name: draft.name ?? '',
+      target: tgt,
+    })
+    setDraft(next)
+    setEditHistoryResetSignal((n) => n + 1)
+    setSelectedElements(themeId, tgt === 'desktop' ? ['time'] : ['content'])
+  }, [draft, themeId, setSelectedElements])
+
   useLayoutEffect(() => {
     const t = themesRef.current.find((x) => x.id === themeId)
     if (!t) {
@@ -700,6 +1291,39 @@ export function ThemeStudioFloatingEditor({
     return () => window.removeEventListener('keydown', onKey)
   }, [tryCloseStable])
 
+  const handleToggleDesktopWallpaperFloating = useCallback(async () => {
+    const d = draft
+    if (!d || d.target !== 'desktop') return
+    const api = window.electronAPI
+    if (
+      !api?.getDesktopLiveWallpaperState ||
+      !api?.startDesktopLiveWallpaper ||
+      !api?.stopDesktopLiveWallpaper ||
+      !api?.waitDesktopLiveWallpaperApplyDone
+    ) {
+      window.alert('请在 Electron 应用内使用此功能。')
+      return
+    }
+    setApplyingWallpaper(true)
+    try {
+      const st = await api.getDesktopLiveWallpaperState()
+      if (st.active && st.themeId === d.id) {
+        await api.stopDesktopLiveWallpaper()
+      } else {
+        const r = await api.startDesktopLiveWallpaper(structuredClone(d) as PopupTheme)
+        if ('pending' in r && r.pending) {
+          const done = await api.waitDesktopLiveWallpaperApplyDone(r.requestId)
+          if (!done.success) window.alert(done.error || '设置失败')
+        } else if (!r.success) {
+          window.alert(r.error || '设置失败')
+        }
+      }
+      await refreshDeskLiveFloating()
+    } finally {
+      setApplyingWallpaper(false)
+    }
+  }, [draft, refreshDeskLiveFloating])
+
   const tResolved = themes.find((x) => x.id === themeId)
   if (!tResolved) {
     return (
@@ -734,12 +1358,18 @@ export function ThemeStudioFloatingEditor({
   }
 
   const baseline = baselineRef.current
-  const targetLocked = source.kind === 'subitem'
-  /** 子项入口：展示与入口卡片一致；工坊入口：随草稿 target 切换 */
-  const selectedTarget: PopupThemeTarget =
+  const floatingIsDesktopLive =
+    draft.target === 'desktop' && deskLive.active && deskLive.themeId === draft.id
+  /** 工坊列表/子项均不在编辑内切换用途：表头仅展示当前类型（子项用入口类型，列表用主题自身 target） */
+  const headerTarget: PopupThemeTarget =
     source.kind === 'subitem' ? source.popupTarget : draft.target
-  /** 与旧版顶栏逻辑一致；避免 HMR/合并残留对 `bannerMain` 的引用时报未定义 */
-  const bannerMain = selectedTarget === 'main'
+  const editorAriaLabel =
+    headerTarget === 'main'
+      ? '编辑结束壁纸主题'
+      : headerTarget === 'desktop'
+        ? '编辑桌面壁纸主题'
+        : '编辑休息壁纸主题'
+
   const updateDraft = (_id: string, patch: Partial<PopupTheme>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d))
   }
@@ -784,65 +1414,41 @@ export function ThemeStudioFloatingEditor({
 
   const isStudioList = source.kind === 'studio-list'
 
-  const setWallpaperTarget = (target: PopupThemeTarget) => {
-    if (targetLocked) return
-    updateDraft(draft.id, { target })
-  }
+  const headerBannerClass =
+    headerTarget === 'main'
+      ? 'bg-green-500 text-white'
+      : headerTarget === 'desktop'
+        ? 'bg-violet-500 text-white'
+        : 'bg-blue-500 text-white'
+  const headerBannerLabel =
+    headerTarget === 'main' ? '结束壁纸' : headerTarget === 'desktop' ? '桌面壁纸' : '休息壁纸'
 
   return (
     <div
       className="fixed inset-0 z-[250000] flex items-center justify-center bg-black/70 p-2 sm:p-4 backdrop-blur-md"
       role="dialog"
       aria-modal="true"
-      aria-label={bannerMain ? '编辑结束壁纸主题' : '编辑休息壁纸主题'}
+      aria-label={editorAriaLabel}
       onMouseDown={(e) => e.target === e.currentTarget && tryCloseStable()}
     >
       <div
-        className="flex h-[min(92dvh,1100px)] w-[min(96vw,1960px)] flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-[0_25px_80px_-12px_rgba(0,0,0,0.45)] sm:rounded-2xl"
+        className="relative flex h-[min(92dvh,1100px)] w-[min(96vw,1960px)] flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-[0_25px_80px_-12px_rgba(0,0,0,0.45)] sm:rounded-2xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="shrink-0 border-b border-slate-200 bg-white">
-          <div className="flex" role="tablist" aria-label="壁纸用途">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={selectedTarget === 'rest'}
-              disabled={source.kind === 'subitem' && source.popupTarget !== 'rest'}
-              onClick={() => setWallpaperTarget('rest')}
-              className={`min-h-[44px] flex-1 px-3 py-2.5 text-sm font-semibold transition-colors ${
-                selectedTarget === 'rest'
-                  ? 'bg-blue-500 text-white'
-                  : source.kind === 'subitem'
-                    ? 'cursor-not-allowed bg-slate-100 text-slate-400'
-                    : 'bg-blue-50 text-blue-900 hover:bg-blue-100'
-              }`}
-            >
-              休息壁纸
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={selectedTarget === 'main'}
-              disabled={source.kind === 'subitem' && source.popupTarget !== 'main'}
-              onClick={() => setWallpaperTarget('main')}
-              className={`min-h-[44px] flex-1 border-l border-slate-200 px-3 py-2.5 text-sm font-semibold transition-colors ${
-                selectedTarget === 'main'
-                  ? 'bg-green-500 text-white'
-                  : source.kind === 'subitem'
-                    ? 'cursor-not-allowed bg-slate-100 text-slate-400'
-                    : 'bg-green-50 text-green-800 hover:bg-green-100'
-              }`}
-            >
-              结束壁纸
-            </button>
-          </div>
+        <div
+          className={`relative z-[60] isolate flex min-h-[44px] shrink-0 items-center justify-center border-b border-slate-200 px-3 py-2.5 text-sm font-semibold ${headerBannerClass}`}
+          role="status"
+          aria-label={editorAriaLabel}
+        >
+          {headerBannerLabel}
         </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="relative z-[60] isolate flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-slate-600">主题名称</span>
             <input
               type="text"
               value={draft.name}
+              autoFocus={isNewDraft}
               onChange={(e) => updateDraft(draft.id, { name: e.target.value })}
               className="min-w-[8rem] max-w-[14rem] flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
               placeholder="主题名称"
@@ -872,11 +1478,37 @@ export function ThemeStudioFloatingEditor({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={handleRestoreDefault}
+              className="shrink-0 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+            >
+              恢复默认
+            </button>
+            <button
+              type="button"
               onClick={tryCloseStable}
               className="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
             >
               取消
             </button>
+            {draft.target === 'desktop' && (
+              <button
+                type="button"
+                onClick={() => void handleToggleDesktopWallpaperFloating()}
+                disabled={applyingWallpaper}
+                title={
+                  floatingIsDesktopLive
+                    ? '关闭动态桌面壁纸窗口并恢复桌面'
+                    : '将当前编辑效果设为主显示器动态桌面壁纸（Windows）'
+                }
+                className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium disabled:cursor-wait disabled:opacity-60 ${
+                  floatingIsDesktopLive
+                    ? 'border-red-200 bg-red-50 text-red-800 hover:bg-red-100'
+                    : 'border-violet-300 bg-violet-50 text-violet-900 hover:bg-violet-100'
+                }`}
+              >
+                {applyingWallpaper ? '处理中…' : floatingIsDesktopLive ? '关闭桌面壁纸' : '设为桌面壁纸'}
+              </button>
+            )}
             <button
               type="button"
               onClick={handleSave}
@@ -906,7 +1538,7 @@ export function ThemeStudioFloatingEditor({
             )}
           </div>
         </div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3 pt-2">
+        <div className="relative z-0 flex min-h-0 flex-1 flex-col overflow-hidden p-3 pt-2">
           <ThemeStudioEditWorkspace
             theme={draft}
             surfaceRef={surfaceRef}
@@ -915,6 +1547,7 @@ export function ThemeStudioFloatingEditor({
             popupPreviewAspect={popupPreviewAspect}
             onUpdateTheme={updateDraft}
             replaceThemeFull={replaceDraftFull}
+            editHistoryResetSignal={editHistoryResetSignal}
             selectedElements={getSelectedElements(draft.id)}
             onSelectElements={(els) => setSelectedElements(draft.id, els)}
             onPickImageFile={() => {

@@ -1,7 +1,7 @@
 {
   "name": "workbreak",
   "productName": "WorkBreak",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "type": "module",
   "description": "帮助打工人按时吃饭、起身活动和休息的桌面提醒应用",
   "main": "out/main/index.js",
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "font-list": "^2.0.2",

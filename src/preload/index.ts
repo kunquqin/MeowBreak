@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-import type { AppSettings } from '../shared/settings'
+import type { AppSettings, PopupTheme } from '../shared/settings'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
@@ -30,4 +30,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
       { success: true; fonts: string[] } | { success: false; fonts: string[]; error: string }
     >,
   clearSystemFontListCache: () => ipcRenderer.invoke('clearSystemFontListCache') as Promise<void>,
+  startDesktopLiveWallpaper: (theme: PopupTheme) =>
+    ipcRenderer.invoke('startDesktopLiveWallpaper', theme) as Promise<
+      | { success: true }
+      | { success: false; error: string }
+      | { pending: true; requestId: number }
+    >,
+  waitDesktopLiveWallpaperApplyDone: (requestId: number) =>
+    new Promise<{ success: true } | { success: false; error: string }>((resolve) => {
+      const onDone = (
+        _e: unknown,
+        result: { requestId: number; success: boolean; error?: string },
+      ) => {
+        if (result.requestId !== requestId) return
+        ipcRenderer.removeListener('desktop-live-wallpaper-apply-done', onDone)
+        window.clearTimeout(timeoutId)
+        if (result.success) resolve({ success: true })
+        else resolve({ success: false, error: result.error || '设置失败' })
+      }
+      const timeoutId = window.setTimeout(() => {
+        ipcRenderer.removeListener('desktop-live-wallpaper-apply-done', onDone)
+        resolve({ success: false, error: '等待超时或已中断' })
+      }, 300_000)
+      ipcRenderer.on('desktop-live-wallpaper-apply-done', onDone)
+    }),
+  stopDesktopLiveWallpaper: () => ipcRenderer.invoke('stopDesktopLiveWallpaper') as Promise<{ success: true }>,
+  isDesktopLiveWallpaperActive: () => ipcRenderer.invoke('isDesktopLiveWallpaperActive') as Promise<boolean>,
+  getDesktopLiveWallpaperState: () =>
+    ipcRenderer.invoke('getDesktopLiveWallpaperState') as Promise<{ active: boolean; themeId: string | null }>,
 })

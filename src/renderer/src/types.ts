@@ -21,10 +21,13 @@ export {
   getDefaultEntitlements,
   defaultTextTransform,
   genId,
+  MAIN_REST_LAYOUT_DEFAULTS,
   SYSTEM_MAIN_POPUP_THEME_ID,
   SYSTEM_REST_POPUP_THEME_ID,
+  SYSTEM_DESKTOP_POPUP_THEME_ID,
   BUILTIN_MAIN_POPUP_FALLBACK_BODY,
   BUILTIN_REST_POPUP_FALLBACK_BODY,
   mergeSystemBuiltinPopupThemes,
   getDefaultPopupThemeIdForTarget,
+  cloneDefaultPopupThemePreservingIdentity,
 } from '../../shared/settings'

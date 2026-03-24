@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { AppSettings, CountdownItem } from './types'
+import type { AppSettings, CountdownItem, PopupTheme } from './types'
 
 declare global {
   interface Window {
@@ -31,6 +31,20 @@ declare global {
         { success: true; fonts: string[] } | { success: false; fonts: string[]; error: string }
       >
       clearSystemFontListCache: () => Promise<void>
+      startDesktopLiveWallpaper: (
+        theme: PopupTheme,
+      ) => Promise<
+        | { success: true }
+        | { success: false; error: string }
+        | { pending: true; requestId: number }
+      >
+      /** 与 `start` 返回的 `requestId` 配对，过滤乱序/过期的完成事件 */
+      waitDesktopLiveWallpaperApplyDone: (
+        requestId: number,
+      ) => Promise<{ success: true } | { success: false; error: string }>
+      stopDesktopLiveWallpaper: () => Promise<{ success: true }>;
+      isDesktopLiveWallpaperActive: () => Promise<boolean>;
+      getDesktopLiveWallpaperState: () => Promise<{ active: boolean; themeId: string | null }>;
       onMenuUndo?: (cb: () => void) => () => void
       onMenuRedo?: (cb: () => void) => () => void
     }
