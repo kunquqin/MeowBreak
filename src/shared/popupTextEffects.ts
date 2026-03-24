@@ -21,6 +21,12 @@ export function getLayerTextEffects(
   return theme.countdownTextEffects
 }
 
+export function clampUnitOpacity(v: unknown, fallback = 1): number {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(0, Math.min(1, n))
+}
+
 /** #RGB / #RRGGBB → rgba() */
 export function hexToRgba(hex: string, alpha: number): string {
   let h = hex.replace('#', '').trim()
@@ -36,6 +42,14 @@ export function hexToRgba(hex: string, alpha: number): string {
 
 function isHexColor(s: string | undefined): s is string {
   return typeof s === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s.trim())
+}
+
+/** 文字填充色：hex 时按不透明度输出 rgba；否则原样返回颜色字符串（与浏览器一致） */
+export function textFillColorCss(color: string | undefined, opacity?: number): string {
+  const c = (color ?? '#ffffff').trim() || '#ffffff'
+  const op = opacity === undefined ? 1 : clampUnitOpacity(opacity)
+  if (!isHexColor(c)) return c
+  return hexToRgba(c, op)
 }
 
 function numOr(v: unknown, fallback: number): number {

@@ -1574,7 +1574,7 @@ export function ThemeStudioFloatingEditor({
                   imageSourceType: 'folder',
                   imageFolderPath: r.folderPath,
                   imageFolderFiles: r.files,
-                  imagePath: r.files[0],
+                  imagePath: undefined,
                   imageFolderPlayMode: 'sequence',
                   imageFolderIntervalSec: 30,
                 })

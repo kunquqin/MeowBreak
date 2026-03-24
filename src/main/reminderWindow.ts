@@ -17,7 +17,7 @@ import {
   type PopupThemeLayer,
   type TextThemeLayer,
 } from '../shared/popupThemeLayers'
-import { layerTextEffectsCss, layerTextEffectsCssFromEffects } from '../shared/popupTextEffects'
+import { layerTextEffectsCss, layerTextEffectsCssFromEffects, textFillColorCss } from '../shared/popupTextEffects'
 import { resolveDecoFontFamilyCss, resolvePopupFontFamilyCss } from '../shared/popupThemeFonts'
 import { formatPopupThemeDateString } from '../shared/popupThemeDateFormat'
 import {
@@ -597,8 +597,8 @@ export function buildReminderHtmlLegacy(options: ReminderPopupOptions, htmlDir?:
       : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize,
     14,
   )
-  const contentColor = theme?.contentColor || '#ffffff'
-  const timeColor = theme?.timeColor || '#ffffff'
+  const contentColor = textFillColorCss(theme?.contentColor, theme?.contentTextOpacity)
+  const timeColor = textFillColorCss(theme?.timeColor, theme?.timeTextOpacity)
   const overlayEnabled = Boolean(theme?.overlayEnabled)
   const bgStyle = getBackgroundStyle(theme)
   const contentFontFamilyCss = resolvePopupFontFamilyCss(theme, 'content')
@@ -712,7 +712,7 @@ function renderLayerFragment(
         const srcEsc = escapeHtml((tl.text ?? '').trim())
         /** 与 ThemePreviewEditor.renderTextLayerForKey(content) 一致：排版以主题根字段为准，保证时间样式等与预览一致。 */
         const fs = safeFontPx(theme.contentFontSize, 180, 16)
-        const col = theme.contentColor || '#ffffff'
+        const col = textFillColorCss(theme.contentColor, theme.contentTextOpacity)
         const ff = resolvePopupFontFamilyCss(theme, 'content')
         const pos = transformStyle(theme.contentTransform, 50, MAIN_REST_LAYOUT_DEFAULTS.contentTransform.y)
         const fw = theme.contentFontWeight ?? 600
@@ -728,7 +728,7 @@ function renderLayerFragment(
       }
       const srcEsc = escapeHtml(tl.text ?? '')
       const fs = Math.max(1, Math.min(8000, Math.floor(tl.fontSize ?? 28)))
-      const col = tl.color || '#ffffff'
+      const col = textFillColorCss(tl.color, tl.colorOpacity)
       const ff = resolveDecoFontFamilyCss(tl.fontFamilyPreset, tl.fontFamilySystem)
       const pos = transformStyle(tl.transform, 50, 50)
       const fw = tl.fontWeight ?? 500
@@ -750,7 +750,7 @@ function renderLayerFragment(
           : MAIN_REST_LAYOUT_DEFAULTS.timeFontSize,
         14,
       )
-      const timeColor = theme.timeColor || '#ffffff'
+      const timeColor = textFillColorCss(theme.timeColor, theme.timeTextOpacity)
       const timeFontFamilyCss = resolvePopupFontFamilyCss(theme, 'time')
       const timePos = transformStyle(
         theme.timeTransform,
@@ -778,7 +778,7 @@ function renderLayerFragment(
         theme.target === 'desktop' ? DESKTOP_DEFAULT_TIME_DATE_TRANSFORMS.dateFontSize! : 72,
         14,
       )
-      const dateColor = theme.dateColor || '#e2e8f0'
+      const dateColor = textFillColorCss(theme.dateColor || '#e2e8f0', theme.dateTextOpacity)
       const dateFontFamilyCss = resolvePopupFontFamilyCss(theme, 'date')
       const datePos = transformStyle(
         theme.dateTransform,

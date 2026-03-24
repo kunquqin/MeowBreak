@@ -37,6 +37,7 @@ import {
 } from '../../../shared/popupThemeLayers'
 import { popupThemeDatePresetPatch, type PopupThemeDatePresetId } from '../../../shared/popupThemeDateFormat'
 import { clampOverlayGradientRangePct } from '../../../shared/popupOverlayGradient'
+import { isVerticalWritingMode } from '../../../shared/popupVerticalText'
 
 /** 本机字体为 OS 级数据，与当前编辑的 theme.id 无关。勿在 theme.id 变化时清空：会与异步 IPC 回写竞态，出现「日志里 count>0 但下拉永远空」。 */
 let sharedSystemFontFamilies: string[] | null = null
@@ -95,6 +96,72 @@ function panelThemeTransformField(sel: TextElementKey): 'contentTransform' | 'ti
   if (sel === 'time') return 'timeTransform'
   if (sel === 'date') return 'dateTransform'
   return 'countdownTransform'
+}
+
+function PanelBlockTitle({ children }: { children: React.ReactNode }) {
+  return <h4 className="text-sm font-semibold text-slate-800">{children}</h4>
+}
+
+function PanelSectionTitle({ children }: { children: React.ReactNode }) {
+  return <h5 className="text-sm font-semibold text-slate-800">{children}</h5>
+}
+
+function PanelDivider() {
+  return <div className="my-10 border-t border-slate-100" role="presentation" />
+}
+
+/** 与字体选择行一致：色块左缘与 SystemFontFamilyPicker 左缘对齐 */
+const panelColorRowGridClass = 'grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2'
+/** 参数区左列小标题（与「排向」「对齐」等一致） */
+const panelSubLabelClass = 'text-xs text-slate-600 shrink-0 leading-tight'
+/** 不透明度行：与字号行同列宽 */
+const panelTextOpacityRowGridClass = 'grid grid-cols-[60px_minmax(0,1fr)_72px] items-center gap-2'
+/** 左侧参数名与滑杆行第一列同宽（排向、对齐等） */
+const panelLabeledRowGridClass = 'grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2'
+
+type SliderNumberRowProps = {
+  label: string
+  min: number
+  max: number
+  step: number
+  value: number
+  onCommit: (n: number) => void
+}
+
+function SliderNumberRow({ label, min, max, step, value, onCommit }: SliderNumberRowProps) {
+  const v = Number.isFinite(value) ? value : min
+  const clamped = Math.max(min, Math.min(max, v))
+  return (
+    <div className={`${panelTextOpacityRowGridClass} text-xs text-slate-600`}>
+      <span className="shrink-0 leading-tight">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={clamped}
+        onChange={(e) => {
+          const n = Number(e.target.value)
+          if (!Number.isFinite(n)) return
+          onCommit(Math.max(min, Math.min(max, n)))
+        }}
+        className="w-full accent-indigo-600"
+      />
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={clamped}
+        onChange={(e) => {
+          const n = Number(e.target.value)
+          if (!Number.isFinite(n)) return
+          onCommit(Math.max(min, Math.min(max, n)))
+        }}
+        className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+      />
+    </div>
+  )
 }
 
 type HorizontalAlign = 'left' | 'center' | 'right' | 'start' | 'end' | 'justify'
@@ -486,7 +553,7 @@ function PopupThemeEditorPanelCore({
   }, [needsSystemFontList, systemFonts, fontsLoading, loadSystemFonts])
 
   const fontLayers: { layer: PopupTextFontLayer; title: string }[] = [
-    { layer: 'content', title: '文本' },
+    { layer: 'content', title: '字体' },
     { layer: 'time', title: '时间字体' },
     { layer: 'date', title: '日期字体' },
   ]
@@ -712,7 +779,7 @@ function PopupThemeEditorPanelCore({
           const decoWm = td.writingMode ?? 'horizontal-tb'
           return (
             <div className="space-y-2">
-            <h4 className="text-xs font-semibold text-slate-700">文字</h4>
+            <PanelBlockTitle>文字</PanelBlockTitle>
             <label className="block space-y-1 text-xs text-slate-600">
               <textarea
                 ref={(el) => {
@@ -726,7 +793,7 @@ function PopupThemeEditorPanelCore({
               />
             </label>
             <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2">
-              <p className="text-xs text-slate-600">文本</p>
+              <p className="text-xs text-slate-600">字体</p>
               <SystemFontFamilyPicker
                 mode={decoMode}
                 onModeChange={(next) => {
@@ -773,143 +840,372 @@ function PopupThemeEditorPanelCore({
                   className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
                 />
             </div>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-              <span className="shrink-0">颜色</span>
-              <PopupThemeColorSwatch
-                value={td.color}
-                onChange={(v, m) => pushDeco({ color: v }, m)}
-              />
-            </div>
-            <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">样式</h5>
-              <div className="grid grid-cols-[60px_minmax(0,1fr)_auto] items-center gap-2 text-xs text-slate-600">
-                <span>字重</span>
-              <select
-                  value={td.fontWeight ?? 500}
-                  onChange={(e) => pushDeco({ fontWeight: Number(e.target.value) })}
-                className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-              >
-                  {[100, 200, 300, 400, 500, 600, 700, 800, 900].map((w) => (
-                    <option key={w} value={w}>
-                      {w}
-                    </option>
-                  ))}
-              </select>
-                <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => pushDeco({ fontWeight: (td.fontWeight ?? 500) >= 700 ? 400 : 700 })}
-                    className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((td.fontWeight ?? 500) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                  >
-                    B
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => pushDeco({ textUnderline: td.textUnderline === true ? undefined : true })}
-                    className={`rounded px-2 py-0.5 text-[12px] underline ${td.textUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                  >
-                    U
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => pushDeco({ fontItalic: td.fontItalic === true ? undefined : true })}
-                    className={`rounded px-2 py-0.5 text-[12px] italic ${td.fontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                  >
-                    I
-                  </button>
-                </div>
+            <div className="space-y-2 text-xs text-slate-600">
+              <div className={panelColorRowGridClass}>
+                <span className={panelSubLabelClass}>颜色</span>
+                <PopupThemeColorSwatch
+                  value={td.color}
+                  onChange={(v, m) => pushDeco({ color: v }, m)}
+                />
+              </div>
+              <div className={panelTextOpacityRowGridClass}>
+                <span className="shrink-0 leading-tight">不透明度</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={td.colorOpacity ?? 1}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    if (!Number.isFinite(n)) return
+                    const c = Math.max(0, Math.min(1, n))
+                    pushDeco({ colorOpacity: c >= 1 ? undefined : c })
+                  }}
+                  className="w-full accent-indigo-600"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={td.colorOpacity ?? 1}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    if (!Number.isFinite(n)) return
+                    const c = Math.max(0, Math.min(1, n))
+                    pushDeco({ colorOpacity: c >= 1 ? undefined : c })
+                  }}
+                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                />
               </div>
             </div>
+            <PanelDivider />
             <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">排版</h5>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <span className="text-[11px] text-slate-500 shrink-0">排向</span>
-                <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                  <button
-                    type="button"
-                    title="横排（从左到右）"
-                    onClick={() => pushDeco({ writingMode: 'horizontal-tb' })}
-                    className={`rounded px-2 py-0.5 text-[11px] ${
-                      decoWm === 'horizontal-tb'
-                        ? 'bg-slate-800 text-white'
-                        : 'text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    横排
-                  </button>
-                  <button
-                    type="button"
-                    title="竖排"
-                    onClick={() => {
-                      if (decoWm === 'horizontal-tb') pushDeco({ writingMode: 'vertical-rl' })
-                    }}
-                    className={`rounded px-2 py-0.5 text-[11px] ${
-                      decoWm === 'vertical-rl' || decoWm === 'vertical-lr'
-                        ? 'bg-slate-800 text-white'
-                        : 'text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    竖排
-                  </button>
-                </div>
-                {decoWm === 'vertical-rl' || decoWm === 'vertical-lr' ? (
-                  <>
-                    <span className="text-[11px] text-slate-500 shrink-0">列序</span>
-                    <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                      <button
-                        type="button"
-                        title="列从左向右（vertical-lr）"
-                        onClick={() => pushDeco({ writingMode: 'vertical-lr' })}
-                        className={`rounded px-2 py-0.5 text-[11px] ${
-                          decoWm === 'vertical-lr' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
-                        }`}
-                      >
-                        左
-                      </button>
-                      <button
-                        type="button"
-                        title="列从右向左（vertical-rl）"
-                        onClick={() => pushDeco({ writingMode: 'vertical-rl' })}
-                        className={`rounded px-2 py-0.5 text-[11px] ${
-                          decoWm === 'vertical-rl' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
-                        }`}
-                      >
-                        右
-                      </button>
-                    </div>
-                  </>
-                ) : null}
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <label className="text-xs text-slate-600 space-y-1">
-                  <span>字符朝向</span>
+              <PanelSectionTitle>样式效果</PanelSectionTitle>
+              <div className={panelLabeledRowGridClass}>
+                <span className="text-xs text-slate-600 shrink-0 leading-tight">字重</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <select
-                    value={td.textOrientation ?? 'mixed'}
-                    onChange={(e) => pushDeco({ textOrientation: e.target.value as PopupTextOrientationMode })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                    value={td.fontWeight ?? 500}
+                    onChange={(e) => pushDeco({ fontWeight: Number(e.target.value) })}
+                    className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
                   >
-                    <option value="mixed">混合（默认）</option>
-                    <option value="upright">直立</option>
-                    <option value="sideways">侧转</option>
+                    {[100, 200, 300, 400, 500, 600, 700, 800, 900].map((w) => (
+                      <option key={w} value={w}>
+                        {w}
+                      </option>
+                    ))}
                   </select>
-                </label>
-                <label className="inline-flex items-center gap-2 text-xs text-slate-700 mt-5 sm:mt-6">
-                  <input
-                    type="checkbox"
-                    checked={td.combineUprightDigits === true}
-                    onChange={(ev) => pushDeco({ combineUprightDigits: ev.target.checked })}
-                  />
-                  <span>直排内数字合并</span>
-                </label>
+                  <div className="inline-flex shrink-0 rounded border border-slate-300 bg-white p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => pushDeco({ fontWeight: (td.fontWeight ?? 500) >= 700 ? 400 : 700 })}
+                      className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((td.fontWeight ?? 500) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      B
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => pushDeco({ textUnderline: td.textUnderline === true ? undefined : true })}
+                      className={`rounded px-2 py-0.5 text-[12px] underline ${td.textUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      U
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => pushDeco({ fontItalic: td.fontItalic === true ? undefined : true })}
+                      className={`rounded px-2 py-0.5 text-[12px] italic ${td.fontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                    >
+                      I
+                    </button>
+                  </div>
+                </div>
               </div>
-              {(td.writingMode === 'vertical-rl' || td.writingMode === 'vertical-lr') ? (
-                <p className="text-[10px] text-slate-500 leading-snug">
-                  竖排时：字间距主要沿列方向；行高主要控制列间距。
-                </p>
+              <div className="space-y-2">
+                <div className="space-y-2">
+                  <div className={panelLabeledRowGridClass}>
+                    <label className="col-span-2 inline-flex min-w-0 cursor-pointer select-none items-center gap-2 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 shrink-0 cursor-pointer accent-indigo-600"
+                        checked={decoEffects.strokeEnabled === true}
+                        onChange={(ev) =>
+                          patchDecoFx(
+                            ev.target.checked
+                              ? {
+                                  strokeEnabled: true,
+                                  strokeWidthPx: decoEffects.strokeWidthPx ?? 2,
+                                  strokeColor: decoEffects.strokeColor ?? '#000000',
+                                  strokeOpacity: decoEffects.strokeOpacity ?? 1,
+                                }
+                              : { strokeEnabled: false },
+                          )
+                        }
+                      />
+                      描边
+                    </label>
+                  </div>
+                  {decoEffects.strokeEnabled === true && (
+                    <div className="space-y-2">
+                      <SliderNumberRow
+                        label="宽度"
+                        min={0.5}
+                        max={POPUP_TEXT_STROKE_WIDTH_MAX}
+                        step={0.5}
+                        value={decoEffects.strokeWidthPx ?? 2}
+                        onCommit={(n) =>
+                          patchDecoFx({ strokeWidthPx: Math.max(0.5, Math.min(POPUP_TEXT_STROKE_WIDTH_MAX, n)) })
+                        }
+                      />
+                      <div className="space-y-2 text-xs text-slate-600">
+                        <div className={panelColorRowGridClass}>
+                          <span className={panelSubLabelClass}>颜色</span>
+                          <PopupThemeColorSwatch
+                            value={decoEffects.strokeColor ?? '#000000'}
+                            onChange={(v, m) => patchDecoFx({ strokeColor: v }, m)}
+                          />
+                        </div>
+                        <div className={panelTextOpacityRowGridClass}>
+                          <span className="shrink-0 leading-tight">不透明度</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={decoEffects.strokeOpacity ?? 1}
+                            onChange={(ev) => {
+                              const n = Number(ev.target.value)
+                              if (!Number.isFinite(n)) return
+                              patchDecoFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
+                            }}
+                            className="w-full accent-indigo-600"
+                          />
+                          <input
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={decoEffects.strokeOpacity ?? 1}
+                            onChange={(ev) => {
+                              const n = Number(ev.target.value)
+                              if (!Number.isFinite(n)) return
+                              patchDecoFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
+                            }}
+                            className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <div className={panelLabeledRowGridClass}>
+                    <label className="col-span-2 inline-flex min-w-0 cursor-pointer select-none items-center gap-2 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 shrink-0 cursor-pointer accent-indigo-600"
+                        checked={decoEffects.shadowEnabled === true}
+                        onChange={(ev) =>
+                          patchDecoFx(
+                            ev.target.checked
+                              ? {
+                                  shadowEnabled: true,
+                                  shadowColor: decoEffects.shadowColor ?? '#000000',
+                                  shadowOpacity: decoEffects.shadowOpacity ?? 0.45,
+                                  shadowBlurPx: decoEffects.shadowBlurPx ?? 4,
+                                  shadowSizePx: decoEffects.shadowSizePx ?? 0,
+                                  shadowDistancePx: decoEffects.shadowDistancePx ?? 6,
+                                  shadowAngleDeg: decoEffects.shadowAngleDeg ?? 45,
+                                }
+                              : { shadowEnabled: false },
+                          )
+                        }
+                      />
+                      阴影
+                    </label>
+                  </div>
+                  {decoEffects.shadowEnabled === true && (
+                    <div className="space-y-2">
+                      <div className="space-y-2 text-xs text-slate-600">
+                        <div className={panelColorRowGridClass}>
+                          <span className={panelSubLabelClass}>颜色</span>
+                          <PopupThemeColorSwatch
+                            value={decoEffects.shadowColor ?? '#000000'}
+                            onChange={(v, m) => patchDecoFx({ shadowColor: v }, m)}
+                          />
+                        </div>
+                        <div className={panelTextOpacityRowGridClass}>
+                          <span className="shrink-0 leading-tight">不透明度</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={decoEffects.shadowOpacity ?? 0.45}
+                            onChange={(ev) => {
+                              const n = Number(ev.target.value)
+                              if (!Number.isFinite(n)) return
+                              patchDecoFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
+                            }}
+                            className="w-full accent-indigo-600"
+                          />
+                          <input
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={decoEffects.shadowOpacity ?? 0.45}
+                            onChange={(ev) => {
+                              const n = Number(ev.target.value)
+                              if (!Number.isFinite(n)) return
+                              patchDecoFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
+                            }}
+                            className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                          />
+                        </div>
+                      </div>
+                      <SliderNumberRow
+                        label="模糊"
+                        min={0}
+                        max={POPUP_TEXT_SHADOW_BLUR_MAX}
+                        step={1}
+                        value={decoEffects.shadowBlurPx ?? 4}
+                        onCommit={(n) =>
+                          patchDecoFx({ shadowBlurPx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_BLUR_MAX, n)) })
+                        }
+                      />
+                      <SliderNumberRow
+                        label="扩散"
+                        min={0}
+                        max={POPUP_TEXT_SHADOW_SIZE_MAX}
+                        step={1}
+                        value={decoEffects.shadowSizePx ?? 0}
+                        onCommit={(n) =>
+                          patchDecoFx({ shadowSizePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_SIZE_MAX, n)) })
+                        }
+                      />
+                      <SliderNumberRow
+                        label="距离"
+                        min={0}
+                        max={POPUP_TEXT_SHADOW_DISTANCE_MAX}
+                        step={1}
+                        value={decoEffects.shadowDistancePx ?? 6}
+                        onCommit={(n) =>
+                          patchDecoFx({ shadowDistancePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_DISTANCE_MAX, n)) })
+                        }
+                      />
+                      <SliderNumberRow
+                        label="角度"
+                        min={-360}
+                        max={360}
+                        step={1}
+                        value={decoEffects.shadowAngleDeg ?? 45}
+                        onCommit={(n) => patchDecoFx({ shadowAngleDeg: Math.max(-360, Math.min(360, n)) })}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <PanelDivider />
+            <div className="space-y-2">
+              <PanelSectionTitle>排版</PanelSectionTitle>
+              <div className={panelLabeledRowGridClass}>
+                <span className="text-xs text-slate-600 shrink-0 leading-tight">排向</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+                  <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+                    <button
+                      type="button"
+                      title="横排（从左到右）"
+                      onClick={() => pushDeco({ writingMode: 'horizontal-tb' })}
+                      className={`rounded px-2 py-0.5 text-[11px] ${
+                        decoWm === 'horizontal-tb'
+                          ? 'bg-slate-800 text-white'
+                          : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      横排
+                    </button>
+                    <button
+                      type="button"
+                      title="竖排"
+                      onClick={() => {
+                        if (decoWm === 'horizontal-tb') pushDeco({ writingMode: 'vertical-rl' })
+                      }}
+                      className={`rounded px-2 py-0.5 text-[11px] ${
+                        decoWm === 'vertical-rl' || decoWm === 'vertical-lr'
+                          ? 'bg-slate-800 text-white'
+                          : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      竖排
+                    </button>
+                  </div>
+                </div>
+              </div>
+              {isVerticalWritingMode(decoWm) ? (
+                <div className={panelLabeledRowGridClass}>
+                  <span className="text-xs text-slate-600 shrink-0 leading-tight">列序</span>
+                  <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
+                    <button
+                      type="button"
+                      title="列从左向右（vertical-lr）"
+                      onClick={() => pushDeco({ writingMode: 'vertical-lr' })}
+                      className={`rounded px-2 py-0.5 text-[11px] ${
+                        decoWm === 'vertical-lr' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      左
+                    </button>
+                    <button
+                      type="button"
+                      title="列从右向左（vertical-rl）"
+                      onClick={() => pushDeco({ writingMode: 'vertical-rl' })}
+                      className={`rounded px-2 py-0.5 text-[11px] ${
+                        decoWm === 'vertical-rl' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      右
+                    </button>
+                  </div>
+                </div>
               ) : null}
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[11px] text-slate-500 shrink-0">对齐</span>
-                <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+              {isVerticalWritingMode(decoWm) ? (
+                <div className="space-y-2">
+                  <div className={panelLabeledRowGridClass}>
+                    <span
+                      className="text-xs text-slate-600 shrink-0 leading-tight"
+                      title="竖排时控制拉丁字母等朝向"
+                    >
+                      字符朝向
+                    </span>
+                    <select
+                      value={td.textOrientation ?? 'mixed'}
+                      onChange={(e) => pushDeco({ textOrientation: e.target.value as PopupTextOrientationMode })}
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value="mixed">混合（默认）</option>
+                      <option value="upright">直立</option>
+                      <option value="sideways">侧转</option>
+                    </select>
+                  </div>
+                  <div className={panelLabeledRowGridClass}>
+                    <span className="shrink-0" aria-hidden />
+                    <label className="inline-flex min-w-0 items-center gap-2 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={td.combineUprightDigits === true}
+                        onChange={(ev) => pushDeco({ combineUprightDigits: ev.target.checked })}
+                      />
+                      <span>直排内数字合并</span>
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+              <div className={panelLabeledRowGridClass}>
+                <span className="text-xs text-slate-600 shrink-0 leading-tight">对齐</span>
+                <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
                   {(['left', 'center', 'right', 'start', 'end', 'justify'] as const).map((v) => (
                     <button
                       key={v}
@@ -937,9 +1233,9 @@ function PopupThemeEditorPanelCore({
                   ))}
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[11px] text-slate-500 shrink-0">垂直</span>
-                <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+              <div className={panelLabeledRowGridClass}>
+                <span className="text-xs text-slate-600 shrink-0 leading-tight">垂直</span>
+                <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
                   {(['top', 'middle', 'bottom'] as const).map((v) => (
                     <button
                       key={v}
@@ -957,305 +1253,58 @@ function PopupThemeEditorPanelCore({
                   ))}
                 </div>
               </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <label className="text-xs text-slate-600 space-y-1">
-                  <span>字间距（px，-2～20）</span>
-                <input
-                  type="number"
-                  min={-2}
-                  max={20}
-                  step={0.5}
-                  value={td.letterSpacing ?? 0}
-                  onChange={(e) => {
-                    const n = Number(e.target.value)
-                    if (!Number.isFinite(n)) return
-                    pushDeco({ letterSpacing: Math.max(-2, Math.min(20, n)) })
-                  }}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-                <label className="text-xs text-slate-600 space-y-1">
-                  <span>行高（建议 1.1～2）</span>
-                <input
-                  type="number"
-                  min={0.8}
-                  max={3}
-                  step={0.05}
-                  value={td.lineHeight ?? 1.35}
-                  onChange={(e) => {
-                    const n = Number(e.target.value)
-                    if (!Number.isFinite(n)) return
-                    pushDeco({ lineHeight: Math.max(0.8, Math.min(3, n)) })
-                  }}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
+              <SliderNumberRow
+                label="字间距"
+                min={-2}
+                max={20}
+                step={0.5}
+                value={td.letterSpacing ?? 0}
+                onCommit={(n) => pushDeco({ letterSpacing: Math.max(-2, Math.min(20, n)) })}
+              />
+              <SliderNumberRow
+                label="行高"
+                min={0.8}
+                max={3}
+                step={0.05}
+                value={td.lineHeight ?? 1.35}
+                onCommit={(n) => pushDeco({ lineHeight: Math.max(0.8, Math.min(3, n)) })}
+              />
             </div>
-            </div>
+            <PanelDivider />
             <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">效果</h5>
-              <div className="space-y-2">
-                <div className="space-y-1.5 rounded border border-white/80 bg-white/60 p-1.5">
-                  <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={decoEffects.strokeEnabled === true}
-                      onChange={(ev) =>
-                        patchDecoFx(
-                          ev.target.checked
-                            ? {
-                                strokeEnabled: true,
-                                strokeWidthPx: decoEffects.strokeWidthPx ?? 2,
-                                strokeColor: decoEffects.strokeColor ?? '#000000',
-                                strokeOpacity: decoEffects.strokeOpacity ?? 1,
-                              }
-                            : { strokeEnabled: false },
-                        )
-                      }
-                    />
-                    描边
-            </label>
-                  {decoEffects.strokeEnabled === true && (
-                    <div className="space-y-2">
-                      <label className="block text-[11px] text-slate-600 space-y-0.5">
-                        <span>宽度（px，上限 {POPUP_TEXT_STROKE_WIDTH_MAX}）</span>
-                        <input
-                          type="number"
-                          min={0.5}
-                          max={POPUP_TEXT_STROKE_WIDTH_MAX}
-                          step={0.5}
-                          value={decoEffects.strokeWidthPx ?? 2}
-                          onChange={(ev) => {
-                            const n = Number(ev.target.value)
-                            if (!Number.isFinite(n)) return
-                            patchDecoFx({ strokeWidthPx: Math.max(0.5, Math.min(POPUP_TEXT_STROKE_WIDTH_MAX, n)) })
-                          }}
-                          className="w-full max-w-xs rounded border border-slate-300 px-2 py-1 text-xs"
-                        />
-                      </label>
-                      <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-[11px] text-slate-600">
-                        <span>颜色</span>
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <PopupThemeColorSwatch
-                            value={decoEffects.strokeColor ?? '#000000'}
-                            onChange={(v, m) => patchDecoFx({ strokeColor: v }, m)}
-                          />
-                          <span className="shrink-0 text-slate-500">不透明度</span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            value={decoEffects.strokeOpacity ?? 1}
-                            onChange={(ev) => {
-                              const n = Number(ev.target.value)
-                              if (!Number.isFinite(n)) return
-                              patchDecoFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
-                            }}
-                            className="min-w-[80px] flex-1 accent-indigo-600"
-                          />
-                          <input
-                            type="number"
-                            min={0}
-                            max={1}
-                            step={0.05}
-                            value={decoEffects.strokeOpacity ?? 1}
-                            onChange={(ev) => {
-                              const n = Number(ev.target.value)
-                              if (!Number.isFinite(n)) return
-                              patchDecoFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
-                            }}
-                            className="w-[72px] shrink-0 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-1.5 rounded border border-white/80 bg-white/60 p-1.5">
-                  <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={decoEffects.shadowEnabled === true}
-                      onChange={(ev) =>
-                        patchDecoFx(
-                          ev.target.checked
-                            ? {
-                                shadowEnabled: true,
-                                shadowColor: decoEffects.shadowColor ?? '#000000',
-                                shadowOpacity: decoEffects.shadowOpacity ?? 0.45,
-                                shadowBlurPx: decoEffects.shadowBlurPx ?? 4,
-                                shadowSizePx: decoEffects.shadowSizePx ?? 0,
-                                shadowDistancePx: decoEffects.shadowDistancePx ?? 6,
-                                shadowAngleDeg: decoEffects.shadowAngleDeg ?? 45,
-                              }
-                            : { shadowEnabled: false },
-                        )
-                      }
-                    />
-                    阴影
-                  </label>
-                  {decoEffects.shadowEnabled === true && (
-                    <div className="space-y-2">
-                      <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-[11px] text-slate-600">
-                        <span>颜色</span>
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <PopupThemeColorSwatch
-                            value={decoEffects.shadowColor ?? '#000000'}
-                            onChange={(v, m) => patchDecoFx({ shadowColor: v }, m)}
-                          />
-                          <span className="shrink-0 text-slate-500">不透明度</span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            value={decoEffects.shadowOpacity ?? 0.45}
-                            onChange={(ev) => {
-                              const n = Number(ev.target.value)
-                              if (!Number.isFinite(n)) return
-                              patchDecoFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
-                            }}
-                            className="min-w-[80px] flex-1 accent-indigo-600"
-                          />
-                          <input
-                            type="number"
-                            min={0}
-                            max={1}
-                            step={0.05}
-                            value={decoEffects.shadowOpacity ?? 0.45}
-                            onChange={(ev) => {
-                              const n = Number(ev.target.value)
-                              if (!Number.isFinite(n)) return
-                              patchDecoFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
-                            }}
-                            className="w-[72px] shrink-0 rounded border border-slate-300 px-2 py-1 text-xs"
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      <label className="text-[11px] text-slate-600 space-y-0.5">
-                        <span>模糊（px，上限 {POPUP_TEXT_SHADOW_BLUR_MAX}）</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={POPUP_TEXT_SHADOW_BLUR_MAX}
-                          step={1}
-                          value={decoEffects.shadowBlurPx ?? 4}
-                          onChange={(ev) => {
-                            const n = Number(ev.target.value)
-                            if (!Number.isFinite(n)) return
-                            patchDecoFx({ shadowBlurPx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_BLUR_MAX, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                        />
-                      </label>
-                      <label className="text-[11px] text-slate-600 space-y-0.5">
-                        <span>扩散（px，上限 {POPUP_TEXT_SHADOW_SIZE_MAX}）</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={POPUP_TEXT_SHADOW_SIZE_MAX}
-                          step={1}
-                          value={decoEffects.shadowSizePx ?? 0}
-                          onChange={(ev) => {
-                            const n = Number(ev.target.value)
-                            if (!Number.isFinite(n)) return
-                            patchDecoFx({ shadowSizePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_SIZE_MAX, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                        />
-                      </label>
-                      <label className="text-[11px] text-slate-600 space-y-0.5">
-                        <span>距离（px，上限 {POPUP_TEXT_SHADOW_DISTANCE_MAX}）</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={POPUP_TEXT_SHADOW_DISTANCE_MAX}
-                          step={1}
-                          value={decoEffects.shadowDistancePx ?? 6}
-                          onChange={(ev) => {
-                            const n = Number(ev.target.value)
-                            if (!Number.isFinite(n)) return
-                            patchDecoFx({ shadowDistancePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_DISTANCE_MAX, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                        />
-                      </label>
-                      <label className="text-[11px] text-slate-600 space-y-0.5">
-                        <span>角度（°，0=右，90=下）</span>
-                        <input
-                          type="number"
-                          min={-360}
-                          max={360}
-                          step={1}
-                          value={decoEffects.shadowAngleDeg ?? 45}
-                          onChange={(ev) => {
-                            const n = Number(ev.target.value)
-                            if (!Number.isFinite(n)) return
-                            patchDecoFx({ shadowAngleDeg: Math.max(-360, Math.min(360, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                        />
-                      </label>
-                    </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="border-t border-slate-100 pt-2 mt-1 space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">变换</h5>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>X 位置 (%)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={0.5}
-                    value={+dt.x.toFixed(1)}
-                    onChange={(e) => pushDeco({ transform: { ...dt, x: Math.max(0, Math.min(100, Number(e.target.value) || 0)) } })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  />
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>Y 位置 (%)</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={0.5}
-                    value={+dt.y.toFixed(1)}
-                    onChange={(e) => pushDeco({ transform: { ...dt, y: Math.max(0, Math.min(100, Number(e.target.value) || 0)) } })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  />
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>旋转 (°)</span>
-                  <input
-                    type="number"
-                    min={-360}
-                    max={360}
-                    step={1}
-                    value={+dt.rotation.toFixed(1)}
-                    onChange={(e) => pushDeco({ transform: { ...dt, rotation: Math.max(-360, Math.min(360, Number(e.target.value) || 0)) } })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  />
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>缩放</span>
-                  <input
-                    type="number"
-                    min={0.1}
-                    max={5}
-                    step={0.05}
-                    value={+dt.scale.toFixed(2)}
-                    onChange={(e) => pushDeco({ transform: { ...dt, scale: Math.max(0.1, Math.min(5, Number(e.target.value) || 1)) } })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  />
-                </label>
-              </div>
+              <PanelSectionTitle>变换</PanelSectionTitle>
+              <SliderNumberRow
+                label="X位置"
+                min={0}
+                max={100}
+                step={0.5}
+                value={dt.x}
+                onCommit={(n) => pushDeco({ transform: { ...dt, x: n } })}
+              />
+              <SliderNumberRow
+                label="Y位置"
+                min={0}
+                max={100}
+                step={0.5}
+                value={dt.y}
+                onCommit={(n) => pushDeco({ transform: { ...dt, y: n } })}
+              />
+              <SliderNumberRow
+                label="旋转"
+                min={-360}
+                max={360}
+                step={1}
+                value={dt.rotation}
+                onCommit={(n) => pushDeco({ transform: { ...dt, rotation: n } })}
+              />
+              <SliderNumberRow
+                label="缩放"
+                min={0.1}
+                max={5}
+                step={0.05}
+                value={dt.scale}
+                onCommit={(n) => pushDeco({ transform: { ...dt, scale: n } })}
+              />
               <button
                 type="button"
                 onClick={() => pushDeco({ transform: { x: 50, y: 36, rotation: 0, scale: 1 } })}
@@ -1271,7 +1320,7 @@ function PopupThemeEditorPanelCore({
         const im = decoLayer as ImageThemeLayer
         return (
           <div className="rounded-md border border-teal-200 bg-teal-50/40 p-3 space-y-2">
-            <h4 className="text-xs font-semibold text-teal-900">图片层 · 属性</h4>
+            <h4 className="text-sm font-semibold text-teal-900">图片层 · 属性</h4>
             <p className="break-all text-[11px] text-slate-600">{im.imagePath || '（无路径）'}</p>
             {onPickDecoImage && (
               <button
@@ -1304,7 +1353,7 @@ function PopupThemeEditorPanelCore({
       })()}
       {(effectivePanelFilter === 'all' || effectivePanelFilter === 'text') && !hidePrimaryTextForms && (
         <div className="space-y-2" data-panel-text-section>
-          <h4 className="text-xs font-semibold text-slate-700">文字</h4>
+          <PanelBlockTitle>文字</PanelBlockTitle>
           {showIdleTextHint && (
             <p className="text-[11px] text-slate-600 leading-relaxed">
               在图层栏选择「文本」「时间」或「日期」后再编辑对应字体与颜色；未选层时不改动根字体参数。
@@ -1560,327 +1609,478 @@ function PopupThemeEditorPanelCore({
             </div>
           )}
           {(showContentColumn || showTimeColumn || showDateColumn) && (
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="space-y-2">
               {showContentColumn && (
-                <div className="flex items-center gap-2 text-xs text-slate-600">
-                  <span className="shrink-0">颜色</span>
-                  <PopupThemeColorSwatch
-                    value={theme.contentColor}
-                    onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { contentColor: v }, m)}
-                  />
+                <div className="space-y-2 text-xs text-slate-600">
+                  <div className={panelColorRowGridClass}>
+                    <span className={panelSubLabelClass}>颜色</span>
+                    <PopupThemeColorSwatch
+                      value={theme.contentColor}
+                      onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { contentColor: v }, m)}
+                    />
+                  </div>
+                  <div className={panelTextOpacityRowGridClass}>
+                    <span className="shrink-0 leading-tight">不透明度</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={theme.contentTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { contentTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={theme.contentTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { contentTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                    />
+                  </div>
                 </div>
               )}
               {showTimeColumn && (
-                <div className="flex items-center gap-2 text-xs text-slate-600">
-                  <span className="shrink-0">时间颜色</span>
-                  <PopupThemeColorSwatch
-                    value={theme.timeColor}
-                    onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { timeColor: v }, m)}
-                  />
+                <div className="space-y-2 text-xs text-slate-600">
+                  <div className={panelColorRowGridClass}>
+                    <span className={panelSubLabelClass}>时间颜色</span>
+                    <PopupThemeColorSwatch
+                      value={theme.timeColor}
+                      onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { timeColor: v }, m)}
+                    />
+                  </div>
+                  <div className={panelTextOpacityRowGridClass}>
+                    <span className="shrink-0 leading-tight">不透明度</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={theme.timeTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { timeTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={theme.timeTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { timeTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                    />
+                  </div>
                 </div>
               )}
               {showDateColumn && (
-                <div className="flex items-center gap-2 text-xs text-slate-600">
-                  <span className="shrink-0">日期颜色</span>
-                  <PopupThemeColorSwatch
-                    value={theme.dateColor ?? theme.timeColor}
-                    onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { dateColor: v }, m)}
-                  />
+                <div className="space-y-2 text-xs text-slate-600">
+                  <div className={panelColorRowGridClass}>
+                    <span className={panelSubLabelClass}>日期颜色</span>
+                    <PopupThemeColorSwatch
+                      value={theme.dateColor ?? theme.timeColor}
+                      onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { dateColor: v }, m)}
+                    />
+                  </div>
+                  <div className={panelTextOpacityRowGridClass}>
+                    <span className="shrink-0 leading-tight">不透明度</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={theme.dateTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { dateTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={theme.dateTextOpacity ?? 1}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        const c = Math.max(0, Math.min(1, n))
+                        mergedWrappedOnUpdateTheme(themeId, { dateTextOpacity: c >= 1 ? undefined : c })
+                      }}
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                    />
+                  </div>
                 </div>
               )}
             </div>
           )}
+          {(showContentColumn || showTimeColumn || showDateColumn) && <PanelDivider />}
           {(showContentColumn || showTimeColumn || showDateColumn) && (
             <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">样式</h5>
+              <PanelSectionTitle>样式效果</PanelSectionTitle>
               {showContentColumn && (
-                <div className="grid grid-cols-[60px_minmax(0,1fr)_auto] items-center gap-2 text-xs text-slate-600">
-                  <span>字重</span>
-                  <select
-                    value={theme.contentFontWeight ?? 600}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { contentFontWeight: Number(e.target.value) })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                  >
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                    <option value={300}>300</option>
-                    <option value={400}>400</option>
-                    <option value={500}>500</option>
-                    <option value={600}>600</option>
-                    <option value={700}>700</option>
-                    <option value={800}>800</option>
-                    <option value={900}>900</option>
-                  </select>
-                  <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentFontWeight: (theme.contentFontWeight ?? 600) >= 700 ? 400 : 700 })}
-                      className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.contentFontWeight ?? 600) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                <div className={panelLabeledRowGridClass}>
+                  <span className="text-xs text-slate-600 shrink-0 leading-tight">字重</span>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <select
+                      value={theme.contentFontWeight ?? 600}
+                      onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { contentFontWeight: Number(e.target.value) })}
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
                     >
-                      B
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentUnderline: theme.contentUnderline === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] underline ${theme.contentUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      U
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentFontItalic: theme.contentFontItalic === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] italic ${theme.contentFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      I
-                    </button>
+                      <option value={100}>100</option>
+                      <option value={200}>200</option>
+                      <option value={300}>300</option>
+                      <option value={400}>400</option>
+                      <option value={500}>500</option>
+                      <option value={600}>600</option>
+                      <option value={700}>700</option>
+                      <option value={800}>800</option>
+                      <option value={900}>900</option>
+                    </select>
+                    <div className="inline-flex shrink-0 rounded border border-slate-300 bg-white p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentFontWeight: (theme.contentFontWeight ?? 600) >= 700 ? 400 : 700 })}
+                        className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.contentFontWeight ?? 600) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentUnderline: theme.contentUnderline === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] underline ${theme.contentUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        U
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { contentFontItalic: theme.contentFontItalic === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] italic ${theme.contentFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        I
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
               {showTimeColumn && (
-                <div className="grid grid-cols-[60px_minmax(0,1fr)_auto] items-center gap-2 text-xs text-slate-600">
-                  <span>时间字重</span>
-                  <select
-                    value={theme.timeFontWeight ?? 400}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { timeFontWeight: Number(e.target.value) })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                  >
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                    <option value={300}>300</option>
-                    <option value={400}>400</option>
-                    <option value={500}>500</option>
-                    <option value={600}>600</option>
-                    <option value={700}>700</option>
-                    <option value={800}>800</option>
-                    <option value={900}>900</option>
-                  </select>
-                  <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeFontWeight: (theme.timeFontWeight ?? 400) >= 700 ? 400 : 700 })}
-                      className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.timeFontWeight ?? 400) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                <div className={panelLabeledRowGridClass}>
+                  <span className="text-xs text-slate-600 shrink-0 leading-tight">时间字重</span>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <select
+                      value={theme.timeFontWeight ?? 400}
+                      onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { timeFontWeight: Number(e.target.value) })}
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
                     >
-                      B
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeUnderline: theme.timeUnderline === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] underline ${theme.timeUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      U
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeFontItalic: theme.timeFontItalic === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] italic ${theme.timeFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      I
-                    </button>
+                      <option value={100}>100</option>
+                      <option value={200}>200</option>
+                      <option value={300}>300</option>
+                      <option value={400}>400</option>
+                      <option value={500}>500</option>
+                      <option value={600}>600</option>
+                      <option value={700}>700</option>
+                      <option value={800}>800</option>
+                      <option value={900}>900</option>
+                    </select>
+                    <div className="inline-flex shrink-0 rounded border border-slate-300 bg-white p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeFontWeight: (theme.timeFontWeight ?? 400) >= 700 ? 400 : 700 })}
+                        className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.timeFontWeight ?? 400) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeUnderline: theme.timeUnderline === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] underline ${theme.timeUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        U
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { timeFontItalic: theme.timeFontItalic === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] italic ${theme.timeFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        I
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
               {showDateColumn && (
-                <div className="grid grid-cols-[60px_minmax(0,1fr)_auto] items-center gap-2 text-xs text-slate-600">
-                  <span>日期字重</span>
-                  <select
-                    value={theme.dateFontWeight ?? 400}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateFontWeight: Number(e.target.value) })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                  >
-                    <option value={100}>100</option>
-                    <option value={200}>200</option>
-                    <option value={300}>300</option>
-                    <option value={400}>400</option>
-                    <option value={500}>500</option>
-                    <option value={600}>600</option>
-                    <option value={700}>700</option>
-                    <option value={800}>800</option>
-                    <option value={900}>900</option>
-                  </select>
-                  <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateFontWeight: (theme.dateFontWeight ?? 400) >= 700 ? 400 : 700 })}
-                      className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.dateFontWeight ?? 400) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                <div className={panelLabeledRowGridClass}>
+                  <span className="text-xs text-slate-600 shrink-0 leading-tight">日期字重</span>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <select
+                      value={theme.dateFontWeight ?? 400}
+                      onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateFontWeight: Number(e.target.value) })}
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
                     >
-                      B
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateUnderline: theme.dateUnderline === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] underline ${theme.dateUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      U
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateFontItalic: theme.dateFontItalic === true ? undefined : true })}
-                      className={`rounded px-2 py-0.5 text-[12px] italic ${theme.dateFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                    >
-                      I
-                    </button>
+                      <option value={100}>100</option>
+                      <option value={200}>200</option>
+                      <option value={300}>300</option>
+                      <option value={400}>400</option>
+                      <option value={500}>500</option>
+                      <option value={600}>600</option>
+                      <option value={700}>700</option>
+                      <option value={800}>800</option>
+                      <option value={900}>900</option>
+                    </select>
+                    <div className="inline-flex shrink-0 rounded border border-slate-300 bg-white p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateFontWeight: (theme.dateFontWeight ?? 400) >= 700 ? 400 : 700 })}
+                        className={`rounded px-2 py-0.5 text-[12px] font-semibold ${((theme.dateFontWeight ?? 400) >= 700) ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateUnderline: theme.dateUnderline === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] underline ${theme.dateUnderline === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        U
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, { dateFontItalic: theme.dateFontItalic === true ? undefined : true })}
+                        className={`rounded px-2 py-0.5 text-[12px] italic ${theme.dateFontItalic === true ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        I
+                      </button>
+                    </div>
                   </div>
                 </div>
+              )}
+              {selectedElements.length > 0 && (effectivePanelFilter === 'all' || effectivePanelFilter === 'text') && (
+                (() => {
+                  const sel = selectedElements[0]
+                  const ek = layerEffectsKey(sel)
+                  const efx: PopupLayerTextEffects = theme[ek] ?? {}
+                  const patchFx = (p: Partial<PopupLayerTextEffects>, meta?: PopupThemeEditUpdateMeta) =>
+                    mergedWrappedOnUpdateTheme(themeId, { [ek]: { ...efx, ...p } } as Partial<PopupTheme>, meta)
+                  return (
+                    <div className="space-y-2">
+                      <div className="space-y-2">
+                        <div className={panelLabeledRowGridClass}>
+                          <label className="col-span-2 inline-flex min-w-0 cursor-pointer select-none items-center gap-2 text-xs text-slate-700">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 shrink-0 cursor-pointer accent-indigo-600"
+                              checked={efx.strokeEnabled === true}
+                              onChange={(ev) =>
+                                patchFx(
+                                  ev.target.checked
+                                    ? {
+                                        strokeEnabled: true,
+                                        strokeWidthPx: efx.strokeWidthPx ?? 2,
+                                        strokeColor: efx.strokeColor ?? '#000000',
+                                        strokeOpacity: efx.strokeOpacity ?? 1,
+                                      }
+                                    : { strokeEnabled: false },
+                                )
+                              }
+                            />
+                            描边
+                          </label>
+                        </div>
+                        {efx.strokeEnabled === true && (
+                          <div className="space-y-2">
+                            <SliderNumberRow
+                              label="宽度"
+                              min={0.5}
+                              max={POPUP_TEXT_STROKE_WIDTH_MAX}
+                              step={0.5}
+                              value={efx.strokeWidthPx ?? 2}
+                              onCommit={(n) =>
+                                patchFx({ strokeWidthPx: Math.max(0.5, Math.min(POPUP_TEXT_STROKE_WIDTH_MAX, n)) })
+                              }
+                            />
+                            <div className="space-y-2 text-xs text-slate-600">
+                              <div className={panelColorRowGridClass}>
+                                <span className={panelSubLabelClass}>颜色</span>
+                                <PopupThemeColorSwatch
+                                  value={efx.strokeColor ?? '#000000'}
+                                  onChange={(v, m) => patchFx({ strokeColor: v }, m)}
+                                />
+                              </div>
+                              <div className={panelTextOpacityRowGridClass}>
+                                <span className="shrink-0 leading-tight">不透明度</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  value={efx.strokeOpacity ?? 1}
+                                  onChange={(ev) => {
+                                    const n = Number(ev.target.value)
+                                    if (!Number.isFinite(n)) return
+                                    patchFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
+                                  }}
+                                  className="w-full accent-indigo-600"
+                                />
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  value={efx.strokeOpacity ?? 1}
+                                  onChange={(ev) => {
+                                    const n = Number(ev.target.value)
+                                    if (!Number.isFinite(n)) return
+                                    patchFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
+                                  }}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        <div className={panelLabeledRowGridClass}>
+                          <label className="col-span-2 inline-flex min-w-0 cursor-pointer select-none items-center gap-2 text-xs text-slate-700">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 shrink-0 cursor-pointer accent-indigo-600"
+                              checked={efx.shadowEnabled === true}
+                              onChange={(ev) =>
+                                patchFx(
+                                  ev.target.checked
+                                    ? {
+                                        shadowEnabled: true,
+                                        shadowColor: efx.shadowColor ?? '#000000',
+                                        shadowOpacity: efx.shadowOpacity ?? 0.45,
+                                        shadowBlurPx: efx.shadowBlurPx ?? 4,
+                                        shadowSizePx: efx.shadowSizePx ?? 0,
+                                        shadowDistancePx: efx.shadowDistancePx ?? 6,
+                                        shadowAngleDeg: efx.shadowAngleDeg ?? 45,
+                                      }
+                                    : { shadowEnabled: false },
+                                )
+                              }
+                            />
+                            阴影
+                          </label>
+                        </div>
+                        {efx.shadowEnabled === true && (
+                          <div className="space-y-2">
+                            <div className="space-y-2 text-xs text-slate-600">
+                              <div className={panelColorRowGridClass}>
+                                <span className={panelSubLabelClass}>颜色</span>
+                                <PopupThemeColorSwatch
+                                  value={efx.shadowColor ?? '#000000'}
+                                  onChange={(v, m) => patchFx({ shadowColor: v }, m)}
+                                />
+                              </div>
+                              <div className={panelTextOpacityRowGridClass}>
+                                <span className="shrink-0 leading-tight">不透明度</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  value={efx.shadowOpacity ?? 0.45}
+                                  onChange={(ev) => {
+                                    const n = Number(ev.target.value)
+                                    if (!Number.isFinite(n)) return
+                                    patchFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
+                                  }}
+                                  className="w-full accent-indigo-600"
+                                />
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  value={efx.shadowOpacity ?? 0.45}
+                                  onChange={(ev) => {
+                                    const n = Number(ev.target.value)
+                                    if (!Number.isFinite(n)) return
+                                    patchFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
+                                  }}
+                                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                                />
+                              </div>
+                            </div>
+                            <SliderNumberRow
+                              label="模糊"
+                              min={0}
+                              max={POPUP_TEXT_SHADOW_BLUR_MAX}
+                              step={1}
+                              value={efx.shadowBlurPx ?? 4}
+                              onCommit={(n) =>
+                                patchFx({ shadowBlurPx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_BLUR_MAX, n)) })
+                              }
+                            />
+                            <SliderNumberRow
+                              label="扩散"
+                              min={0}
+                              max={POPUP_TEXT_SHADOW_SIZE_MAX}
+                              step={1}
+                              value={efx.shadowSizePx ?? 0}
+                              onCommit={(n) =>
+                                patchFx({ shadowSizePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_SIZE_MAX, n)) })
+                              }
+                            />
+                            <SliderNumberRow
+                              label="距离"
+                              min={0}
+                              max={POPUP_TEXT_SHADOW_DISTANCE_MAX}
+                              step={1}
+                              value={efx.shadowDistancePx ?? 6}
+                              onCommit={(n) =>
+                                patchFx({ shadowDistancePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_DISTANCE_MAX, n)) })
+                              }
+                            />
+                            <SliderNumberRow
+                              label="角度"
+                              min={-360}
+                              max={360}
+                              step={1}
+                              value={efx.shadowAngleDeg ?? 45}
+                              onCommit={(n) => patchFx({ shadowAngleDeg: Math.max(-360, Math.min(360, n)) })}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })()
               )}
             </div>
           )}
 
-          {showDateColumn && (dateOnlySelection || (showBothFontColumns && selectedElements.includes('date'))) && (
-            <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50/80 p-2">
-              <h5 className="text-xs font-semibold text-slate-700">日期 · 显示与格式</h5>
-              <p className="text-[10px] text-slate-500 leading-relaxed">
-                使用系统 Intl 格式化；Locale 留空则跟随运行环境。真弹窗为打开瞬间的日期；下方固定预览文案仅用于工坊截图稳定。
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {(
-                  [
-                    ['locale_zh', '中文常用'],
-                    ['locale_en', '英文 (US)'],
-                    ['iso', 'ISO 风格'],
-                    ['weekday_only', '仅星期'],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    title={
-                      id === 'iso'
-                        ? 'YYYY-MM-DD 数字格式；区域 en-CA，勾选「星期」时为英文星期名（非瑞典语等）'
-                        : undefined
-                    }
-                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
-                    onClick={() => mergedWrappedOnUpdateTheme(themeId, popupThemeDatePresetPatch(id as PopupThemeDatePresetId))}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-3 text-[11px] text-slate-700">
-                <label className="inline-flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={theme.dateShowYear !== false}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowYear: e.target.checked ? undefined : false })}
-                  />
-                  年
-                </label>
-                <label className="inline-flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={theme.dateShowMonth !== false}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowMonth: e.target.checked ? undefined : false })}
-                  />
-                  月
-                </label>
-                <label className="inline-flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={theme.dateShowDay !== false}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowDay: e.target.checked ? undefined : false })}
-                  />
-                  日
-                </label>
-                <label className="inline-flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={theme.dateShowWeekday !== false}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowWeekday: e.target.checked ? undefined : false })}
-                  />
-                  星期
-                </label>
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>年</span>
-                  <select
-                    value={theme.dateYearFormat ?? 'numeric'}
-                    onChange={(e) =>
-                      mergedWrappedOnUpdateTheme(themeId, {
-                        dateYearFormat: e.target.value === '2-digit' ? '2-digit' : 'numeric',
-                      })
-                    }
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  >
-                    <option value="numeric">4 位</option>
-                    <option value="2-digit">2 位</option>
-                  </select>
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>月</span>
-                  <select
-                    value={theme.dateMonthFormat ?? 'numeric'}
-                    onChange={(e) => {
-                      const v = e.target.value
-                      mergedWrappedOnUpdateTheme(themeId, {
-                        dateMonthFormat:
-                          v === 'long' || v === 'short' || v === '2-digit' || v === 'numeric' ? v : 'numeric',
-                      })
-                    }}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  >
-                    <option value="numeric">数字</option>
-                    <option value="2-digit">两位数字</option>
-                    <option value="short">简写</option>
-                    <option value="long">全称</option>
-                  </select>
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>日</span>
-                  <select
-                    value={theme.dateDayFormat ?? 'numeric'}
-                    onChange={(e) =>
-                      mergedWrappedOnUpdateTheme(themeId, {
-                        dateDayFormat: e.target.value === '2-digit' ? '2-digit' : 'numeric',
-                      })
-                    }
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  >
-                    <option value="numeric">数字</option>
-                    <option value="2-digit">两位数字</option>
-                  </select>
-                </label>
-                <label className="text-[11px] text-slate-600 space-y-0.5">
-                  <span>星期</span>
-                  <select
-                    value={theme.dateWeekdayFormat ?? 'short'}
-                    onChange={(e) =>
-                      mergedWrappedOnUpdateTheme(themeId, {
-                        dateWeekdayFormat: e.target.value === 'long' ? 'long' : 'short',
-                      })
-                    }
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                  >
-                    <option value="short">简写</option>
-                    <option value="long">全称</option>
-                  </select>
-                </label>
-              </div>
-              <label className="block text-[11px] text-slate-600 space-y-0.5">
-                <span>Locale（BCP 47，可选，如 zh-CN、en-US）</span>
-                <input
-                  type="text"
-                  value={theme.dateLocale ?? ''}
-                  placeholder="默认环境"
-                  onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateLocale: e.target.value.trim() || undefined })}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                />
-              </label>
-              <label className="block text-[11px] text-slate-600 space-y-0.5">
-                <span>预览固定日期（可选，非空则预览不再跟系统时钟）</span>
-                <input
-                  type="text"
-                  value={theme.previewDateText ?? ''}
-                  placeholder="留空则实时格式化"
-                  onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { previewDateText: e.target.value.trim() || undefined })}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                />
-              </label>
-            </div>
-          )}
+          {(showContentColumn || showTimeColumn || showDateColumn) && <PanelDivider />}
 
           {!isDecoTextSelected && (
             <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">排版</h5>
+              <PanelSectionTitle>排版</PanelSectionTitle>
             {selectedElements.length === 0 ? (
               decoLayer &&
               ((decoLayer.kind === 'text' && !(decoLayer as TextThemeLayer).bindsReminderBody) ||
@@ -1911,7 +2111,6 @@ function PopupThemeEditorPanelCore({
                 const curWm = bw
                   ? (((theme[bw.writingMode] as PopupTextWritingMode | undefined) ?? 'horizontal-tb') as PopupTextWritingMode)
                   : 'horizontal-tb'
-                const isVert = Boolean(bw && (curWm === 'vertical-rl' || curWm === 'vertical-lr'))
                 const curOri = bw ? ((theme[bw.textOrientation] as PopupTextOrientationMode | undefined) ?? 'mixed') : 'mixed'
                 const combineOn = bw ? theme[bw.combineUpright] === true : false
                 const combineOff = bw ? theme[bw.combineUpright] === false : false
@@ -1921,122 +2120,129 @@ function PopupThemeEditorPanelCore({
                   <div className="space-y-2">
                     {bw ? (
                       <>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                          <span className="text-[11px] text-slate-500 shrink-0">排向</span>
-                          <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                            <button
-                              type="button"
-                              title="横排（从左到右）"
-                              onClick={() =>
-                                mergedWrappedOnUpdateTheme(themeId, { [bw.writingMode]: 'horizontal-tb' } as Partial<PopupTheme>)
-                              }
-                              className={`rounded px-2 py-0.5 text-[11px] ${
-                                curWm === 'horizontal-tb'
-                                  ? 'bg-slate-800 text-white'
-                                  : 'text-slate-600 hover:bg-slate-100'
-                              }`}
-                            >
-                              横排
-                            </button>
-                            <button
-                              type="button"
-                              title="竖排"
-                              onClick={() => {
-                                if (curWm === 'horizontal-tb') {
-                                  mergedWrappedOnUpdateTheme(themeId, {
-                                    [bw.writingMode]: 'vertical-rl',
-                                  } as Partial<PopupTheme>)
+                        <div className={panelLabeledRowGridClass}>
+                          <span className="text-xs text-slate-600 shrink-0 leading-tight">排向</span>
+                          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+                            <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+                              <button
+                                type="button"
+                                title="横排（从左到右）"
+                                onClick={() =>
+                                  mergedWrappedOnUpdateTheme(themeId, { [bw.writingMode]: 'horizontal-tb' } as Partial<PopupTheme>)
                                 }
-                              }}
-                              className={`rounded px-2 py-0.5 text-[11px] ${
-                                curWm === 'vertical-rl' || curWm === 'vertical-lr'
-                                  ? 'bg-slate-800 text-white'
-                                  : 'text-slate-600 hover:bg-slate-100'
-                              }`}
-                            >
-                              竖排
-                            </button>
-                          </div>
-                          {curWm === 'vertical-rl' || curWm === 'vertical-lr' ? (
-                            <>
-                              <span className="text-[11px] text-slate-500 shrink-0">列序</span>
-                              <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
-                                <button
-                                  type="button"
-                                  title="列从左向右（vertical-lr）"
-                                  onClick={() =>
-                                    mergedWrappedOnUpdateTheme(themeId, {
-                                      [bw.writingMode]: 'vertical-lr',
-                                    } as Partial<PopupTheme>)
-                                  }
-                                  className={`rounded px-2 py-0.5 text-[11px] ${
-                                    curWm === 'vertical-lr'
-                                      ? 'bg-slate-800 text-white'
-                                      : 'text-slate-600 hover:bg-slate-100'
-                                  }`}
-                                >
-                                  左
-                                </button>
-                                <button
-                                  type="button"
-                                  title="列从右向左（vertical-rl）"
-                                  onClick={() =>
+                                className={`rounded px-2 py-0.5 text-[11px] ${
+                                  curWm === 'horizontal-tb'
+                                    ? 'bg-slate-800 text-white'
+                                    : 'text-slate-600 hover:bg-slate-100'
+                                }`}
+                              >
+                                横排
+                              </button>
+                              <button
+                                type="button"
+                                title="竖排"
+                                onClick={() => {
+                                  if (curWm === 'horizontal-tb') {
                                     mergedWrappedOnUpdateTheme(themeId, {
                                       [bw.writingMode]: 'vertical-rl',
                                     } as Partial<PopupTheme>)
                                   }
-                                  className={`rounded px-2 py-0.5 text-[11px] ${
-                                    curWm === 'vertical-rl'
-                                      ? 'bg-slate-800 text-white'
-                                      : 'text-slate-600 hover:bg-slate-100'
-                                  }`}
-                                >
-                                  右
-                                </button>
-                              </div>
-                            </>
-                          ) : null}
+                                }}
+                                className={`rounded px-2 py-0.5 text-[11px] ${
+                                  curWm === 'vertical-rl' || curWm === 'vertical-lr'
+                                    ? 'bg-slate-800 text-white'
+                                    : 'text-slate-600 hover:bg-slate-100'
+                                }`}
+                              >
+                                竖排
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          <label className="text-xs text-slate-600 space-y-1">
-                            <span title="竖排时控制拉丁字母等朝向">字符朝向</span>
-                            <select
-                              value={curOri}
-                              onChange={(e) =>
-                                mergedWrappedOnUpdateTheme(themeId, {
-                                  [bw.textOrientation]: e.target.value as PopupTextOrientationMode,
-                                } as Partial<PopupTheme>)
-                              }
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                            >
-                              <option value="mixed">混合（默认）</option>
-                              <option value="upright">直立</option>
-                              <option value="sideways">侧转</option>
-                            </select>
-                          </label>
-                          <label className="inline-flex items-center gap-2 text-xs text-slate-700 mt-5 sm:mt-6">
-                            <input
-                              type="checkbox"
-                              checked={combineChecked}
-                              onChange={(ev) =>
-                                mergedWrappedOnUpdateTheme(themeId, {
-                                  [bw.combineUpright]: ev.target.checked,
-                                } as Partial<PopupTheme>)
-                              }
-                            />
-                            <span title="将连续数字合并为直排块（竖排时更整齐）">直排内数字合并</span>
-                          </label>
-                        </div>
-                        {isVert ? (
-                          <p className="text-[10px] text-slate-500 leading-snug">
-                            竖排时：字间距主要沿列方向；行高主要控制列与列之间的间距。「两端对齐」在竖排内会按居中处理。
-                          </p>
+                        {isVerticalWritingMode(curWm) ? (
+                          <div className={panelLabeledRowGridClass}>
+                            <span className="text-xs text-slate-600 shrink-0 leading-tight">列序</span>
+                            <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
+                              <button
+                                type="button"
+                                title="列从左向右（vertical-lr）"
+                                onClick={() =>
+                                  mergedWrappedOnUpdateTheme(themeId, {
+                                    [bw.writingMode]: 'vertical-lr',
+                                  } as Partial<PopupTheme>)
+                                }
+                                className={`rounded px-2 py-0.5 text-[11px] ${
+                                  curWm === 'vertical-lr'
+                                    ? 'bg-slate-800 text-white'
+                                    : 'text-slate-600 hover:bg-slate-100'
+                                }`}
+                              >
+                                左
+                              </button>
+                              <button
+                                type="button"
+                                title="列从右向左（vertical-rl）"
+                                onClick={() =>
+                                  mergedWrappedOnUpdateTheme(themeId, {
+                                    [bw.writingMode]: 'vertical-rl',
+                                  } as Partial<PopupTheme>)
+                                }
+                                className={`rounded px-2 py-0.5 text-[11px] ${
+                                  curWm === 'vertical-rl'
+                                    ? 'bg-slate-800 text-white'
+                                    : 'text-slate-600 hover:bg-slate-100'
+                                }`}
+                              >
+                                右
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                        {isVerticalWritingMode(curWm) ? (
+                          <div className="space-y-2">
+                            <div className={panelLabeledRowGridClass}>
+                              <span
+                                className="text-xs text-slate-600 shrink-0 leading-tight"
+                                title="竖排时控制拉丁字母等朝向"
+                              >
+                                字符朝向
+                              </span>
+                              <select
+                                value={curOri}
+                                onChange={(e) =>
+                                  mergedWrappedOnUpdateTheme(themeId, {
+                                    [bw.textOrientation]: e.target.value as PopupTextOrientationMode,
+                                  } as Partial<PopupTheme>)
+                                }
+                                className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                              >
+                                <option value="mixed">混合（默认）</option>
+                                <option value="upright">直立</option>
+                                <option value="sideways">侧转</option>
+                              </select>
+                            </div>
+                            <div className={panelLabeledRowGridClass}>
+                              <span className="shrink-0" aria-hidden />
+                              <label className="inline-flex min-w-0 items-center gap-2 text-xs text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={combineChecked}
+                                  onChange={(ev) =>
+                                    mergedWrappedOnUpdateTheme(themeId, {
+                                      [bw.combineUpright]: ev.target.checked,
+                                    } as Partial<PopupTheme>)
+                                  }
+                                />
+                                <span title="将连续数字合并为直排块（竖排时更整齐）">直排内数字合并</span>
+                              </label>
+                            </div>
+                          </div>
                         ) : null}
                       </>
                     ) : null}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] text-slate-500 shrink-0">对齐</span>
-                      <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+                    <div className={panelLabeledRowGridClass}>
+                      <span className="text-xs text-slate-600 shrink-0 leading-tight">对齐</span>
+                      <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
                         {(['left', 'center', 'right', 'start', 'end', 'justify'] as const).map((v) => (
                           <button
                             key={v}
@@ -2070,9 +2276,9 @@ function PopupThemeEditorPanelCore({
                         ))}
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] text-slate-500 shrink-0">垂直</span>
-                      <div className="inline-flex rounded border border-slate-300 bg-white p-0.5">
+                    <div className={panelLabeledRowGridClass}>
+                      <span className="text-xs text-slate-600 shrink-0 leading-tight">垂直</span>
+                      <div className="inline-flex w-fit shrink-0 justify-self-start rounded border border-slate-300 bg-white p-0.5">
                         {(['top', 'middle', 'bottom'] as const).map((v) => (
                           <button
                             key={v}
@@ -2094,284 +2300,190 @@ function PopupThemeEditorPanelCore({
                         ))}
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      <label className="text-xs text-slate-600 space-y-1">
-                        <span>字间距（px，-2～20）</span>
-                        <input
-                          type="number"
-                          min={-2}
-                          max={20}
-                          step={0.5}
-                          value={lsVal ?? 0}
-                          onChange={(e) => {
-                            const n = Number(e.target.value)
-                            if (!Number.isFinite(n)) return
-                            mergedWrappedOnUpdateTheme(themeId, { [letterSpacing]: Math.max(-2, Math.min(20, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                        />
-                      </label>
-                      <label className="text-xs text-slate-600 space-y-1">
-                        <span>
-                          行高（
-                          {sel === 'countdown'
-                            ? '倒计时建议 1～1.4'
-                            : sel === 'time' || sel === 'date'
-                              ? '单行建议 1'
-                              : '建议 1.1～2'}
-                          )
-                        </span>
-                        <input
-                          type="number"
-                          min={0.8}
-                          max={3}
-                          step={0.05}
-                          value={lhVal}
-                          onChange={(e) => {
-                            const n = Number(e.target.value)
-                            if (!Number.isFinite(n)) return
-                            mergedWrappedOnUpdateTheme(themeId, { [lineHeight]: Math.max(0.8, Math.min(3, n)) })
-                          }}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                        />
-                      </label>
-                    </div>
+                    <SliderNumberRow
+                      label="字间距"
+                      min={-2}
+                      max={20}
+                      step={0.5}
+                      value={lsVal ?? 0}
+                      onCommit={(n) =>
+                        mergedWrappedOnUpdateTheme(themeId, { [letterSpacing]: Math.max(-2, Math.min(20, n)) })
+                      }
+                    />
+                    <SliderNumberRow
+                      label="行高"
+                      min={0.8}
+                      max={3}
+                      step={0.05}
+                      value={lhVal}
+                      onCommit={(n) =>
+                        mergedWrappedOnUpdateTheme(themeId, { [lineHeight]: Math.max(0.8, Math.min(3, n)) })
+                      }
+                    />
                   </div>
                 )
               })()
             )}
+              {showDateColumn && (dateOnlySelection || (showBothFontColumns && selectedElements.includes('date'))) && (
+                <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50/80 p-2">
+                  <PanelSectionTitle>日期 · 显示与格式</PanelSectionTitle>
+                  <p className="text-[10px] text-slate-500 leading-relaxed">
+                    使用系统 Intl 格式化；Locale 留空则跟随运行环境。真弹窗为打开瞬间的日期；下方固定预览文案仅用于工坊截图稳定。
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(
+                      [
+                        ['locale_zh', '中文常用'],
+                        ['locale_en', '英文 (US)'],
+                        ['iso', 'ISO 风格'],
+                        ['weekday_only', '仅星期'],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        title={
+                          id === 'iso'
+                            ? 'YYYY-MM-DD 数字格式；区域 en-CA，勾选「星期」时为英文星期名（非瑞典语等）'
+                            : undefined
+                        }
+                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
+                        onClick={() => mergedWrappedOnUpdateTheme(themeId, popupThemeDatePresetPatch(id as PopupThemeDatePresetId))}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-3 text-[11px] text-slate-700">
+                    <label className="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={theme.dateShowYear !== false}
+                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowYear: e.target.checked ? undefined : false })}
+                      />
+                      年
+                    </label>
+                    <label className="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={theme.dateShowMonth !== false}
+                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowMonth: e.target.checked ? undefined : false })}
+                      />
+                      月
+                    </label>
+                    <label className="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={theme.dateShowDay !== false}
+                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowDay: e.target.checked ? undefined : false })}
+                      />
+                      日
+                    </label>
+                    <label className="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={theme.dateShowWeekday !== false}
+                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateShowWeekday: e.target.checked ? undefined : false })}
+                      />
+                      星期
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <label className="text-[11px] text-slate-600 space-y-0.5">
+                      <span>年</span>
+                      <select
+                        value={theme.dateYearFormat ?? 'numeric'}
+                        onChange={(e) =>
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            dateYearFormat: e.target.value === '2-digit' ? '2-digit' : 'numeric',
+                          })
+                        }
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        <option value="numeric">4 位</option>
+                        <option value="2-digit">2 位</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] text-slate-600 space-y-0.5">
+                      <span>月</span>
+                      <select
+                        value={theme.dateMonthFormat ?? 'numeric'}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            dateMonthFormat:
+                              v === 'long' || v === 'short' || v === '2-digit' || v === 'numeric' ? v : 'numeric',
+                          })
+                        }}
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        <option value="numeric">数字</option>
+                        <option value="2-digit">两位数字</option>
+                        <option value="short">简写</option>
+                        <option value="long">全称</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] text-slate-600 space-y-0.5">
+                      <span>日</span>
+                      <select
+                        value={theme.dateDayFormat ?? 'numeric'}
+                        onChange={(e) =>
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            dateDayFormat: e.target.value === '2-digit' ? '2-digit' : 'numeric',
+                          })
+                        }
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        <option value="numeric">数字</option>
+                        <option value="2-digit">两位数字</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] text-slate-600 space-y-0.5">
+                      <span>星期</span>
+                      <select
+                        value={theme.dateWeekdayFormat ?? 'short'}
+                        onChange={(e) =>
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            dateWeekdayFormat: e.target.value === 'long' ? 'long' : 'short',
+                          })
+                        }
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      >
+                        <option value="short">简写</option>
+                        <option value="long">全称</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label className="block text-[11px] text-slate-600 space-y-0.5">
+                    <span>Locale（BCP 47，可选，如 zh-CN、en-US）</span>
+                    <input
+                      type="text"
+                      value={theme.dateLocale ?? ''}
+                      placeholder="默认环境"
+                      onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { dateLocale: e.target.value.trim() || undefined })}
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                    />
+                  </label>
+                  <label className="block text-[11px] text-slate-600 space-y-0.5">
+                    <span>预览固定日期（可选，非空则预览不再跟系统时钟）</span>
+                    <input
+                      type="text"
+                      value={theme.previewDateText ?? ''}
+                      placeholder="留空则实时格式化"
+                      onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { previewDateText: e.target.value.trim() || undefined })}
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                    />
+                  </label>
+                </div>
+              )}
           </div>
           )}
 
-          {selectedElements.length > 0 && (effectivePanelFilter === 'all' || effectivePanelFilter === 'text') && (
-            <div className="space-y-2">
-              <h5 className="text-xs font-semibold text-slate-700">效果</h5>
-              {(() => {
-                const sel = selectedElements[0]
-                const ek = layerEffectsKey(sel)
-                const e: PopupLayerTextEffects = theme[ek] ?? {}
-                const patchFx = (p: Partial<PopupLayerTextEffects>, meta?: PopupThemeEditUpdateMeta) =>
-                  mergedWrappedOnUpdateTheme(themeId, { [ek]: { ...e, ...p } } as Partial<PopupTheme>, meta)
-                return (
-                  <div className="space-y-2">
-                    <div className="space-y-1.5 rounded border border-white/80 bg-white/60 p-1.5">
-                      <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                        <input
-                          type="checkbox"
-                          checked={e.strokeEnabled === true}
-                          onChange={(ev) =>
-                            patchFx(
-                              ev.target.checked
-                                ? {
-                                    strokeEnabled: true,
-                                    strokeWidthPx: e.strokeWidthPx ?? 2,
-                                    strokeColor: e.strokeColor ?? '#000000',
-                                    strokeOpacity: e.strokeOpacity ?? 1,
-                                  }
-                                : { strokeEnabled: false },
-                            )
-                          }
-                        />
-                        描边
-                      </label>
-                      {e.strokeEnabled === true && (
-                        <div className="space-y-2">
-                          <label className="block text-[11px] text-slate-600 space-y-0.5">
-                            <span>宽度（px，上限 {POPUP_TEXT_STROKE_WIDTH_MAX}）</span>
-                            <input
-                              type="number"
-                              min={0.5}
-                              max={POPUP_TEXT_STROKE_WIDTH_MAX}
-                              step={0.5}
-                              value={e.strokeWidthPx ?? 2}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ strokeWidthPx: Math.max(0.5, Math.min(POPUP_TEXT_STROKE_WIDTH_MAX, n)) })
-                              }}
-                              className="w-full max-w-xs rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                          </label>
-                          <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-[11px] text-slate-600">
-                            <span>颜色</span>
-                            <div className="flex min-w-0 flex-wrap items-center gap-2">
-                              <PopupThemeColorSwatch
-                                value={e.strokeColor ?? '#000000'}
-                                onChange={(v, m) => patchFx({ strokeColor: v }, m)}
-                              />
-                              <span className="shrink-0 text-slate-500">不透明度</span>
-                            <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                value={e.strokeOpacity ?? 1}
-                                onChange={(ev) => {
-                                  const n = Number(ev.target.value)
-                                  if (!Number.isFinite(n)) return
-                                  patchFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
-                                }}
-                                className="min-w-[80px] flex-1 accent-indigo-600"
-                              />
-                            <input
-                              type="number"
-                              min={0}
-                              max={1}
-                              step={0.05}
-                              value={e.strokeOpacity ?? 1}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ strokeOpacity: Math.max(0, Math.min(1, n)) })
-                              }}
-                                className="w-[72px] shrink-0 rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <div className="space-y-1.5 rounded border border-white/80 bg-white/60 p-1.5">
-                      <label className="inline-flex items-center gap-2 text-xs text-slate-700">
-                        <input
-                          type="checkbox"
-                          checked={e.shadowEnabled === true}
-                          onChange={(ev) =>
-                            patchFx(
-                              ev.target.checked
-                                ? {
-                                    shadowEnabled: true,
-                                    shadowColor: e.shadowColor ?? '#000000',
-                                    shadowOpacity: e.shadowOpacity ?? 0.45,
-                                    shadowBlurPx: e.shadowBlurPx ?? 4,
-                                    shadowSizePx: e.shadowSizePx ?? 0,
-                                    shadowDistancePx: e.shadowDistancePx ?? 6,
-                                    shadowAngleDeg: e.shadowAngleDeg ?? 45,
-                                  }
-                                : { shadowEnabled: false },
-                            )
-                          }
-                        />
-                        阴影
-                      </label>
-                      {e.shadowEnabled === true && (
-                        <div className="space-y-2">
-                          <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-[11px] text-slate-600">
-                            <span>颜色</span>
-                            <div className="flex min-w-0 flex-wrap items-center gap-2">
-                              <PopupThemeColorSwatch
-                                value={e.shadowColor ?? '#000000'}
-                                onChange={(v, m) => patchFx({ shadowColor: v }, m)}
-                              />
-                              <span className="shrink-0 text-slate-500">不透明度</span>
-                            <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                value={e.shadowOpacity ?? 0.45}
-                                onChange={(ev) => {
-                                  const n = Number(ev.target.value)
-                                  if (!Number.isFinite(n)) return
-                                  patchFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
-                                }}
-                                className="min-w-[80px] flex-1 accent-indigo-600"
-                              />
-                            <input
-                              type="number"
-                              min={0}
-                              max={1}
-                              step={0.05}
-                              value={e.shadowOpacity ?? 0.45}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ shadowOpacity: Math.max(0, Math.min(1, n)) })
-                              }}
-                                className="w-[72px] shrink-0 rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                          <label className="text-[11px] text-slate-600 space-y-0.5">
-                            <span>模糊（px，上限 {POPUP_TEXT_SHADOW_BLUR_MAX}）</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={POPUP_TEXT_SHADOW_BLUR_MAX}
-                              step={1}
-                              value={e.shadowBlurPx ?? 4}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ shadowBlurPx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_BLUR_MAX, n)) })
-                              }}
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                          </label>
-                          <label className="text-[11px] text-slate-600 space-y-0.5">
-                            <span>扩散（px，上限 {POPUP_TEXT_SHADOW_SIZE_MAX}）</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={POPUP_TEXT_SHADOW_SIZE_MAX}
-                              step={1}
-                              value={e.shadowSizePx ?? 0}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ shadowSizePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_SIZE_MAX, n)) })
-                              }}
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                          </label>
-                          <label className="text-[11px] text-slate-600 space-y-0.5">
-                            <span>距离（px，上限 {POPUP_TEXT_SHADOW_DISTANCE_MAX}）</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={POPUP_TEXT_SHADOW_DISTANCE_MAX}
-                              step={1}
-                              value={e.shadowDistancePx ?? 6}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ shadowDistancePx: Math.max(0, Math.min(POPUP_TEXT_SHADOW_DISTANCE_MAX, n)) })
-                              }}
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                          </label>
-                          <label className="text-[11px] text-slate-600 space-y-0.5">
-                            <span>角度（°，0=右，90=下）</span>
-                            <input
-                              type="number"
-                              min={-360}
-                              max={360}
-                              step={1}
-                              value={e.shadowAngleDeg ?? 45}
-                              onChange={(ev) => {
-                                const n = Number(ev.target.value)
-                                if (!Number.isFinite(n)) return
-                                patchFx({ shadowAngleDeg: Math.max(-360, Math.min(360, n)) })
-                              }}
-                              className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                            />
-                          </label>
-                        </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )
-              })()}
-            </div>
-          )}
+          <PanelDivider />
 
           {!isDecoTextSelected && (
-          <div className="border-t border-slate-100 pt-2 mt-1 space-y-2">
-            <div className="flex items-center justify-between">
-              <h5 className="text-xs font-semibold text-slate-700">变换</h5>
-            </div>
+          <div className="space-y-2">
+            <PanelSectionTitle>变换</PanelSectionTitle>
             {(() => {
               const sel = selectedElements[0]
               if (!sel) return <p className="text-[11px] text-slate-400">点击预览区文字或上方按钮选中元素</p>
@@ -2401,56 +2513,38 @@ function PopupThemeEditorPanelCore({
               const update = (patch: Partial<TextTransform>) => mergedWrappedOnUpdateTheme(themeId, { [tField]: { ...t, ...patch } })
               return (
                 <div className="space-y-2">
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                    <label className="text-[11px] text-slate-600 space-y-0.5">
-                      <span>X 位置 (%)</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.5}
-                        value={+t.x.toFixed(1)}
-                        onChange={(e) => update({ x: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-[11px] text-slate-600 space-y-0.5">
-                      <span>Y 位置 (%)</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.5}
-                        value={+t.y.toFixed(1)}
-                        onChange={(e) => update({ y: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-[11px] text-slate-600 space-y-0.5">
-                      <span>旋转 (°)</span>
-                      <input
-                        type="number"
-                        min={-360}
-                        max={360}
-                        step={1}
-                        value={+t.rotation.toFixed(1)}
-                        onChange={(e) => update({ rotation: Math.max(-360, Math.min(360, Number(e.target.value) || 0)) })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-[11px] text-slate-600 space-y-0.5">
-                      <span>缩放</span>
-                      <input
-                        type="number"
-                        min={0.1}
-                        max={5}
-                        step={0.05}
-                        value={+t.scale.toFixed(2)}
-                        onChange={(e) => update({ scale: Math.max(0.1, Math.min(5, Number(e.target.value) || 1)) })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs"
-                      />
-                    </label>
-                  </div>
+                  <SliderNumberRow
+                    label="X位置"
+                    min={0}
+                    max={100}
+                    step={0.5}
+                    value={t.x}
+                    onCommit={(n) => update({ x: n })}
+                  />
+                  <SliderNumberRow
+                    label="Y位置"
+                    min={0}
+                    max={100}
+                    step={0.5}
+                    value={t.y}
+                    onCommit={(n) => update({ y: n })}
+                  />
+                  <SliderNumberRow
+                    label="旋转"
+                    min={-360}
+                    max={360}
+                    step={1}
+                    value={t.rotation}
+                    onCommit={(n) => update({ rotation: n })}
+                  />
+                  <SliderNumberRow
+                    label="缩放"
+                    min={0.1}
+                    max={5}
+                    step={0.05}
+                    value={t.scale}
+                    onCommit={(n) => update({ scale: n })}
+                  />
                   <button
                     type="button"
                     onClick={() => {
@@ -2476,7 +2570,7 @@ function PopupThemeEditorPanelCore({
 
       {(effectivePanelFilter === 'all' || effectivePanelFilter === 'overlay') && (
         <div className="space-y-2">
-          <h4 className="text-xs font-semibold text-slate-700">遮罩</h4>
+          <PanelBlockTitle>遮罩</PanelBlockTitle>
           {(() => {
             const overlayMode = theme.overlayMode === 'gradient' ? 'gradient' : 'solid'
             const overlayOpacity = Math.max(0, Math.min(1, theme.overlayOpacity ?? 0.45))
@@ -2523,28 +2617,29 @@ function PopupThemeEditorPanelCore({
               />
               启用遮罩
             </label>
-          <label className="block space-y-1 text-xs text-slate-600">
-            <span>模式</span>
+          <div className={panelLabeledRowGridClass}>
+            <span className={panelSubLabelClass}>模式</span>
             <select
               value={overlayMode}
               onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { overlayMode: e.target.value === 'gradient' ? 'gradient' : 'solid' })}
-              disabled={disabled}
-              className="w-full rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+              className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
             >
               <option value="solid">纯色</option>
               <option value="gradient">渐变</option>
             </select>
-          </label>
+          </div>
           {overlayMode === 'solid' ? (
-          <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-xs text-slate-600">
-            <span>颜色</span>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="space-y-2 text-xs text-slate-600">
+            <div className={panelColorRowGridClass}>
+              <span className={panelSubLabelClass}>颜色</span>
               <PopupThemeColorSwatch
                 value={theme.overlayColor}
                 onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { overlayColor: v }, m)}
                 disabled={disabled}
               />
-              <span className="shrink-0 text-slate-500">透明度</span>
+            </div>
+            <div className={panelTextOpacityRowGridClass}>
+              <span className="shrink-0 leading-tight">不透明度</span>
               <input
                 type="range"
                 min={0}
@@ -2557,7 +2652,7 @@ function PopupThemeEditorPanelCore({
                   mergedWrappedOnUpdateTheme(themeId, { overlayOpacity: Math.max(0, Math.min(1, n)) })
                 }}
                 disabled={disabled}
-                className="min-w-[80px] flex-1 accent-indigo-600 disabled:opacity-50"
+                className="w-full accent-indigo-600 disabled:opacity-50"
               />
               <input
                 type="number"
@@ -2571,22 +2666,22 @@ function PopupThemeEditorPanelCore({
                   mergedWrappedOnUpdateTheme(themeId, { overlayOpacity: Math.max(0, Math.min(1, n)) })
                 }}
                 disabled={disabled}
-                className="w-[72px] shrink-0 rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+                className="w-full rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
               />
             </div>
           </div>
           ) : (
             <>
-              <div className="grid grid-cols-[60px_minmax(0,1fr)] items-center gap-2 text-xs text-slate-600">
-                <span>颜色</span>
+              <div className={panelColorRowGridClass}>
+                <span className={panelSubLabelClass}>颜色</span>
                 <PopupThemeColorSwatch
-                value={theme.overlayColor}
+                  value={theme.overlayColor}
                   onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { overlayColor: v }, m)}
                   disabled={disabled}
                 />
               </div>
-              <label className="block space-y-1 text-xs text-slate-600">
-                <span>方向</span>
+              <div className={panelLabeledRowGridClass}>
+                <span className={panelSubLabelClass}>方向</span>
                 <select
                   value={gradientDirectionSelect}
                   onChange={(e) => {
@@ -2601,8 +2696,7 @@ function PopupThemeEditorPanelCore({
                       overlayGradientAngleDeg: nextAngle,
                     })
                   }}
-                  disabled={disabled}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+                  className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
                 >
                   <option value="leftToRight">左 → 右</option>
                   <option value="rightToLeft">右 → 左</option>
@@ -2614,7 +2708,7 @@ function PopupThemeEditorPanelCore({
                   <option value="bottomRightToTopLeft">右下 → 左上</option>
                   <option value="custom">自定义角度</option>
                 </select>
-            </label>
+              </div>
               <div className="grid grid-cols-[60px_minmax(0,1fr)_72px] items-center gap-2 text-xs text-slate-600">
                 <span>角度</span>
                 <div className="flex items-center gap-3">
@@ -2654,7 +2748,16 @@ function PopupThemeEditorPanelCore({
                     <svg viewBox="0 0 48 48" className="h-full w-full" aria-hidden>
                       <circle cx="24" cy="24" r="18" fill="#fff" stroke="#cbd5e1" strokeWidth="1.5" />
                       <circle cx="24" cy="24" r="1.2" fill="#94a3b8" />
-                      <circle cx={handleX} cy={handleY} r="3.2" fill="#ef4444" />
+                      <line
+                        x1={24}
+                        y1={24}
+                        x2={handleX}
+                        y2={handleY}
+                        stroke="#334155"
+                        strokeWidth="1.25"
+                        strokeLinecap="round"
+                      />
+                      <circle cx={handleX} cy={handleY} r="3.2" fill="#1e293b" />
                     </svg>
                   </div>
                   <input
@@ -2795,125 +2898,115 @@ function PopupThemeEditorPanelCore({
 
       {(effectivePanelFilter === 'all' || effectivePanelFilter === 'background') && (
         <div className="space-y-2">
-          <h4 className="text-xs font-semibold text-slate-700">背景</h4>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            <label className="text-xs text-slate-600 space-y-1">
-              <span>背景类型</span>
-              <select
-                value={theme.backgroundType}
-                onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { backgroundType: e.target.value as PopupTheme['backgroundType'] })}
-                className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-              >
-                <option value="solid">纯色</option>
-                <option value="image">图片</option>
-              </select>
-            </label>
-            {theme.backgroundType === 'solid' && (
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                <span className="shrink-0">背景色</span>
-                <PopupThemeColorSwatch
-                  value={theme.backgroundColor}
-                  onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { backgroundColor: v }, m)}
-                />
-              </div>
-            )}
+          <PanelBlockTitle>背景</PanelBlockTitle>
+          <div className={panelLabeledRowGridClass}>
+            <span className={panelSubLabelClass}>背景类型</span>
+            <select
+              value={theme.backgroundType}
+              onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { backgroundType: e.target.value as PopupTheme['backgroundType'] })}
+              className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+            >
+              <option value="solid">纯色</option>
+              <option value="image">图片</option>
+            </select>
           </div>
+          {theme.backgroundType === 'solid' && (
+            <div className={panelColorRowGridClass}>
+              <span className={panelSubLabelClass}>背景色</span>
+              <PopupThemeColorSwatch
+                value={theme.backgroundColor}
+                onChange={(v, m) => mergedWrappedOnUpdateTheme(themeId, { backgroundColor: v }, m)}
+              />
+            </div>
+          )}
 
           {theme.backgroundType === 'image' && (
             <div className="space-y-2">
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {onPickImageFile && (
-                  <button
-                    type="button"
-                    onClick={() => void onPickImageFile()}
-                    className="rounded border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"
-                  >
-                    选择单个图片
-                  </button>
-                )}
-                {onPickImageFolder && (
-                  <button
-                    type="button"
-                    onClick={() => void onPickImageFolder()}
-                    className="rounded border border-slate-300 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50"
-                  >
-                    选择图片文件夹（轮播）
-                  </button>
-                )}
+              <div className={panelLabeledRowGridClass}>
+                <span className={panelSubLabelClass}>图片来源</span>
+                <select
+                  value={theme.imageSourceType ?? 'single'}
+                  onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { imageSourceType: e.target.value as 'single' | 'folder' })}
+                  className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                >
+                  <option value="single">单图</option>
+                  <option value="folder">文件夹</option>
+                </select>
               </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                <label className="text-xs text-slate-600 space-y-1">
-                  <span>图片来源</span>
-                  <select
-                    value={theme.imageSourceType ?? 'single'}
-                    onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { imageSourceType: e.target.value as 'single' | 'folder' })}
-                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                  >
-                    <option value="single">单图</option>
-                    <option value="folder">文件夹</option>
-                  </select>
-                </label>
-                {(theme.imageSourceType ?? 'single') === 'folder' && (
-                  <>
-                    <label className="text-xs text-slate-600 space-y-1">
-                      <span>轮播模式</span>
-                      <select
-                        value={theme.imageFolderPlayMode ?? 'sequence'}
-                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { imageFolderPlayMode: e.target.value as 'sequence' | 'random' })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                      >
-                        <option value="sequence">顺序</option>
-                        <option value="random">随机</option>
-                      </select>
-                    </label>
-                    <label className="text-xs text-slate-600 space-y-1">
-                      <span>切换间隔（秒）</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={3600}
-                        value={theme.imageFolderIntervalSec ?? 30}
-                        onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { imageFolderIntervalSec: Math.max(1, Math.min(3600, Number(e.target.value) || 1)) })}
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                      />
-                    </label>
-                    <label className="text-xs text-slate-600 space-y-1">
-                      <span>交叠过渡（秒）</span>
-                      <input
-                        type="number"
-                        min={0.5}
-                        max={POPUP_FOLDER_CROSSFADE_MAX_SEC}
-                        step={0.5}
-                        value={theme.imageFolderCrossfadeSec ?? 2}
-                        onChange={(e) =>
-                          mergedWrappedOnUpdateTheme(themeId, {
-                            imageFolderCrossfadeSec: Math.max(
-                              0.5,
-                              Math.min(POPUP_FOLDER_CROSSFADE_MAX_SEC, Number(e.target.value) || 2),
-                            ),
-                          })
-                        }
-                        className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                      />
-                    </label>
-                  </>
-                )}
+              <div className={panelLabeledRowGridClass}>
+                <span className={panelSubLabelClass}>选择文件</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  {onPickImageFile && (
+                    <button
+                      type="button"
+                      onClick={() => void onPickImageFile()}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                    >
+                      单个图片
+                    </button>
+                  )}
+                  {onPickImageFolder && (
+                    <button
+                      type="button"
+                      onClick={() => void onPickImageFolder()}
+                      className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                    >
+                      文件夹（轮播）
+                    </button>
+                  )}
+                </div>
               </div>
-              <p className="text-xs text-slate-500">
-                {(theme.imageSourceType ?? 'single') === 'folder'
-                  ? `文件夹：${theme.imageFolderPath ?? '未选择'}（共 ${theme.imageFolderFiles?.length ?? 0} 张）`
-                  : `当前图片：${theme.imagePath ?? '未选择'}`}
-              </p>
-              <label className="block text-xs text-slate-600 space-y-1">
-                <span>手动路径（可选）</span>
+              <div className={panelLabeledRowGridClass}>
+                <span className={panelSubLabelClass} title="可选">
+                  文件路径
+                </span>
                 <input
                   type="text"
-                  value={theme.imagePath ?? ''}
-                  onChange={(e) => mergedWrappedOnUpdateTheme(themeId, { imagePath: e.target.value, imageSourceType: 'single' })}
-                  className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-                  placeholder="例如：C:\\images\\wallpaper.jpg"
+                  value={
+                    (theme.imageSourceType ?? 'single') === 'folder'
+                      ? (theme.imageFolderPath ?? '')
+                      : (theme.imagePath ?? '')
+                  }
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if ((theme.imageSourceType ?? 'single') === 'folder') {
+                      mergedWrappedOnUpdateTheme(themeId, { imageFolderPath: v, imageSourceType: 'folder' })
+                    } else {
+                      mergedWrappedOnUpdateTheme(themeId, { imagePath: v, imageSourceType: 'single' })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    if ((theme.imageSourceType ?? 'single') !== 'folder') return
+                    const raw = e.currentTarget.value.trim()
+                    void (async () => {
+                      const api = window.electronAPI
+                      if (!raw) {
+                        mergedWrappedOnUpdateTheme(themeId, { imageFolderFiles: [] })
+                        return
+                      }
+                      if (!api?.listPopupImageFolderFiles) {
+                        return
+                      }
+                      const r = await api.listPopupImageFolderFiles(raw)
+                      if (!r.success) {
+                        mergedWrappedOnUpdateTheme(themeId, { imageFolderFiles: [] })
+                        return
+                      }
+                      mergedWrappedOnUpdateTheme(themeId, {
+                        imageFolderPath: raw,
+                        imageFolderFiles: r.files,
+                        imageSourceType: 'folder',
+                      })
+                    })()
+                  }}
+                  className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                  placeholder={
+                    (theme.imageSourceType ?? 'single') === 'folder'
+                      ? '例如：E:\\wallpaper\\英雄联盟\\'
+                      : '例如：C:\\images\\wallpaper.jpg'
+                  }
                 />
-              </label>
+              </div>
               {(() => {
                 const bRaw = Math.round(Number(theme.backgroundImageBlurPx))
                 const bgBlur = Number.isFinite(bRaw)
@@ -2924,8 +3017,8 @@ function PopupThemeEditorPanelCore({
                     backgroundImageBlurPx: Math.max(0, Math.min(POPUP_BACKGROUND_IMAGE_BLUR_MAX_PX, Math.round(n))),
                   })
                 return (
-                  <div className="grid grid-cols-[60px_minmax(0,1fr)_72px] items-center gap-2 text-xs text-slate-600">
-                    <span>模糊</span>
+                  <div className={panelTextOpacityRowGridClass}>
+                    <span className={panelSubLabelClass}>模糊</span>
                     <input
                       type="range"
                       min={0}
@@ -2950,11 +3043,102 @@ function PopupThemeEditorPanelCore({
                         if (!Number.isFinite(n)) return
                         setBlur(n)
                       }}
-                      className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                      className="w-full rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
                     />
                   </div>
                 )
               })()}
+              {(theme.imageSourceType ?? 'single') === 'folder' && (
+                <>
+                  <div className={panelLabeledRowGridClass}>
+                    <span className={panelSubLabelClass}>轮播模式</span>
+                    <select
+                      value={theme.imageFolderPlayMode ?? 'sequence'}
+                      onChange={(e) =>
+                        mergedWrappedOnUpdateTheme(themeId, { imageFolderPlayMode: e.target.value as 'sequence' | 'random' })
+                      }
+                      className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                    >
+                      <option value="sequence">顺序</option>
+                      <option value="random">随机</option>
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-[60px_minmax(0,1fr)_96px] items-center gap-2">
+                    <span className={panelSubLabelClass}>切换间隔</span>
+                    <input
+                      type="range"
+                      min={1}
+                      max={3600}
+                      step={1}
+                      value={Math.max(1, Math.min(3600, Math.floor(theme.imageFolderIntervalSec ?? 30)))}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        mergedWrappedOnUpdateTheme(themeId, {
+                          imageFolderIntervalSec: Math.max(1, Math.min(3600, Math.floor(n))),
+                        })
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <div className="flex min-w-0 items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={3600}
+                        step={1}
+                        value={theme.imageFolderIntervalSec ?? 30}
+                        onChange={(e) =>
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            imageFolderIntervalSec: Math.max(1, Math.min(3600, Number(e.target.value) || 1)),
+                          })
+                        }
+                        className="min-w-0 w-full rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                      />
+                      <span className="shrink-0 text-xs text-slate-600">秒</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-[60px_minmax(0,1fr)_96px] items-center gap-2">
+                    <span className={panelSubLabelClass}>交叠过渡</span>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={POPUP_FOLDER_CROSSFADE_MAX_SEC}
+                      step={0.5}
+                      value={Math.max(
+                        0.5,
+                        Math.min(POPUP_FOLDER_CROSSFADE_MAX_SEC, Number(theme.imageFolderCrossfadeSec ?? 2) || 2),
+                      )}
+                      onChange={(e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return
+                        mergedWrappedOnUpdateTheme(themeId, {
+                          imageFolderCrossfadeSec: Math.max(0.5, Math.min(POPUP_FOLDER_CROSSFADE_MAX_SEC, n)),
+                        })
+                      }}
+                      className="w-full accent-indigo-600"
+                    />
+                    <div className="flex min-w-0 items-center gap-1">
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={POPUP_FOLDER_CROSSFADE_MAX_SEC}
+                        step={0.5}
+                        value={theme.imageFolderCrossfadeSec ?? 2}
+                        onChange={(e) =>
+                          mergedWrappedOnUpdateTheme(themeId, {
+                            imageFolderCrossfadeSec: Math.max(
+                              0.5,
+                              Math.min(POPUP_FOLDER_CROSSFADE_MAX_SEC, Number(e.target.value) || 2),
+                            ),
+                          })
+                        }
+                        className="min-w-0 w-full rounded border border-slate-300 px-2 py-1 text-xs text-slate-700"
+                      />
+                      <span className="shrink-0 text-xs text-slate-600">秒</span>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>

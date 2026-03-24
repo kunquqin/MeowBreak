@@ -12,6 +12,7 @@ import type {
   TextTransform,
 } from './settings'
 import { MAIN_REST_LAYOUT_DEFAULTS } from './settings'
+import { clampUnitOpacity } from './popupTextEffects'
 import { normalizePopupTextOrientationMode, normalizePopupTextWritingMode } from './popupVerticalText'
 
 function sanitizeLayerTextEffects(raw: unknown): PopupLayerTextEffects | undefined {
@@ -152,10 +153,14 @@ function defaultImageTransform(): TextTransform {
 
 function bindingBodyTextFromTheme(theme: PopupTheme): Omit<TextThemeLayer, 'id' | 'kind' | 'visible'> {
   const te = theme.contentTextEffects ? sanitizeLayerTextEffects(theme.contentTextEffects) : undefined
+  const cOp = theme.contentTextOpacity
+  const colorOpacityLayer =
+    cOp !== undefined && Number.isFinite(Number(cOp)) && clampUnitOpacity(cOp) < 1 ? clampUnitOpacity(cOp) : undefined
   return {
     bindsReminderBody: true,
     text: theme.previewContentText?.trim() ?? '',
     color: theme.contentColor || '#ffffff',
+    ...(colorOpacityLayer !== undefined ? { colorOpacity: colorOpacityLayer } : {}),
     fontSize: Math.max(
       1,
       Math.min(
@@ -297,6 +302,9 @@ function sanitizeLayer(raw: unknown, theme: PopupTheme): PopupThemeLayer | null 
     const fontWeight = Number.isFinite(fw)
       ? Math.max(100, Math.min(900, Math.round(fw / 100) * 100))
       : baseBody?.fontWeight
+    const coRaw = Number(o.colorOpacity !== undefined ? o.colorOpacity : baseBody?.colorOpacity)
+    const colorOpacity =
+      Number.isFinite(coRaw) && coRaw < 1 ? Math.max(0, Math.min(1, coRaw)) : undefined
     const writingMode = normalizePopupTextWritingMode(o.writingMode)
     const textOrientation = normalizePopupTextOrientationMode(o.textOrientation)
     const combineUprightDigits =
@@ -318,6 +326,7 @@ function sanitizeLayer(raw: unknown, theme: PopupTheme): PopupThemeLayer | null 
       ...(fontFamilyPreset ? { fontFamilyPreset } : {}),
       ...(fontFamilySystem ? { fontFamilySystem } : {}),
       ...(te ? { textEffects: te } : {}),
+      ...(colorOpacity !== undefined ? { colorOpacity } : {}),
       ...(o.fontItalic === true ? { fontItalic: true as const } : {}),
       ...(o.textUnderline === true ? { textUnderline: true as const } : {}),
       ...(writingMode ? { writingMode } : {}),
@@ -470,6 +479,10 @@ export function mergeContentThemePatchIntoBindingTextLayer(theme: PopupTheme, pa
   if (patch.contentTextEffects !== undefined) {
     const te = patch.contentTextEffects ? sanitizeLayerTextEffects(patch.contentTextEffects) : undefined
     u.textEffects = te
+  }
+  if (patch.contentTextOpacity !== undefined) {
+    const op = clampUnitOpacity(patch.contentTextOpacity)
+    u.colorOpacity = op < 1 ? op : undefined
   }
   if (Object.keys(u).length === 0) return undefined
   const nl = [...layers]
@@ -742,6 +755,8 @@ export function themePatchFromBindingTextLayer(layer: TextThemeLayer): Partial<P
   return {
     previewContentText: layer.text,
     contentColor: layer.color,
+    contentTextOpacity:
+      layer.colorOpacity !== undefined && layer.colorOpacity < 1 ? clampUnitOpacity(layer.colorOpacity) : undefined,
     contentFontSize: layer.fontSize,
     contentFontWeight: layer.fontWeight,
     contentTextAlign: layer.textAlign,

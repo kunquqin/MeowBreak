@@ -33,8 +33,10 @@ import type { ImageThemeLayer } from '../../../shared/popupThemeLayers'
 export function collectPopupThemeImagePathsForPreview(theme: PopupTheme): string[] {
   const s = new Set<string>()
   if (theme.backgroundType === 'image') {
-    const p = (theme.imagePath ?? '').trim()
-    if (p) s.add(p)
+    if (theme.imageSourceType !== 'folder') {
+      const p = (theme.imagePath ?? '').trim()
+      if (p) s.add(p)
+    }
     for (const f of theme.imageFolderFiles ?? []) {
       if (typeof f === 'string' && f.trim()) s.add(f.trim())
     }

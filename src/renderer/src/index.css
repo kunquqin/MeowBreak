@@ -19,3 +19,24 @@ html {
   transition: none !important;
 }
 
+/* 去掉 Chromium / WebKit 在原生 color 控件外的灰边与内边距（仅主题拾色块） */
+[data-wb-color-swatch] .wb-color-swatch-input {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  outline: none;
+  background: transparent;
+}
+[data-wb-color-swatch] .wb-color-swatch-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+  border: none;
+}
+[data-wb-color-swatch] .wb-color-swatch-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 0.25rem;
+}
+[data-wb-color-swatch] .wb-color-swatch-input::-moz-color-swatch {
+  border: none;
+  border-radius: 0.25rem;
+}
+

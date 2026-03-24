@@ -44,7 +44,7 @@ export type PresetTextFieldProps = {
   multilineMain?: boolean
 }
 
-/** 提醒内容 / 休息弹窗文案：主输入 + 同宽预设下拉（列表子项与 AddSubReminderModal 共用） */
+/** 主输入 + 同宽预设下拉（子项标题、大类标题等） */
 export function PresetTextField({
   value,
   onChange,

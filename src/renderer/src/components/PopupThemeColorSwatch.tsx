@@ -18,7 +18,7 @@ export type PopupThemeColorSwatchProps = {
   /** 第二参：`skipHistory: true` 时不压撤销栈（拾色器连续 input）；首帧为 false 保证一次可撤销 */
   onChange: (hex: string, meta?: PopupThemeEditUpdateMeta) => void
   disabled?: boolean
-  /** 追加 class；默认高度与面板内 `px-2 py-1 text-sm` 输入框一致（h-9），宽度紧凑 */
+  /** 追加 class；默认较矮（h-7），宽度略宽于高度 */
   className?: string
   style?: CSSProperties
 }
@@ -104,7 +104,8 @@ export function PopupThemeColorSwatch({
 
   return (
     <div
-      className={`relative h-9 w-12 max-w-full shrink-0 overflow-hidden rounded border border-slate-300 bg-white ${disabled ? 'pointer-events-none opacity-50' : ''} ${className}`.trim()}
+      data-wb-color-swatch
+      className={`relative box-border h-7 w-11 max-w-full shrink-0 overflow-hidden rounded border border-slate-300 ${disabled ? 'pointer-events-none opacity-50' : ''} ${className}`.trim()}
       style={style}
     >
       <input
@@ -113,7 +114,7 @@ export function PopupThemeColorSwatch({
         onChange={handleChange}
         onBlur={endSession}
         disabled={disabled}
-        className="absolute inset-0 box-border h-full w-full cursor-pointer border-0 p-0 [color-scheme:light]"
+        className="wb-color-swatch-input absolute inset-0 box-border h-full w-full cursor-pointer p-0 [color-scheme:light]"
         aria-label="选择颜色"
       />
     </div>

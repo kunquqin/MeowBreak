@@ -1,5 +1,5 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, Notification, screen, type OpenDialogOptions } from 'electron'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { createTray, destroyTray, setLiveWallpaperTrayHooks } from './tray'
@@ -381,6 +381,29 @@ ipcMain.handle('stopDesktopLiveWallpaper', () => {
 })
 ipcMain.handle('isDesktopLiveWallpaperActive', () => isDesktopLiveWallpaperActive())
 ipcMain.handle('getDesktopLiveWallpaperState', () => getDesktopLiveWallpaperState())
+
+type ListPopupFolderFilesResult =
+  | { success: true; files: string[] }
+  | { success: false; error: string }
+
+function listPopupImageFilesInFolder(folderPathRaw: string): ListPopupFolderFilesResult {
+  const folderPath = folderPathRaw.trim()
+  if (!folderPath) return { success: false, error: '路径为空' }
+  try {
+    if (!existsSync(folderPath)) return { success: false, error: '路径不存在' }
+    const st = statSync(folderPath)
+    if (!st.isDirectory()) return { success: false, error: '不是文件夹' }
+    const files = readdirSync(folderPath)
+      .filter((name) => /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(name))
+      .map((name) => join(folderPath, name))
+    if (files.length === 0) return { success: false, error: '该文件夹内没有可用图片' }
+    return { success: true, files }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { success: false, error: message }
+  }
+}
+
 ipcMain.handle('pickPopupImageFolder', async () => {
   const win = mainWindow ?? BrowserWindow.getFocusedWindow()
   const options: OpenDialogOptions = {
@@ -390,14 +413,12 @@ ipcMain.handle('pickPopupImageFolder', async () => {
   const res = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
   if (res.canceled || res.filePaths.length === 0) return { success: false as const, error: '已取消' }
   const folderPath = res.filePaths[0]
-  try {
-    const files = readdirSync(folderPath)
-      .filter((name) => /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(name))
-      .map((name) => join(folderPath, name))
-    if (files.length === 0) return { success: false as const, error: '该文件夹内没有可用图片' }
-    return { success: true as const, folderPath, files }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return { success: false as const, error: message }
-  }
+  const listed = listPopupImageFilesInFolder(folderPath)
+  if (!listed.success) return { success: false as const, error: listed.error }
+  return { success: true as const, folderPath, files: listed.files }
+})
+
+ipcMain.handle('listPopupImageFolderFiles', (_e, folderPath: unknown) => {
+  if (typeof folderPath !== 'string') return { success: false as const, error: '路径无效' }
+  return listPopupImageFilesInFolder(folderPath)
 })

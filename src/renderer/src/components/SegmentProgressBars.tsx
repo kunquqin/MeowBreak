@@ -79,17 +79,22 @@ type SplitSegmentBarProps = {
   elapsedRatio: number
   fillClass: string
   showLabel?: boolean
-  /** hover 时整条显示的背景色（用于结束态灰条 hover 恢复颜色） */
+  /** hover 时以不透明色替换可见彩区（与运行态绿/蓝一致）；整段灰（结束/关闭）时改在左侧灰条上预览 */
   hoverFillClass?: string
 }
 
 /** 列表子项：多段拆分，带动画比例 */
 export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, showLabel = true, hoverFillClass }: SplitSegmentBarProps) {
   const ratio = Math.max(0, Math.min(1, elapsedRatio))
+  /** 右侧彩条宽度为 0（结束/关闭后整段灰）时，hover 预览改叠在左侧灰条上 */
+  const noTrailingColor = 1 - ratio < 1e-6
   const label = formatSegmentDurationCompact(durationMs)
-  const variant = fillClassToVariant(fillClass)
+  const variant = fillClassToVariant(hoverFillClass ?? fillClass)
   const labelRef = useRef<HTMLSpanElement>(null)
   const truncated = useTextTruncated(labelRef, label)
+
+  const leftGrayWidthPct = ratio * 100
+  const rightColorWidthPct = (1 - ratio) * 100
 
   return (
     <div
@@ -100,17 +105,37 @@ export function SplitSegmentProgressBar({ durationMs, elapsedRatio, fillClass, s
       <div
         className={`relative ${barHeightClass} min-h-[1rem] w-full rounded-full overflow-hidden flex bg-slate-200`}
       >
-        <div
-          className="bg-slate-300/90 h-full transition-[width] duration-200 ease-out shrink-0"
-          style={{ width: `${ratio * 100}%` }}
-        />
-        <div
-          className={`h-full min-w-0 transition-[width] duration-200 ease-out ${fillClass}`}
-          style={{ width: `${(1 - ratio) * 100}%` }}
-        />
-        {hoverFillClass && (
-          <div className={`absolute inset-0 rounded-full ${hoverFillClass} opacity-0 group-hover:opacity-40 transition-opacity duration-150`} />
+        {hoverFillClass && noTrailingColor ? (
+          <div
+            className="relative h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
+            style={{ width: `${leftGrayWidthPct}%` }}
+          >
+            <div className="absolute inset-0 bg-slate-300/90 transition-opacity duration-150 group-hover:opacity-0" />
+            <div
+              className={`absolute inset-0 ${hoverFillClass} opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+            />
+          </div>
+        ) : (
+          <div
+            className="bg-slate-300/90 h-full shrink-0 transition-[width] duration-200 ease-out"
+            style={{ width: `${leftGrayWidthPct}%` }}
+          />
         )}
+        <div
+          className="relative h-full min-w-0 transition-[width] duration-200 ease-out"
+          style={{ width: `${rightColorWidthPct}%` }}
+        >
+          <div
+            className={`absolute inset-0 ${fillClass} transition-opacity duration-150 ${
+              hoverFillClass && !noTrailingColor ? 'group-hover:opacity-0' : ''
+            }`}
+          />
+          {hoverFillClass && !noTrailingColor ? (
+            <div
+              className={`absolute inset-0 ${hoverFillClass} opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+            />
+          ) : null}
+        </div>
         {showLabel && (
           <span ref={labelRef} className={labelClass}>
             {label}
@@ -133,25 +158,50 @@ type SingleBarProps = {
 /** 列表子项：未拆分整段进度条 */
 export function SingleCycleProgressBar({ totalDurationMs, remainingRatio, fillClass = 'bg-green-500', hoverFillClass }: SingleBarProps) {
   const pr = Math.max(0, Math.min(1, remainingRatio))
+  /** 结束/关闭后 remaining=0，彩条宽度为 0，hover 预览叠在左侧灰条上 */
+  const noTrailingColor = pr < 1e-6
   const label = formatSegmentDurationCompact(totalDurationMs)
-  const variant = fillClassToVariant(fillClass)
+  const variant = fillClassToVariant(hoverFillClass ?? fillClass)
   const labelRef = useRef<HTMLSpanElement>(null)
   const truncated = useTextTruncated(labelRef, label)
+
+  const leftGrayWidthPct = (1 - pr) * 100
+  const rightColorWidthPct = pr * 100
 
   return (
     <div className="group relative w-full" aria-label={label}>
       <div className={`relative ${barHeightClass} min-h-[1rem] w-full rounded-full overflow-hidden flex bg-slate-200`}>
-        <div
-          className="bg-slate-300/90 h-full shrink-0 transition-[width] duration-300 ease-out"
-          style={{ width: `${(1 - pr) * 100}%` }}
-        />
-        <div
-          className={`${fillClass} h-full shrink-0 min-w-0 transition-[width] duration-300 ease-out`}
-          style={{ width: `${pr * 100}%` }}
-        />
-        {hoverFillClass && (
-          <div className={`absolute inset-0 rounded-full ${hoverFillClass} opacity-0 group-hover:opacity-40 transition-opacity duration-150`} />
+        {hoverFillClass && noTrailingColor ? (
+          <div
+            className="relative h-full shrink-0 overflow-hidden transition-[width] duration-300 ease-out"
+            style={{ width: `${leftGrayWidthPct}%` }}
+          >
+            <div className="absolute inset-0 bg-slate-300/90 transition-opacity duration-150 group-hover:opacity-0" />
+            <div
+              className={`absolute inset-0 ${hoverFillClass} opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+            />
+          </div>
+        ) : (
+          <div
+            className="bg-slate-300/90 h-full shrink-0 transition-[width] duration-300 ease-out"
+            style={{ width: `${leftGrayWidthPct}%` }}
+          />
         )}
+        <div
+          className="relative h-full shrink-0 min-w-0 transition-[width] duration-300 ease-out"
+          style={{ width: `${rightColorWidthPct}%` }}
+        >
+          <div
+            className={`absolute inset-0 ${fillClass} transition-opacity duration-150 ${
+              hoverFillClass && !noTrailingColor ? 'group-hover:opacity-0' : ''
+            }`}
+          />
+          {hoverFillClass && !noTrailingColor ? (
+            <div
+              className={`absolute inset-0 ${hoverFillClass} opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+            />
+          ) : null}
+        </div>
         <span ref={labelRef} className={labelClass}>
           {label}
         </span>

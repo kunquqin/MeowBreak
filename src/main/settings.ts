@@ -427,6 +427,16 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
       const timeColor = typeof o.timeColor === 'string' && o.timeColor ? o.timeColor : '#ffffff'
       const dateColor = typeof o.dateColor === 'string' && o.dateColor ? o.dateColor : '#e2e8f0'
       const countdownColor = typeof o.countdownColor === 'string' && o.countdownColor ? o.countdownColor : '#ffffff'
+      const textFillOpacity = (v: unknown): number | undefined => {
+        const n = Number(v)
+        if (!Number.isFinite(n)) return undefined
+        const c = Math.max(0, Math.min(1, n))
+        return c >= 1 ? undefined : c
+      }
+      const contentTextOpacity = textFillOpacity(o.contentTextOpacity)
+      const timeTextOpacity = textFillOpacity(o.timeTextOpacity)
+      const dateTextOpacity = textFillOpacity(o.dateTextOpacity)
+      const countdownTextOpacity = textFillOpacity(o.countdownTextOpacity)
       const clampThemeFont = (raw: unknown, fallback: number) => {
         const n = Math.floor(Number(raw))
         const v = Number.isFinite(n) ? n : fallback
@@ -593,6 +603,10 @@ function normalizePopupThemes(raw: unknown): PopupTheme[] {
         timeColor,
         dateColor,
         countdownColor,
+        ...(contentTextOpacity !== undefined ? { contentTextOpacity } : {}),
+        ...(timeTextOpacity !== undefined ? { timeTextOpacity } : {}),
+        ...(dateTextOpacity !== undefined ? { dateTextOpacity } : {}),
+        ...(countdownTextOpacity !== undefined ? { countdownTextOpacity } : {}),
         contentFontSize,
         timeFontSize,
         dateFontSize,

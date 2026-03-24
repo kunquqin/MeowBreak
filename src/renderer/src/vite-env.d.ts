@@ -27,6 +27,10 @@ declare global {
       pickPopupImageFolder: () => Promise<
         { success: true; folderPath: string; files: string[] } | { success: false; error: string }
       >
+      /** 根据文件夹路径枚举壁纸文件（与选择文件夹对话框规则一致） */
+      listPopupImageFolderFiles: (folderPath: string) => Promise<
+        { success: true; files: string[] } | { success: false; error: string }
+      >
       getSystemFontFamilies: () => Promise<
         { success: true; fonts: string[] } | { success: false; fonts: string[]; error: string }
       >

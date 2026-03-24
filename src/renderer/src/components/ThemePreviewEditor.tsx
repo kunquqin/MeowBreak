@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom'
 import Moveable from 'react-moveable'
 import type { PopupTheme, TextTransform } from '../types'
 import { rendererSafePreviewImageUrl } from '../utils/popupThemePreview'
-import { layerTextEffectsReactStyle } from '../../../shared/popupTextEffects'
+import { layerTextEffectsReactStyle, textFillColorCss } from '../../../shared/popupTextEffects'
 import { resolvePopupFontFamilyCss, resolveDecoFontFamilyCss } from '../../../shared/popupThemeFonts'
 import {
   ensureThemeLayers,
@@ -3540,14 +3540,22 @@ export function ThemePreviewEditor({
           : key === 'date'
             ? dateFontPx
             : countdownFontPx
-    const color =
+    const color = textFillColorCss(
       key === 'content'
         ? theme.contentColor
         : key === 'countdown'
           ? (theme.countdownColor || theme.timeColor || '#ffffff')
           : key === 'date'
             ? (theme.dateColor || theme.timeColor || '#ffffff')
-            : theme.timeColor || '#ffffff'
+            : theme.timeColor || '#ffffff',
+      key === 'content'
+        ? theme.contentTextOpacity
+        : key === 'countdown'
+          ? theme.countdownTextOpacity
+          : key === 'date'
+            ? theme.dateTextOpacity
+            : theme.timeTextOpacity,
+    )
     const tf = styleTransformByKey[key] ?? 'translate(0px,0px) rotate(0deg) scale(1)'
     const displayText = getDisplayText(key, label)
     const ta = alignForKey(theme, key)
@@ -4094,7 +4102,7 @@ export function ThemePreviewEditor({
                     transform: dtf,
                     transformOrigin: 'center',
                     zIndex: zi,
-                    color: td.color || '#ffffff',
+                    color: textFillColorCss(td.color || '#ffffff', td.colorOpacity),
                     fontSize: `${toPreviewPx(fs)}px`,
                     fontWeight: td.fontWeight ?? 500,
                     fontStyle: td.fontItalic === true ? 'italic' : 'normal',

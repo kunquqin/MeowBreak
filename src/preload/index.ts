@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('pickPopupImageFolder') as Promise<
       { success: true; folderPath: string; files: string[] } | { success: false; error: string }
     >,
+  listPopupImageFolderFiles: (folderPath: string) =>
+    ipcRenderer.invoke('listPopupImageFolderFiles', folderPath) as Promise<
+      { success: true; files: string[] } | { success: false; error: string }
+    >,
   getSystemFontFamilies: () =>
     ipcRenderer.invoke('getSystemFontFamilies') as Promise<
       { success: true; fonts: string[] } | { success: false; fonts: string[]; error: string }

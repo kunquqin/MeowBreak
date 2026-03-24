@@ -172,6 +172,11 @@ export interface PopupTheme {
   contentColor: string
   timeColor: string
   countdownColor: string
+  /** 各绑定/预览文字层填充不透明度 0–1，缺省 1 */
+  contentTextOpacity?: number
+  timeTextOpacity?: number
+  dateTextOpacity?: number
+  countdownTextOpacity?: number
   contentFontSize: number
   timeFontSize: number
   countdownFontSize: number

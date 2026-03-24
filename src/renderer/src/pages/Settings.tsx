@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, type MouseEvent as ReactMouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
   DndContext,
   type DragEndEvent,
@@ -116,6 +117,12 @@ function formatTimeHHmm(ts: number | Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+/** 本地实时走表用 HH:mm:ss（「当前时间」模式待启动/已结束时左侧开始） */
+function formatTimeHms(ts: number | Date): string {
+  const d = typeof ts === 'number' ? new Date(ts) : ts
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+}
+
 function formatTimeWithDay(ts: number | undefined, fallbackHHmm: string | undefined, label: '开始' | '结束'): string {
   if (ts != null) {
     const d = new Date(ts)
@@ -145,22 +152,77 @@ function getDefaultSubTitle(mode: 'fixed' | 'interval' | 'stopwatch'): string {
   return mode === 'fixed' ? '未命名闹钟' : mode === 'interval' ? '未命名倒计时' : '未命名秒表'
 }
 
-/** 子项左侧大号时间：闹钟为下次响铃时刻（HH:mm），倒计时尚未启动时为周期 H:MM:SS，运行中为实时剩余 */
+/** 删除确认弹窗用展示名 */
+function subReminderConfirmLabel(item: SubReminder): string {
+  const t = (item.title ?? '').trim()
+  if (t) return t
+  return getDefaultSubTitle(item.mode)
+}
+
+/** 倒计时/秒表：左侧大号时间（闹钟 fixed 另用双侧开始/结束，不走此函数） */
 function getSubReminderLargeTimeMain(item: SubReminder, cd: CountdownItem | undefined): string {
   if (item.mode === 'stopwatch') return '—'
-  if (item.mode === 'fixed') {
-    const startLabel = item.startTime ?? item.time
-    if (item.enabled === false) return item.time
-    if (!cd) return startLabel
-    if (cd.fixedState === 'pending') return item.time
-    if (cd.ended) return item.time
-    return formatTimeHHmm(cd.nextAt)
-  }
+  if (item.mode === 'fixed') return '—'
   const iv = item as SubReminder & { mode: 'interval' }
   if (iv.enabled === false) return formatIntervalHms(iv)
   if (cd?.ended) return formatIntervalHms(iv)
   if (!cd) return formatIntervalHms(iv)
   return formatRemaining(cd.remainingMs)
+}
+
+function normalizeHHmmFromSetting(s: string | undefined): string {
+  if (!s) return '—'
+  const m = s.match(/^(\d{1,2}):(\d{2})/)
+  if (!m) return s.slice(0, 5)
+  const h = Math.min(23, Math.max(0, parseInt(m[1]!, 10) || 0))
+  return `${String(h).padStart(2, '0')}:${m[2]}`
+}
+
+/** 闹钟左右大块：顶行「开始/明天开始」「结束/明天结束」，下行 HH:mm（与旧进度条上 formatTimeWithDay 语义一致） */
+function getFixedAlarmTimeBlock(
+  item: SubReminder & { mode: 'fixed' },
+  cd: CountdownItem | undefined,
+  which: 'start' | 'end',
+  opts?: { liveWallClockMs?: number },
+): { caption: string; timeLine: string } {
+  const label: '开始' | '结束' = which === 'start' ? '开始' : '结束'
+  if (which === 'start') {
+    if (opts?.liveWallClockMs != null) {
+      return { caption: label, timeLine: formatTimeHms(opts.liveWallClockMs) }
+    }
+    const ts = cd?.type === 'fixed' ? cd.windowStartAt : undefined
+    const fallbackStr =
+      cd?.type === 'fixed' && cd.startTime
+        ? cd.startTime
+        : (item.startTime ?? item.time)
+    return fixedAlarmCaptionAndHHmm(label, ts, fallbackStr)
+  }
+  const ts = cd?.type === 'fixed' ? cd.windowEndAt : undefined
+  const fallbackStr = cd?.type === 'fixed' && cd.time ? cd.time : item.time
+  return fixedAlarmCaptionAndHHmm(label, ts, fallbackStr)
+}
+
+function fixedAlarmCaptionAndHHmm(
+  label: '开始' | '结束',
+  ts: number | undefined,
+  fallbackHHmm: string | undefined,
+): { caption: string; timeLine: string } {
+  if (ts != null) {
+    const d = new Date(ts)
+    const now = new Date()
+    const isTomorrow =
+      d.getDate() !== now.getDate() ||
+      d.getMonth() !== now.getMonth() ||
+      d.getFullYear() !== now.getFullYear()
+    return {
+      caption: isTomorrow ? `明天${label}` : label,
+      timeLine: formatTimeHHmm(d),
+    }
+  }
+  return {
+    caption: label,
+    timeLine: normalizeHHmmFromSetting(fallbackHHmm),
+  }
 }
 
 /** 时间漏斗图标，用于倒计时区域 */
@@ -246,7 +308,6 @@ type SubReminderRowProps = {
   countdowns: CountdownItem[]
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
   removeItem: (ci: number, ii: number) => void
-  reminderContentPresets: string[]
   restContentPresets: string[]
   subTitlePresets: PresetPools['subTitle']
   popupThemes: PopupTheme[]
@@ -263,9 +324,7 @@ type SubReminderRowProps = {
   expandedEditSub: { categoryId: string; itemId: string } | null
   toggleExpandedEditSub: (categoryId: string, itemId: string) => void
   onConfirmEmbeddedEdit: (categoryId: string, itemId: string, payload: AddSubReminderPayload) => void | Promise<void>
-  /** 更新主提醒文案预设（闹钟+倒计时共享） */
-  onReminderContentPresetsChange: (presets: string[]) => void
-  /** 更新休息弹窗文案预设（独立） */
+  /** 更新休息壁纸预览相关预设（内联弹窗） */
   onRestContentPresetsChange: (presets: string[]) => void
   /** 更新子项标题预设（按 mode 分池） */
   onSubTitlePresetsChange: (mode: 'fixed' | 'interval' | 'stopwatch', presets: string[]) => void
@@ -522,12 +581,12 @@ function StopwatchReminderRow({
                 presets={titlePresets}
                 onPresetsChange={onTitlePresetsChange}
                 mainPlaceholder="请输入秒表标题"
-                inputClassName="text-left"
+                inputClassName="text-left font-bold"
               />
             </div>
           ) : (
             <div
-              className="flex h-9 w-full cursor-text items-center justify-start rounded pl-2 pr-9 text-sm hover:bg-slate-50"
+              className="flex h-9 w-full cursor-text items-center justify-start rounded pl-2 pr-9 text-sm font-bold hover:bg-slate-50"
               onClick={() => setEditingTitle(true)}
               title="点击编辑标题"
             >
@@ -721,13 +780,24 @@ function RepeatArrowsIcon({ className }: { className?: string }) {
   )
 }
 
-function IoSwitch({ checked, onChange, id }: { checked: boolean; onChange: (v: boolean) => void; id: string }) {
+function IoSwitch({
+  checked,
+  onChange,
+  id,
+  ariaLabel,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  id: string
+  ariaLabel?: string
+}) {
   return (
     <button
       id={id}
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       onClick={() => onChange(!checked)}
       className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors duration-200 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${
         checked ? 'bg-green-500' : 'bg-slate-300'
@@ -888,7 +958,6 @@ function SubReminderRow({
   countdowns,
   updateItem,
   removeItem,
-  reminderContentPresets,
   restContentPresets,
   subTitlePresets,
   popupThemes,
@@ -900,7 +969,6 @@ function SubReminderRow({
   expandedEditSub,
   toggleExpandedEditSub,
   onConfirmEmbeddedEdit,
-  onReminderContentPresetsChange,
   onRestContentPresetsChange,
   onSubTitlePresetsChange,
   onOpenThemeStudioList,
@@ -917,8 +985,6 @@ function SubReminderRow({
   const largeTimeMain = getSubReminderLargeTimeMain(item, cd)
   const [editingTitle, setEditingTitle] = useState(false)
   const titleEditRef = useRef<HTMLDivElement>(null)
-  const [editingContent, setEditingContent] = useState(false)
-  const contentEditRef = useRef<HTMLDivElement>(null)
   const rowTitle = (item.mode === 'fixed' || item.mode === 'interval') ? ((item.title ?? '').trim()) : ''
   const mainThemeOptions = popupThemes.filter((t) => t.target === 'main')
   const restThemeOptions = popupThemes.filter((t) => t.target === 'rest')
@@ -933,17 +999,6 @@ function SubReminderRow({
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [editingTitle])
-
-  useEffect(() => {
-    if (!editingContent) return
-    const onDown = (e: MouseEvent) => {
-      if (contentEditRef.current && !contentEditRef.current.contains(e.target as Node)) {
-        setEditingContent(false)
-      }
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [editingContent])
 
   useEffect(() => {
     if (!editingTitle) return
@@ -1006,7 +1061,30 @@ function SubReminderRow({
     const elapsedInCycle = Math.min(cycleTotalMs, elapsedInInterval)
     return Math.min(1, (cycleTotalMs - elapsedInCycle) / cycleTotalMs)
   })()
-  const isHmsFormat = largeTimeMain.split(':').length >= 3
+  const fixedItem = item.mode === 'fixed' ? item : null
+  /** 「当前时间」模式：未开始或已结束待下一轮时，左侧开始为实时走表，非日程上的下一窗格时间 */
+  const fixedStartUsesLiveWall =
+    fixedItem != null &&
+    fixedItem.useNowAsStart === true &&
+    cd != null &&
+    cd.type === 'fixed' &&
+    (cd.fixedState === 'pending' || cd.ended === true)
+  const [, setLiveWallTick] = useState(0)
+  useEffect(() => {
+    if (!fixedStartUsesLiveWall) return
+    const id = window.setInterval(() => setLiveWallTick((t) => t + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [fixedStartUsesLiveWall])
+  const fixedStartBlock = fixedItem
+    ? getFixedAlarmTimeBlock(
+        fixedItem,
+        cd,
+        'start',
+        fixedStartUsesLiveWall ? { liveWallClockMs: Date.now() } : undefined,
+      )
+    : null
+  const fixedEndBlock = fixedItem ? getFixedAlarmTimeBlock(fixedItem, cd, 'end') : null
+  const isHmsFormat = largeTimeMain.split(':').length >= 3 || fixedStartUsesLiveWall
   const timeFontClass = isHmsFormat ? 'text-4xl sm:text-5xl' : 'text-5xl sm:text-6xl'
 
   return (
@@ -1041,7 +1119,6 @@ function SubReminderRow({
             variant="edit"
             mode={item.mode}
             sourceItem={item}
-            contentPresets={reminderContentPresets}
             titlePresets={item.mode === 'fixed' ? subTitlePresets.fixed : subTitlePresets.interval}
             restPresets={restContentPresets}
             popupThemes={popupThemes}
@@ -1049,7 +1126,6 @@ function SubReminderRow({
             onConfirm={(payload) => {
               void onConfirmEmbeddedEdit(categoryId, item.id, payload)
             }}
-            onContentPresetsChange={onReminderContentPresetsChange}
             onTitlePresetsChange={(presets) => onSubTitlePresetsChange(item.mode, presets)}
             onRestPresetsChange={onRestContentPresetsChange}
             onOpenThemeStudioList={onOpenThemeStudioList}
@@ -1082,12 +1158,12 @@ function SubReminderRow({
                 presets={item.mode === 'fixed' ? subTitlePresets.fixed : subTitlePresets.interval}
                 onPresetsChange={(presets) => onSubTitlePresetsChange(item.mode, presets)}
                 mainPlaceholder="请输入标题"
-                inputClassName="text-left"
+                inputClassName="text-left font-bold"
               />
             </div>
           ) : (
             <div
-              className="flex h-9 w-full cursor-text items-center justify-start rounded pl-2 pr-9 text-sm hover:bg-slate-50"
+              className="flex h-9 w-full cursor-text items-center justify-start rounded pl-2 pr-9 text-sm font-bold hover:bg-slate-50"
               onClick={() => setEditingTitle(true)}
               title="点击编辑标题"
             >
@@ -1175,77 +1251,45 @@ function SubReminderRow({
           </span>
         </div>
       </div>
-      <div className="flex w-full min-w-0 items-stretch gap-4">
-      {/* 左侧时间独占一列，高度与右侧整块对齐；闹钟为响铃时刻，倒计时为剩余 */}
-      <button
-        type="button"
-        onClick={() => toggleExpandedEditSub(categoryId, item.id)}
-        className="group flex min-w-[8rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-4 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[8.5rem]"
-        title="编辑时间与拆分"
-        aria-label={`编辑时间，${largeTimeMain}`}
-      >
-        <span
-          className={`text-center font-bold tabular-nums leading-none tracking-tight text-white ${timeFontClass}`}
+      <div className="flex w-full min-w-0 items-stretch gap-3 sm:gap-4">
+      {item.mode === 'fixed' ? (
+        <button
+          type="button"
+          onClick={() => toggleExpandedEditSub(categoryId, item.id)}
+          className="group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
+          title="编辑开始时间、结束时间与拆分"
+          aria-label={`编辑${fixedStartBlock.caption} ${fixedStartBlock.timeLine}`}
         >
-          {largeTimeMain}
-        </span>
-      </button>
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-      <div className="flex min-w-0 flex-wrap items-start gap-2">
-      <div className="flex min-w-0 flex-1 items-start gap-2">
-        <span className="shrink-0 pt-2 text-sm text-slate-500">弹窗文案：</span>
-        <div className="relative min-w-0 flex-1">
-          {editingContent ? (
-            <div
-              ref={contentEditRef}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && e.target === contentEditRef.current?.querySelector('input')) {
-                  setEditingContent(false)
-                }
-              }}
-            >
-              <PresetTextField
-                resetKey={`row-${item.id}`}
-                value={item.content}
-                onChange={(v) => updateItem(categoryIndex, itemIndex, { content: v })}
-                presets={reminderContentPresets}
-                onPresetsChange={onReminderContentPresetsChange}
-                mainPlaceholder="请输入提醒内容"
-                autoFocusInput
-                multilineMain
-              />
-            </div>
-          ) : (
-            <div
-              className="flex w-full cursor-text items-start justify-start rounded px-2 py-1.5 text-sm hover:bg-slate-50"
-              onClick={() => setEditingContent(true)}
-              title="点击编辑弹窗文案"
-            >
-              <span className={`whitespace-normal break-words leading-6 ${item.content ? 'text-slate-700' : 'text-slate-300'}`}>
-                {item.content || '请输入提醒内容'}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-      </div>
+          <span className="max-w-[5.5rem] text-center text-[10px] font-medium leading-tight text-white/70">
+            {fixedStartBlock.caption}
+          </span>
+          <span
+            className={`mt-1 text-center font-bold tabular-nums leading-none tracking-tight text-white ${timeFontClass}`}
+          >
+            {fixedStartBlock.timeLine}
+          </span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => toggleExpandedEditSub(categoryId, item.id)}
+          className="group flex min-w-[8rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-4 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[8.5rem]"
+          title="编辑时间与拆分"
+          aria-label={`编辑时间，${largeTimeMain}`}
+        >
+          <span
+            className={`text-center font-bold tabular-nums leading-none tracking-tight text-white ${timeFontClass}`}
+          >
+            {largeTimeMain}
+          </span>
+        </button>
+      )}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-1.5 self-stretch">
       {(item.mode === 'fixed' || item.mode === 'interval') && (
-        <div className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <label className="flex items-center gap-2 text-xs text-slate-500">
-            <span className="shrink-0">主弹窗主题</span>
-            <select
-              value={item.mainPopupThemeId ?? getDefaultPopupThemeIdForTarget(popupThemes, 'main')}
-              onChange={(e) => updateItem(categoryIndex, itemIndex, { mainPopupThemeId: e.target.value })}
-              className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
-            >
-              {mainThemeOptions.map((theme) => (
-                <option key={theme.id} value={theme.id}>{theme.name}</option>
-              ))}
-            </select>
-          </label>
+        <div className="grid shrink-0 grid-cols-1 gap-2 sm:grid-cols-2">
           {((item.splitCount ?? 1) > 1) && (
             <label className="flex items-center gap-2 text-xs text-slate-500">
-              <span className="shrink-0">休息主题</span>
+              <span className="shrink-0">休息壁纸</span>
               <select
                 value={item.restPopupThemeId ?? getDefaultPopupThemeIdForTarget(popupThemes, 'rest')}
                 onChange={(e) => updateItem(categoryIndex, itemIndex, { restPopupThemeId: e.target.value })}
@@ -1257,34 +1301,43 @@ function SubReminderRow({
               </select>
             </label>
           )}
+          <label className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="shrink-0">结束壁纸</span>
+            <select
+              value={item.mainPopupThemeId ?? getDefaultPopupThemeIdForTarget(popupThemes, 'main')}
+              onChange={(e) => updateItem(categoryIndex, itemIndex, { mainPopupThemeId: e.target.value })}
+              className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+            >
+              {mainThemeOptions.map((theme) => (
+                <option key={theme.id} value={theme.id}>{theme.name}</option>
+              ))}
+            </select>
+          </label>
         </div>
       )}
       {cd && (
-        <div className="flex min-w-0 w-full flex-col gap-1">
-          {/* 进度条上一行：左开始、右结束，均为普通文字（不进入编辑） */}
-          {(() => {
-            let startTs: number | undefined
-            let startFallback: string | undefined
-            let endTs: number | undefined
-            let endFallback: string | undefined
-            if (cd.type === 'fixed') {
-              startTs = cd.windowStartAt
-              startFallback = cd.startTime ?? cd.time ?? '—'
-              endTs = cd.windowEndAt
-              endFallback = cd.time
-            } else {
-              startTs = cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? cd.nextAt - cd.cycleTotalMs : undefined
-              startFallback = '—'
-              endTs = cd.nextAt
-              endFallback = undefined
-            }
-            return (
-              <div className="flex w-full items-center justify-between gap-2">
-                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{formatTimeWithDay(startTs, startFallback, '开始')}</span>
-                <span className="shrink-0 text-sm text-slate-500 tabular-nums">{formatTimeWithDay(endTs, endFallback, '结束')}</span>
-              </div>
-            )
-          })()}
+        <div
+          className={`flex min-w-0 w-full flex-col gap-1 ${
+            item.mode === 'fixed' ? 'mt-4 min-h-0 flex-1 justify-end' : ''
+          }`}
+        >
+          {/* 倒计时：进度条上一行左开始、右结束；闹钟已合并到左右大块时间顶行 */}
+          {item.mode === 'interval' &&
+            (() => {
+              const startTs =
+                cd.cycleTotalMs != null && cd.cycleTotalMs > 0 ? cd.nextAt - cd.cycleTotalMs : undefined
+              const endTs = cd.nextAt
+              return (
+                <div className="flex w-full items-center justify-between gap-2">
+                  <span className="shrink-0 text-sm text-slate-500 tabular-nums">
+                    {formatTimeWithDay(startTs, '—', '开始')}
+                  </span>
+                  <span className="shrink-0 text-sm text-slate-500 tabular-nums">
+                    {formatTimeWithDay(endTs, undefined, '结束')}
+                  </span>
+                </div>
+              )
+            })()}
           {/* 同一行上多个独立进度条（每段工作/休息各一条） */}
           <div className="w-full flex items-center gap-1.5 flex-wrap">
             {(() => {
@@ -1334,6 +1387,8 @@ function SubReminderRow({
                   const ratio = seg.durationMs > 0 ? elapsedInSeg / seg.durationMs : 0
                   const segColor = seg.type === 'work' ? 'bg-green-500' : 'bg-blue-500'
                   const pendingFillClass = cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : segColor
+                  const pendingOrInactiveHover =
+                    isInactive || (cd.type === 'fixed' && cd.fixedState === 'pending')
                   return (
                     <SplitSegmentProgressBar
                       key={i}
@@ -1341,17 +1396,19 @@ function SubReminderRow({
                       elapsedRatio={ratio}
                       fillClass={pendingFillClass}
                       showLabel={!(isFixedSingleEnded && seg.type === 'work')}
-                      hoverFillClass={isInactive ? segColor : undefined}
+                      hoverFillClass={pendingOrInactiveHover ? segColor : undefined}
                     />
                   )
                 })
               }
+              const singlePendingHover =
+                isInactive || (cd.type === 'fixed' && cd.fixedState === 'pending')
               return (
                 <SingleCycleProgressBar
                   totalDurationMs={totalSpanMs}
                   remainingRatio={progressRatio}
                   fillClass={cd.type === 'fixed' && cd.fixedState === 'pending' ? 'bg-violet-500' : 'bg-green-500'}
-                  hoverFillClass={isInactive ? 'bg-green-500' : undefined}
+                  hoverFillClass={singlePendingHover ? 'bg-green-500' : undefined}
                 />
               )
             })()}
@@ -1409,6 +1466,24 @@ function SubReminderRow({
         </div>
       )}
       </div>
+      {item.mode === 'fixed' ? (
+        <button
+          type="button"
+          onClick={() => toggleExpandedEditSub(categoryId, item.id)}
+          className="group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
+          title="编辑开始时间、结束时间与拆分"
+          aria-label={`编辑${fixedEndBlock.caption} ${fixedEndBlock.timeLine}`}
+        >
+          <span className="max-w-[5.5rem] text-center text-[10px] font-medium leading-tight text-white/70">
+            {fixedEndBlock.caption}
+          </span>
+          <span
+            className={`mt-1 text-center font-bold tabular-nums leading-none tracking-tight text-white ${timeFontClass}`}
+          >
+            {fixedEndBlock.timeLine}
+          </span>
+        </button>
+      ) : null}
       </div>
       </div>
       </>
@@ -1466,6 +1541,191 @@ function SortableSubReminderItem({
   )
 }
 
+const CATEGORY_CARD_OVERFLOW_MENU_CLOSE_MS = 280
+
+/** 与主题工坊缩略图一致：hover 三点展开浮层，总开关 + 删除大类 */
+function CategoryCardOverflowMenu({
+  catId,
+  showMasterSwitch,
+  categoryAllEnabled,
+  onToggleCategoryAll,
+  onRemoveCategory,
+  onOpenChange,
+}: {
+  catId: string
+  showMasterSwitch: boolean
+  categoryAllEnabled: boolean
+  onToggleCategoryAll: (enabled: boolean) => void
+  onRemoveCategory: () => void
+  onOpenChange?: (open: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const emitOpen = useCallback(
+    (next: boolean) => {
+      onOpenChange?.(next)
+      setOpen(next)
+    },
+    [onOpenChange],
+  )
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = window.setTimeout(() => emitOpen(false), CATEGORY_CARD_OVERFLOW_MENU_CLOSE_MS)
+  }, [clearCloseTimer, emitOpen])
+
+  const [coords, setCoords] = useState({ top: 0, left: 0 })
+
+  const measureAndSetCoords = useCallback(() => {
+    const el = btnRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const margin = 8
+    const triggerCenterX = r.left + r.width / 2
+    const menuEl = menuRef.current
+    const menuW = menuEl?.getBoundingClientRect().width ?? (showMasterSwitch ? 56 : 44)
+    const halfW = menuW / 2
+    const anchorX = Math.max(margin + halfW, Math.min(triggerCenterX, window.innerWidth - margin - halfW))
+
+    const estH = showMasterSwitch ? 88 : 44
+    const menuH = menuEl?.getBoundingClientRect().height ?? estH
+    let top = r.bottom + 1
+    if (top + menuH > window.innerHeight - margin) {
+      top = Math.max(margin, r.top - menuH - 1)
+    }
+    setCoords({ top, left: anchorX })
+  }, [showMasterSwitch])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    measureAndSetCoords()
+    const onReposition = () => measureAndSetCoords()
+    window.addEventListener('scroll', onReposition, true)
+    window.addEventListener('resize', onReposition)
+    return () => {
+      window.removeEventListener('scroll', onReposition, true)
+      window.removeEventListener('resize', onReposition)
+    }
+  }, [open, measureAndSetCoords])
+
+  useEffect(() => {
+    if (!open) return
+    const onDocDown = (e: globalThis.MouseEvent) => {
+      const n = e.target as Node
+      if (btnRef.current?.contains(n) || menuRef.current?.contains(n)) return
+      emitOpen(false)
+    }
+    document.addEventListener('mousedown', onDocDown)
+    return () => document.removeEventListener('mousedown', onDocDown)
+  }, [open, emitOpen])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') emitOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, emitOpen])
+
+  const run = (fn: () => void) => {
+    clearCloseTimer()
+    emitOpen(false)
+    fn()
+  }
+
+  const onTriggerClick = (e: ReactMouseEvent) => {
+    e.stopPropagation()
+    setOpen((v) => {
+      const next = !v
+      onOpenChange?.(next)
+      if (next) queueMicrotask(() => measureAndSetCoords())
+      return next
+    })
+  }
+
+  const menu =
+    open &&
+    createPortal(
+      <div
+        ref={menuRef}
+        role="menu"
+        className="fixed z-[300000] w-max min-w-0 flex flex-col items-center rounded-md border border-slate-200 bg-white py-1 pl-2 pr-2 shadow-lg"
+        style={{ top: coords.top, left: coords.left, transform: 'translateX(-50%)' }}
+        onMouseEnter={clearCloseTimer}
+        onMouseLeave={scheduleClose}
+      >
+        {showMasterSwitch ? (
+          <div
+            role="presentation"
+            className="flex w-full items-center justify-center py-1.5"
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <IoSwitch
+              id={`cat-all-menu-${catId}`}
+              checked={categoryAllEnabled}
+              onChange={(next) => {
+                clearCloseTimer()
+                emitOpen(false)
+                onToggleCategoryAll(next)
+              }}
+              ariaLabel="本类全部闹钟与倒计时开关"
+            />
+          </div>
+        ) : null}
+        <button
+          type="button"
+          role="menuitem"
+          className="block w-full whitespace-nowrap px-2 py-1.5 text-center text-sm text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:bg-slate-50"
+          onClick={() => run(onRemoveCategory)}
+        >
+          删除
+        </button>
+      </div>,
+      document.body,
+    )
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="flex h-8 w-8 shrink-0 items-center justify-center border-0 bg-transparent p-0 text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-slate-400"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="更多操作"
+        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={onTriggerClick}
+        onMouseEnter={() => {
+          clearCloseTimer()
+          emitOpen(true)
+          queueMicrotask(() => measureAndSetCoords())
+        }}
+        onMouseLeave={scheduleClose}
+      >
+        <span className="flex items-center gap-0.5" aria-hidden>
+          <span className="h-1 w-1 rounded-full bg-current" />
+          <span className="h-1 w-1 rounded-full bg-current" />
+          <span className="h-1 w-1 rounded-full bg-current" />
+        </span>
+      </button>
+      {menu}
+    </>
+  )
+}
+
 type CategoryCardProps = {
   cat: ReminderCategory
   realCi: number
@@ -1479,7 +1739,6 @@ type CategoryCardProps = {
   setCategoryItems: (ci: number, items: SubReminder[]) => void
   updateItem: (ci: number, ii: number, patch: Partial<SubReminder>) => void
   removeItem: (ci: number, ii: number) => void
-  reminderContentPresets: string[]
   restContentPresets: string[]
   subTitlePresets: PresetPools['subTitle']
   popupThemes: PopupTheme[]
@@ -1487,7 +1746,6 @@ type CategoryCardProps = {
   onOpenThemeStudioEdit?: (args: OpenThemeStudioEditFromSubitemArgs) => void
   getCategoryTitlePresets: (kind: CategoryKind) => string[]
   onCategoryTitlePresetsChange: (kind: CategoryKind, presets: string[]) => void
-  onReminderContentPresetsChange: (presets: string[]) => void
   onRestContentPresetsChange: (presets: string[]) => void
   onSubTitlePresetsChange: (mode: 'fixed' | 'interval' | 'stopwatch', presets: string[]) => void
   repeatDropdown: { categoryIndex: number; itemIndex: number } | null
@@ -1499,6 +1757,7 @@ type CategoryCardProps = {
   onConfirmEmbeddedEdit: (categoryId: string, itemId: string, payload: AddSubReminderPayload) => void | Promise<void>
   addStopwatchItem: (categoryIndex: number) => void
   onToggleEnabledNow: (categoryIndex: number, itemIndex: number, enabled: boolean) => void | Promise<void>
+  onToggleCategoryAllEnabled: (categoryIndex: number, enabled: boolean) => void | Promise<void>
   subReminderThemeEditor: SubReminderModalThemeEditorContext | null
   popupThemeRemotePatch: {
     categoryId: string
@@ -1523,7 +1782,6 @@ function CategoryCard(props: CategoryCardProps) {
     setCategoryItems,
     updateItem,
     removeItem,
-    reminderContentPresets,
     restContentPresets,
     subTitlePresets,
     popupThemes,
@@ -1531,7 +1789,6 @@ function CategoryCard(props: CategoryCardProps) {
     onOpenThemeStudioEdit,
     getCategoryTitlePresets,
     onCategoryTitlePresetsChange,
-    onReminderContentPresetsChange,
     onRestContentPresetsChange,
     onSubTitlePresetsChange,
     repeatDropdown,
@@ -1543,6 +1800,7 @@ function CategoryCard(props: CategoryCardProps) {
     onConfirmEmbeddedEdit,
     addStopwatchItem,
     onToggleEnabledNow,
+    onToggleCategoryAllEnabled,
     subReminderThemeEditor,
     popupThemeRemotePatch,
     onConsumePopupThemeRemotePatch,
@@ -1565,10 +1823,22 @@ function CategoryCard(props: CategoryCardProps) {
     })
   )
   const [isChildDragging, setIsChildDragging] = useState(false)
+  const [sublistCollapsed, setSublistCollapsed] = useState(false)
+  const [categoryHeaderHot, setCategoryHeaderHot] = useState(false)
+  const [categoryOverflowMenuOpen, setCategoryOverflowMenuOpen] = useState(false)
+  const categoryOverflowMenuOpenRef = useRef(false)
+  const syncCategoryOverflowMenuOpen = useCallback((v: boolean) => {
+    categoryOverflowMenuOpenRef.current = v
+    setCategoryOverflowMenuOpen(v)
+  }, [])
   const [editingCategoryTitle, setEditingCategoryTitle] = useState(false)
   const categoryTitleEditRef = useRef<HTMLDivElement>(null)
   const categoryTitle = (cat.name ?? '').trim()
   const defaultCategoryTitle = getDefaultCategoryName(cat.categoryKind)
+  const toggleableSubItems = cat.items.filter((it) => it.mode === 'fixed' || it.mode === 'interval')
+  const categoryAllEnabled =
+    toggleableSubItems.length > 0 && toggleableSubItems.every((it) => it.enabled !== false)
+  const categoryOverflowChromeVisible = categoryHeaderHot || categoryOverflowMenuOpen
   const finalizeCategoryTitleEdit = useCallback(() => {
     const nextName = categoryTitle || defaultCategoryTitle
     if (nextName !== cat.name) updateCategory(realCi, { name: nextName })
@@ -1605,7 +1875,15 @@ function CategoryCard(props: CategoryCardProps) {
       className={`bg-white rounded-lg border border-slate-200 overflow-visible transition-shadow duration-200${isCatDragging ? ' scale-[1.02]' : ''}`}
       {...catSortAttrs}
     >
-      <div className="p-4 border-b border-slate-100 flex items-center gap-2 flex-nowrap">
+      <div
+        className="flex flex-nowrap items-center gap-2 border-b border-slate-100 p-4"
+        onMouseEnter={() => setCategoryHeaderHot(true)}
+        onMouseLeave={() => {
+          requestAnimationFrame(() => {
+            if (!categoryOverflowMenuOpenRef.current) setCategoryHeaderHot(false)
+          })
+        }}
+      >
         <div className="relative flex min-w-0 flex-1">
           {editingCategoryTitle ? (
             <div
@@ -1642,9 +1920,48 @@ function CategoryCard(props: CategoryCardProps) {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button type="button" onClick={() => removeCategory(realCi)} className="text-sm text-red-600 hover:text-red-700 whitespace-nowrap">
-            删除
+        <div className="flex flex-shrink-0 items-center gap-2">
+          <div
+            className={`shrink-0 transition-opacity duration-150 ${
+              categoryOverflowChromeVisible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+            }`}
+          >
+            <CategoryCardOverflowMenu
+              catId={cat.id}
+              showMasterSwitch={toggleableSubItems.length > 0}
+              categoryAllEnabled={categoryAllEnabled}
+              onToggleCategoryAll={(next) => void onToggleCategoryAllEnabled(realCi, next)}
+              onRemoveCategory={() => removeCategory(realCi)}
+              onOpenChange={syncCategoryOverflowMenuOpen}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSublistCollapsed((prev) => {
+                if (!prev) setRepeatDropdown((rd) => (rd?.categoryIndex === realCi ? null : rd))
+                return !prev
+              })
+            }}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+            aria-expanded={!sublistCollapsed}
+            aria-label={sublistCollapsed ? '展开子项' : '收起子项'}
+            title={sublistCollapsed ? '展开子项' : '收起子项'}
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={`transition-transform duration-200 ${sublistCollapsed ? '-rotate-90' : ''}`}
+              aria-hidden
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </button>
         </div>
         <div
@@ -1658,6 +1975,7 @@ function CategoryCard(props: CategoryCardProps) {
           </span>
         </div>
       </div>
+      {!sublistCollapsed ? (
       <div className="p-4 space-y-3">
         <div ref={listRef as React.LegacyRef<HTMLDivElement>} className="min-h-0 overflow-visible">
           <DndContext
@@ -1688,7 +2006,6 @@ function CategoryCard(props: CategoryCardProps) {
                     countdowns={countdowns}
                     updateItem={updateItem}
                     removeItem={removeItem}
-                    reminderContentPresets={reminderContentPresets}
                     restContentPresets={restContentPresets}
                     subTitlePresets={subTitlePresets}
                     popupThemes={popupThemes}
@@ -1700,7 +2017,6 @@ function CategoryCard(props: CategoryCardProps) {
                     expandedEditSub={expandedEditSub}
                     toggleExpandedEditSub={toggleExpandedEditSub}
                     onConfirmEmbeddedEdit={onConfirmEmbeddedEdit}
-                    onReminderContentPresetsChange={onReminderContentPresetsChange}
                     onRestContentPresetsChange={onRestContentPresetsChange}
                     onSubTitlePresetsChange={onSubTitlePresetsChange}
                     onToggleEnabledNow={onToggleEnabledNow}
@@ -1721,7 +2037,6 @@ function CategoryCard(props: CategoryCardProps) {
               layout="embedded"
               formInstanceKey={inlineAddDraft.draftKey}
               mode={inlineAddDraft.mode}
-              contentPresets={reminderContentPresets}
               titlePresets={inlineAddDraft.mode === 'fixed' ? subTitlePresets.fixed : subTitlePresets.interval}
               restPresets={restContentPresets}
               popupThemes={popupThemes}
@@ -1729,7 +2044,6 @@ function CategoryCard(props: CategoryCardProps) {
               onConfirm={(payload) => {
                 void onConfirmInlineAdd(cat.id, payload)
               }}
-              onContentPresetsChange={onReminderContentPresetsChange}
               onTitlePresetsChange={(presets) => onSubTitlePresetsChange(inlineAddDraft.mode, presets)}
               onRestPresetsChange={onRestContentPresetsChange}
               onOpenThemeStudioList={onOpenThemeStudioList}
@@ -1760,6 +2074,7 @@ function CategoryCard(props: CategoryCardProps) {
           </div>
         </div>
       </div>
+      ) : null}
     </div>
   )
 }
@@ -1774,11 +2089,7 @@ export function Settings() {
   const [settingsPath, setSettingsPath] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [lastSaveClick, setLastSaveClick] = useState<string>('从未')
-  const [presetModal, setPresetModal] = useState<{ categoryIndex: number; itemIndex: number | null } | null>(null)
   const [repeatDropdown, setRepeatDropdown] = useState<{ categoryIndex: number; itemIndex: number } | null>(null)
-  const [editingPresetIndex, setEditingPresetIndex] = useState<number | null>(null)
-  const [editingPresetValue, setEditingPresetValue] = useState('')
-  const [newPresetValue, setNewPresetValue] = useState('')
   const [countdowns, setCountdowns] = useState<CountdownItem[]>([])
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [resettingAll, setResettingAll] = useState(false)
@@ -1832,14 +2143,6 @@ export function Settings() {
     setCategoryListFilter(f)
     const cats = reminderCategoriesRef.current
     setRepeatDropdown(null)
-    if (presetModal) {
-      const c = cats[presetModal.categoryIndex]
-      if (c && f !== 'all' && c.categoryKind !== f) {
-        setPresetModal(null)
-        setEditingPresetIndex(null)
-        setNewPresetValue('')
-      }
-    }
     setInlineAddDraft((d) => {
       if (!d) return null
       const c = cats.find((x) => x.id === d.categoryId)
@@ -1875,7 +2178,7 @@ export function Settings() {
     const cats = reminderCategoriesRef.current
     const ci = cats.findIndex((c) => c.id === categoryId)
     if (ci >= 0 && cats[ci].items.length === 0) {
-      removeCategory(ci)
+      removeCategory(ci, true)
     }
     setInlineAddDraft((d) => (d?.categoryId === categoryId ? null : d))
   }
@@ -2079,6 +2382,82 @@ export function Settings() {
     }
   }
 
+  /** 大类总开关：同时开启/关闭本类下全部闹钟、倒计时子项（秒表类无开关，不显示） */
+  const toggleCategoryAllEnabledNow = async (categoryIndex: number, enabled: boolean) => {
+    const api = getApi()
+    const cats = reminderCategoriesRef.current
+    const cat = cats[categoryIndex]
+    if (!cat) return
+    const hasTogglable = cat.items.some((it) => it.mode === 'fixed' || it.mode === 'interval')
+    if (!hasTogglable) return
+
+    const now = new Date()
+    const snapStart = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+
+    const nextCategories = cats.map((c, ci) => {
+      if (ci !== categoryIndex) return c
+      return {
+        ...c,
+        items: c.items.map((it) => {
+          if (it.mode !== 'fixed' && it.mode !== 'interval') return it
+          if (!enabled) return { ...it, enabled: false } as SubReminder
+          if (it.mode === 'fixed' && it.useNowAsStart === true) {
+            return { ...it, enabled: true, startTime: snapStart } as SubReminder
+          }
+          return { ...it, enabled: true } as SubReminder
+        }),
+      }
+    })
+
+    if (!api?.setSettings) {
+      setCategories(nextCategories)
+      return
+    }
+    try {
+      const result = await api.setSettings({ reminderCategories: nextCategories })
+      if (!result.success) {
+        setSaveError(result.error)
+        setSaveStatus('error')
+        return
+      }
+      suppressAutoSaveAfterHydrateRef.current = true
+      setSettingsState(result.data)
+      const updatedCat = result.data.reminderCategories[categoryIndex]
+      if (enabled && updatedCat) {
+        for (let ii = 0; ii < updatedCat.items.length; ii++) {
+          const prevItem = cat.items[ii]
+          const nextItem = updatedCat.items[ii]
+          if (prevItem.mode !== 'fixed' && prevItem.mode !== 'interval') continue
+          if (prevItem.enabled !== false || nextItem.enabled === false) continue
+          const key = `${updatedCat.id}_${nextItem.id}`
+          if (nextItem.mode === 'interval') {
+            const payload = {
+              categoryName: updatedCat.name,
+              content: nextItem.content,
+              mainPopupThemeId: nextItem.mainPopupThemeId,
+              restPopupThemeId: nextItem.restPopupThemeId,
+              intervalHours: nextItem.intervalHours,
+              intervalMinutes: nextItem.intervalMinutes,
+              intervalSeconds: nextItem.intervalSeconds,
+              repeatCount: nextItem.repeatCount,
+              splitCount: nextItem.splitCount,
+              restDurationSeconds: nextItem.restDurationSeconds,
+              restContent: nextItem.restContent,
+            }
+            await api.resetReminderProgress?.(key, payload)
+          } else {
+            await api.setFixedTimeCountdownOverride?.(key, nextItem.time)
+          }
+        }
+      }
+      const cds = await api.getReminderCountdowns?.()
+      if (cds) setCountdowns(cds)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+      setSaveStatus('error')
+    }
+  }
+
   const addCategoryOfKind = (kind: CategoryKind) => {
     let cats = settings.reminderCategories
     if (inlineAddDraft) {
@@ -2097,7 +2476,6 @@ export function Settings() {
       items: kind === 'stopwatch' ? [{ id: genId(), mode: 'stopwatch', content: getDefaultSubTitle('stopwatch') }] : [],
     }
     setCategories([newCat, ...cats])
-    setPresetModal((pm) => (pm ? { ...pm, categoryIndex: pm.categoryIndex + 1 } : null))
     setRepeatDropdown((rd) => (rd ? { ...rd, categoryIndex: rd.categoryIndex + 1 } : null))
     setExpandedEditSub(null)
     setInlineAddDraft(
@@ -2120,11 +2498,22 @@ export function Settings() {
     setCategories(next)
   }
 
-  const removeCategory = (categoryIndex: number) => {
-    const removedCat = settings.reminderCategories[categoryIndex]
+  const removeCategory = (categoryIndex: number, skipConfirm = false) => {
+    const cat = settings.reminderCategories[categoryIndex]
+    if (!cat) return
+    if (!skipConfirm) {
+      const name = (cat.name ?? '').trim() || getDefaultCategoryName(cat.categoryKind)
+      const n = cat.items.length
+      if (
+        !window.confirm(
+          `确定删除大类「${name}」及其下 ${n} 个子项吗？\n删除后无法恢复。`,
+        )
+      ) {
+        return
+      }
+    }
+    const removedCat = cat
     setCategories(settings.reminderCategories.filter((_, i) => i !== categoryIndex))
-    if (presetModal?.categoryIndex === categoryIndex) setPresetModal(null)
-    if (presetModal && presetModal.categoryIndex > categoryIndex) setPresetModal({ ...presetModal, categoryIndex: presetModal.categoryIndex - 1 })
     if (repeatDropdown?.categoryIndex === categoryIndex) setRepeatDropdown(null)
     if (repeatDropdown && repeatDropdown.categoryIndex > categoryIndex) setRepeatDropdown({ ...repeatDropdown, categoryIndex: repeatDropdown.categoryIndex - 1 })
     if (removedCat && expandedEditSub?.categoryId === removedCat.id) setExpandedEditSub(null)
@@ -2321,10 +2710,14 @@ export function Settings() {
   }
 
   const removeItem = (categoryIndex: number, itemIndex: number) => {
-    const removed = settings.reminderCategories[categoryIndex]?.items[itemIndex]
+    const cat = settings.reminderCategories[categoryIndex]
+    const removed = cat?.items[itemIndex]
+    if (!cat || !removed) return
+    const label = subReminderConfirmLabel(removed)
+    if (!window.confirm(`确定删除子项「${label}」吗？\n删除后无法恢复。`)) return
     const next = settings.reminderCategories.slice()
-    const cat = { ...next[categoryIndex], items: next[categoryIndex].items.filter((_, i) => i !== itemIndex) }
-    next[categoryIndex] = cat
+    const patchedCat = { ...next[categoryIndex], items: next[categoryIndex].items.filter((_, i) => i !== itemIndex) }
+    next[categoryIndex] = patchedCat
     setCategories(next)
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex === itemIndex) setRepeatDropdown(null)
     if (repeatDropdown?.categoryIndex === categoryIndex && repeatDropdown.itemIndex > itemIndex) setRepeatDropdown({ ...repeatDropdown, itemIndex: repeatDropdown.itemIndex - 1 })
@@ -2353,7 +2746,6 @@ export function Settings() {
     setPresetPools({ ...settings.presetPools, ...patch })
   }
 
-  const reminderContentPresets = settings.presetPools.reminderContent ?? []
   const restContentPresets = settings.presetPools.restContent ?? []
   const subTitlePresets = settings.presetPools.subTitle ?? getDefaultPresetPools().subTitle
   const popupThemes = Array.isArray(settings.popupThemes) ? settings.popupThemes : getDefaultPopupThemes()
@@ -2530,42 +2922,7 @@ export function Settings() {
     setSaveError('')
   }
 
-  const setReminderContentPresets = (presets: string[]) => updatePresetPools({ reminderContent: presets })
   const setRestContentPresets = (presets: string[]) => updatePresetPools({ restContent: presets })
-
-  const applyPresetToItem = (categoryIndex: number, itemIndex: number, text: string) => {
-    const it = settings.reminderCategories[categoryIndex]?.items[itemIndex]
-    if (it?.mode === 'stopwatch') return
-    updateItem(categoryIndex, itemIndex, { content: text })
-    if (presetModal) setPresetModal(null)
-  }
-
-  const addPreset = (_categoryIndex: number) => {
-    const v = newPresetValue.trim()
-    if (!v) return
-    setReminderContentPresets([...reminderContentPresets, v])
-    setNewPresetValue('')
-  }
-
-  const deletePreset = (_categoryIndex: number, index: number) => {
-    setReminderContentPresets(reminderContentPresets.filter((_, i) => i !== index))
-    if (editingPresetIndex === index) setEditingPresetIndex(null)
-    else if (editingPresetIndex != null && editingPresetIndex > index) setEditingPresetIndex(editingPresetIndex - 1)
-  }
-
-  const startEditPreset = (index: number) => {
-    setEditingPresetIndex(index)
-    setEditingPresetValue(reminderContentPresets[index] ?? '')
-  }
-
-  const saveEditPreset = (_categoryIndex: number) => {
-    if (editingPresetIndex == null) return
-    const list = reminderContentPresets.slice()
-    list[editingPresetIndex] = editingPresetValue.trim() || list[editingPresetIndex]
-    setReminderContentPresets(list)
-    setEditingPresetIndex(null)
-    setEditingPresetValue('')
-  }
 
   const save = async () => {
     setLastSaveClick(new Date().toLocaleTimeString('zh-CN'))
@@ -2793,7 +3150,6 @@ export function Settings() {
             const newOrder = arrayMove(filtered, oldIdx, newIdx)
             const merged = categoryListFilter === 'all' ? newOrder : mergeVisibleCategoryOrder(settings.reminderCategories, newOrder)
             setCategories(merged)
-            setPresetModal(null)
             setRepeatDropdown(null)
             setExpandedEditSub(null)
             setInlineAddDraft(null)
@@ -2834,7 +3190,6 @@ export function Settings() {
                 setCategoryItems={setCategoryItems}
                 updateItem={updateItem}
                 removeItem={removeItem}
-                reminderContentPresets={reminderContentPresets}
                 restContentPresets={restContentPresets}
                 subTitlePresets={subTitlePresets}
                 popupThemes={popupThemes}
@@ -2842,7 +3197,6 @@ export function Settings() {
                 onOpenThemeStudioEdit={openThemeStudioEditFromSubitem}
                 getCategoryTitlePresets={getCategoryTitlePresets}
                 onCategoryTitlePresetsChange={setCategoryTitlePresets}
-                onReminderContentPresetsChange={setReminderContentPresets}
                 onRestContentPresetsChange={setRestContentPresets}
                 onSubTitlePresetsChange={setSubTitlePresetsByMode}
                 repeatDropdown={repeatDropdown}
@@ -2854,6 +3208,7 @@ export function Settings() {
                 onConfirmEmbeddedEdit={(cid, iid, payload) => handleEditSubReminderConfirm(cid, iid, payload)}
                 addStopwatchItem={addStopwatchItem}
                 onToggleEnabledNow={(ci, ii, enabled) => void toggleReminderEnabledNow(ci, ii, enabled)}
+                onToggleCategoryAllEnabled={(ci, enabled) => void toggleCategoryAllEnabledNow(ci, enabled)}
                 subReminderThemeEditor={subReminderThemeEditor}
                 popupThemeRemotePatch={popupThemeRemotePatch}
                 onConsumePopupThemeRemotePatch={() => setPopupThemeRemotePatch(null)}
@@ -2896,61 +3251,6 @@ export function Settings() {
         </div>
         )}
       </main>
-
-      {presetModal !== null && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
-          onClick={() => { setPresetModal(null); setEditingPresetIndex(null); setNewPresetValue('') }}
-        >
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full max-h-[80vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="px-4 py-3 border-b border-slate-200 flex justify-between items-center">
-              <h3 className="font-medium text-slate-800">主弹窗文案预设（闹钟/倒计时共享）</h3>
-              <button type="button" className="text-slate-400 hover:text-slate-600 text-xl leading-none" onClick={() => { setPresetModal(null); setEditingPresetIndex(null); setNewPresetValue('') }}>×</button>
-            </div>
-            <div className="p-4 overflow-auto flex-1">
-              <ul className="space-y-2">
-                {reminderContentPresets.map((p, i) => (
-                  <li key={i} className="flex items-center gap-2 flex-wrap">
-                    {editingPresetIndex === i ? (
-                      <>
-                        <input
-                          type="text"
-                          value={editingPresetValue}
-                          onChange={(e) => setEditingPresetValue(e.target.value)}
-                          className="flex-1 min-w-0 rounded border border-slate-300 px-2 py-1 text-sm"
-                          autoFocus
-                        />
-                        <button type="button" className="rounded bg-slate-700 text-white px-2 py-1 text-sm" onClick={() => saveEditPreset(presetModal.categoryIndex)}>保存</button>
-                        <button type="button" className="rounded border border-slate-300 px-2 py-1 text-sm" onClick={() => { setEditingPresetIndex(null); setEditingPresetValue('') }}>取消</button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="flex-1 min-w-0 text-sm truncate">{p || '(空)'}</span>
-                        {presetModal.itemIndex !== null && (
-                          <button type="button" className="text-green-600 hover:text-green-700 text-sm" onClick={() => applyPresetToItem(presetModal.categoryIndex, presetModal.itemIndex!, p)}>使用</button>
-                        )}
-                        <button type="button" className="text-slate-600 hover:text-slate-800 text-sm" onClick={() => startEditPreset(i)}>编辑</button>
-                        <button type="button" className="text-red-600 hover:text-red-700 text-sm" onClick={() => deletePreset(presetModal.categoryIndex, i)}>删除</button>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-4 flex gap-2">
-                <input
-                  type="text"
-                  value={newPresetValue}
-                  onChange={(e) => setNewPresetValue(e.target.value)}
-                  placeholder="新增预设内容"
-                  className="flex-1 rounded border border-slate-300 px-3 py-1.5 text-sm"
-                  onKeyDown={(e) => e.key === 'Enter' && addPreset(presetModal.categoryIndex)}
-                />
-                <button type="button" className="rounded bg-slate-700 text-white px-3 py-1.5 text-sm" onClick={() => addPreset(presetModal.categoryIndex)}>添加</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showResetConfirm && (
         <div

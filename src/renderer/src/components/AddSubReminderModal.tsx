@@ -110,15 +110,12 @@ export type OpenThemeStudioEditFromSubitemArgs = {
 export type AddSubReminderModalProps = {
   open: boolean
   mode: 'fixed' | 'interval'
-  /** 已改为在预览内编辑主文案；保留可选供将来扩展 */
-  contentPresets?: string[]
   titlePresets: string[]
-  /** 已改为在预览内编辑休息提示；保留可选供将来扩展 */
+  /** 休息壁纸预览相关预设池（可选） */
   restPresets?: string[]
   popupThemes: PopupTheme[]
   onClose: () => void
   onConfirm: (payload: AddSubReminderPayload) => void
-  onContentPresetsChange?: (presets: string[]) => void
   /** 更新子项标题预设（按 mode 分池） */
   onTitlePresetsChange: (presets: string[]) => void
   onRestPresetsChange?: (presets: string[]) => void
@@ -179,13 +176,11 @@ function popupRestTextFromTheme(theme: PopupTheme | undefined): string {
 export function AddSubReminderModal({
   open,
   mode,
-  contentPresets: _contentPresets,
   titlePresets,
   restPresets: _restPresets,
   popupThemes,
   onClose,
   onConfirm,
-  onContentPresetsChange: _onContentPresetsChange,
   onTitlePresetsChange,
   onRestPresetsChange: _onRestPresetsChange,
   variant = 'create',
@@ -690,6 +685,7 @@ export function AddSubReminderModal({
                 onPresetsChange={onTitlePresetsChange}
                 mainPlaceholder="请输入标题"
                 autoFocusInput
+                inputClassName="font-bold"
               />
             </div>
           </section>
@@ -961,10 +957,10 @@ export function AddSubReminderModal({
             {splitErr && <p className="w-full text-center text-xs text-red-600 mt-3">{splitErr}</p>}
           </section>
 
-          {/* 5. 弹窗编辑 — 左右并排（splitN > 1）；详细编辑在主题工坊整页 */}
+          {/* 5. 壁纸预览与绑定 — 左右并排（splitN > 1）；详细编辑在主题工坊 */}
           <section className="w-full self-stretch">
             <div className="mb-4 flex items-center justify-center gap-3">
-              <h4 className="text-sm font-medium text-slate-600">弹窗设置</h4>
+              <h4 className="text-sm font-medium text-slate-600">壁纸设置</h4>
               {onOpenThemeStudioList && (
                 <button
                   type="button"
@@ -976,7 +972,7 @@ export function AddSubReminderModal({
               )}
             </div>
             <div className={popupThemeLayoutClass}>
-              {/* 休息弹窗卡片（左列，仅 splitN > 1） */}
+              {/* 休息壁纸卡片（左列，仅 splitN > 1） */}
               {showRestPopupCard && (
                 <div
                   className="min-w-0 overflow-hidden rounded-lg border border-slate-200"
@@ -985,11 +981,11 @@ export function AddSubReminderModal({
                   onFocusCapture={() => setHighlightPopupType('rest')}
                   onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setHighlightPopupType(null) }}
                 >
-                  <div className="bg-blue-500 px-3 py-1.5 text-center text-sm font-medium text-white">休息弹窗</div>
+                  <div className="bg-blue-500 px-3 py-1.5 text-center text-sm font-medium text-white">休息壁纸</div>
                   <div className="border-t border-blue-400" />
                   <div className="space-y-3 p-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm text-slate-500 shrink-0">主题</span>
+                      <span className="text-sm text-slate-500 shrink-0">壁纸</span>
                       <select
                         value={restPopupThemeId}
                         onChange={(e) => {
@@ -1046,7 +1042,7 @@ export function AddSubReminderModal({
                   </div>
                 </div>
               )}
-              {/* 结束弹窗卡片（右列，或 splitN ≤ 1 时居中半宽） */}
+              {/* 结束壁纸卡片（右列，或 splitN ≤ 1 时居中半宽） */}
               {showMainPopupCard && (
               <div
                 className={`min-w-0 overflow-hidden rounded-lg border border-slate-200 ${
@@ -1057,11 +1053,11 @@ export function AddSubReminderModal({
                 onFocusCapture={() => setHighlightPopupType('main')}
                 onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setHighlightPopupType(null) }}
               >
-                <div className="bg-green-500 px-3 py-1.5 text-center text-sm font-medium text-white">结束弹窗</div>
+                <div className="bg-green-500 px-3 py-1.5 text-center text-sm font-medium text-white">结束壁纸</div>
                 <div className="border-t border-green-400" />
                 <div className="space-y-3 p-3">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm text-slate-500 shrink-0">主题</span>
+                    <span className="text-sm text-slate-500 shrink-0">壁纸</span>
                     <select
                       value={mainPopupThemeId}
                       onChange={(e) => {
