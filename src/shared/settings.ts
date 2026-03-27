@@ -444,21 +444,28 @@ function genId(): string {
   return `id_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
 }
 
-const defaultMealPresets = ['记得吃早餐哦～', '该吃午饭啦，休息一下～', '记得吃晚饭～', '按时吃饭，身体棒棒']
-const defaultActivityPresets = ['坐太久啦，站起来动一动、看看远处吧～', '活动一下，伸个懒腰吧', '喝杯水，走一走']
-const defaultRestPresets = ['已经工作一段时间了，休息一下吧～', '休息一下，眼睛看看远处', '喝杯水再继续']
+/** 工作日重复：周日 false，周一～周五 true，周六 false（与 Date.getDay() 一致） */
+const WEEKDAY_MON_TO_FRI: boolean[] = [false, true, true, true, true, true, false]
+
+const defaultAlarmPoolPresets = [
+  '上午专注时段结束啦，休息一下吧～',
+  '下午专注时段结束啦，准备收尾吧～',
+  '时间到啦',
+]
+const defaultCountdownPoolPresets = ['番茄时间到了，起来动一动～', '本轮专注结束', '短暂休息，稍后继续']
+const defaultStopwatchCategoryPresets: string[] = []
 
 export function getDefaultPresetPools(): PresetPools {
   return {
     categoryTitle: {
-      alarm: ['用餐提醒', '作息提醒', '通勤提醒'],
-      countdown: ['久坐活动', '专注节奏', '健康打卡'],
-      stopwatch: ['专注计时', '任务计时', '训练计时'],
+      alarm: ['专注闹钟', '作息提醒', '分段计时'],
+      countdown: ['番茄钟', '间歇提醒', '健康节奏'],
+      stopwatch: ['秒表', '任务计时', '训练计时'],
     },
     subTitle: {
-      fixed: ['早餐', '午餐', '晚餐', '下班准备', '睡前放松'],
-      interval: ['喝水', '起身活动', '远眺护眼', '专注一轮', '复盘整理'],
-      stopwatch: ['代码冲刺', '会议计时', '阅读计时', '训练组间', '自定义计时'],
+      fixed: ['上午专注', '下午专注', '深度工作', '晚间段', '自定义时段'],
+      interval: ['番茄钟', '喝水', '起身活动', '远眺护眼', '复盘整理'],
+      stopwatch: ['专注计时', '会议计时', '阅读计时', '训练组间', '自定义'],
     },
     reminderContent: [
       '起床',
@@ -690,40 +697,63 @@ export function getDefaultEntitlements(): AppEntitlements {
   return { popupThemeLevel: 'free' }
 }
 
-/** 默认提醒分类（对应原吃饭/活动/休息） */
+/** 默认提醒分类（首装模板：两段时间闹钟 + 番茄倒计时 + 秒表，均默认关闭） */
 export function getDefaultReminderCategories(): ReminderCategory[] {
   return [
     {
       id: genId(),
-      name: '吃饭',
+      name: '闹钟',
       categoryKind: 'alarm',
-      presets: [...defaultMealPresets],
+      presets: [...defaultAlarmPoolPresets],
       titlePresets: [],
       items: [
-        { id: genId(), mode: 'fixed', enabled: true, time: '08:00', content: defaultMealPresets[0] },
-        { id: genId(), mode: 'fixed', enabled: true, time: '12:00', content: defaultMealPresets[1] },
-        { id: genId(), mode: 'fixed', enabled: true, time: '18:00', content: defaultMealPresets[2] },
+        {
+          id: genId(),
+          mode: 'fixed',
+          enabled: false,
+          title: '上午专注',
+          startTime: '09:00',
+          time: '12:00',
+          content: defaultAlarmPoolPresets[0],
+          weekdaysEnabled: [...WEEKDAY_MON_TO_FRI],
+        },
+        {
+          id: genId(),
+          mode: 'fixed',
+          enabled: false,
+          title: '下午专注',
+          startTime: '13:30',
+          time: '18:00',
+          content: defaultAlarmPoolPresets[1],
+          weekdaysEnabled: [...WEEKDAY_MON_TO_FRI],
+        },
       ],
     },
     {
       id: genId(),
-      name: '活动',
+      name: '倒计时',
       categoryKind: 'countdown',
-      presets: [...defaultActivityPresets],
+      presets: [...defaultCountdownPoolPresets],
       titlePresets: [],
       items: [
-        { id: genId(), mode: 'interval', enabled: true, intervalMinutes: 45, content: defaultActivityPresets[0], repeatCount: null },
+        {
+          id: genId(),
+          mode: 'interval',
+          enabled: false,
+          title: '番茄钟',
+          intervalMinutes: 25,
+          content: defaultCountdownPoolPresets[0],
+          repeatCount: null,
+        },
       ],
     },
     {
       id: genId(),
-      name: '休息',
-      categoryKind: 'countdown',
-      presets: [...defaultRestPresets],
+      name: '秒表',
+      categoryKind: 'stopwatch',
+      presets: [...defaultStopwatchCategoryPresets],
       titlePresets: [],
-      items: [
-        { id: genId(), mode: 'interval', enabled: true, intervalMinutes: 25, content: defaultRestPresets[0], repeatCount: null },
-      ],
+      items: [{ id: genId(), mode: 'stopwatch', content: '专注计时' }],
     },
   ]
 }
@@ -732,36 +762,59 @@ export function getDefaultReminderCategories(): ReminderCategory[] {
 export function getStableDefaultCategories(): ReminderCategory[] {
   return [
     {
-      id: 'cat_meal',
-      name: '吃饭',
+      id: 'cat_alarm',
+      name: '闹钟',
       categoryKind: 'alarm',
-      presets: [...defaultMealPresets],
+      presets: [...defaultAlarmPoolPresets],
       titlePresets: [],
       items: [
-        { id: 'meal_breakfast', mode: 'fixed', enabled: true, time: '08:00', content: defaultMealPresets[0] },
-        { id: 'meal_lunch', mode: 'fixed', enabled: true, time: '12:00', content: defaultMealPresets[1] },
-        { id: 'meal_dinner', mode: 'fixed', enabled: true, time: '18:00', content: defaultMealPresets[2] },
+        {
+          id: 'alarm_morning',
+          mode: 'fixed',
+          enabled: false,
+          title: '上午专注',
+          startTime: '09:00',
+          time: '12:00',
+          content: defaultAlarmPoolPresets[0],
+          weekdaysEnabled: [...WEEKDAY_MON_TO_FRI],
+        },
+        {
+          id: 'alarm_afternoon',
+          mode: 'fixed',
+          enabled: false,
+          title: '下午专注',
+          startTime: '13:30',
+          time: '18:00',
+          content: defaultAlarmPoolPresets[1],
+          weekdaysEnabled: [...WEEKDAY_MON_TO_FRI],
+        },
       ],
     },
     {
-      id: 'cat_activity',
-      name: '活动',
+      id: 'cat_countdown',
+      name: '倒计时',
       categoryKind: 'countdown',
-      presets: [...defaultActivityPresets],
+      presets: [...defaultCountdownPoolPresets],
       titlePresets: [],
       items: [
-        { id: 'activity_1', mode: 'interval', enabled: true, intervalMinutes: 45, content: defaultActivityPresets[0], repeatCount: null },
+        {
+          id: 'cd_pomodoro',
+          mode: 'interval',
+          enabled: false,
+          title: '番茄钟',
+          intervalMinutes: 25,
+          content: defaultCountdownPoolPresets[0],
+          repeatCount: null,
+        },
       ],
     },
     {
-      id: 'cat_rest',
-      name: '休息',
-      categoryKind: 'countdown',
-      presets: [...defaultRestPresets],
+      id: 'cat_stopwatch',
+      name: '秒表',
+      categoryKind: 'stopwatch',
+      presets: [],
       titlePresets: [],
-      items: [
-        { id: 'rest_1', mode: 'interval', enabled: true, intervalMinutes: 25, content: defaultRestPresets[0], repeatCount: null },
-      ],
+      items: [{ id: 'sw_focus', mode: 'stopwatch', content: '专注计时' }],
     },
   ]
 }

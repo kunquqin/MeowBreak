@@ -128,7 +128,7 @@
 
 ### 4.4 状态与持久化
 
-- **设置**：开发环境（有 `VITE_DEV_SERVER_URL`）写入项目根目录 `workbreak-settings.json`，便于排查；生产环境写入 `app.getPath('userData')/settings.json`。主进程启动时 `app.setName('workbreak')` 保证 userData 路径一致。
+- **设置**：开发环境（有 `VITE_DEV_SERVER_URL`）写入项目根目录 `workbreak-settings.json`，便于排查；同时将 `app.setPath('userData')` 指到仓库内 `.electron-user-data/`，避免与已安装版共用 `%APPDATA%\workbreak` 导致 Chromium 缓存锁/0x5 秒退。生产环境写入 `app.getPath('userData')/settings.json`。主进程启动时 `app.setName('workbreak')` 保证正式包 userData 路径一致。
 - **保存设置**：仅将当前配置写入磁盘（`setSettings`），**不**调用 `restartReminders()`、**不**清除闹钟（fixed）override，因此不会重置任何提醒的起始点或进度。
 - **全部重置**：设置页提供「全部重置」按钮，调用主进程 `resetAllReminderProgress()`，将所有**闹钟**子项设为“从当前时刻开始”、所有**倒计时**子项从当前时刻重新排程；使用当前已保存的配置（`getSettings()`）。
 - 提醒计划、定时器均在主进程 `reminders.ts`，以主进程为“单一事实来源”；应用启动时由 `startReminders()` 排程。

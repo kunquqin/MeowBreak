@@ -4,6 +4,16 @@
 
 ## 0.1 文字参数区布局重构（本轮）
 
+- **深色顶栏分页 + 子项时钟块颜色（本次修复）**：全局 `html.dark` 将 `bg-slate-800/900` 映射为 `#1e1e1e` / `#0f172a`，导致「全部/闹钟…」选中态与顶栏卡 `#1f1f1f` 对比消失、左右时间块发灰蓝。已为分页加 `wb-filter-tab` + `data-active`（与既有筛选按钮深色规则一致）、「主题工坊」加 `wb-settings-studio-tab`；子项时间按钮改为 `wb-subitem-clock-btn`（浅色保留 slate-9/8 语义，深色为近黑底 + hover `#262626`）。顺带补齐 `@media (prefers-color-scheme: dark)` 首轮未闭合导致后续 `html.dark` 被误嵌套的括号。
+
+- **设置页「立即保存 / 全部重置」回顶栏（本次修复）**：相对 `v0.0.21`，当前分支曾将两按钮挪到 `main` 底部；已恢复为与 `+ 闹钟/倒计时/秒表类型` 同一行（`git diff v0.0.21` 对照），`saveError` 仍紧跟该行下方；「立即保存」保留 `wb-save-now-btn` 以便深色样式一致。
+
+- **开发 bat 启动失败：cache 0x5 / Gpu Cache（本次修复）**：Windows 下开发与安装版同用 `app.setName('workbreak')` 时默认共用 `%APPDATA%\workbreak`，Chromium 迁移/创建磁盘缓存易 `Unable to move the cache`（0x5 拒绝访问）后进程退出。已在 `main/index.ts` 于 `VITE_DEV_SERVER_URL` 存在时将 `userData` 重定向到项目根 `.electron-user-data/`（`.gitignore` 已忽略）；设置文件仍用根目录 `workbreak-settings.json`。
+
+- **深色模式下子项下拉与拖拽被裁切（本次修复）**：`index.css` 曾对 `html.dark` 及「跟随系统深色」下**所有** `.rounded-lg` 强制 `overflow: hidden !important`（原意为 embedded 弹窗表头圆角）。设置页闹钟/倒计时子项外层也使用 `rounded-lg`，深色生效后该规则截断「重复星期」「重复次数 ∞–10」等绝对定位下拉，并压过 `CategoryCard` 的 `overflow-visible`，使子项拖拽排序像在分类卡片内被裁切。已移除上述全局 `overflow:hidden`，仅保留针对表头/底角的 `border-radius` 配合规则；需圆角裁切的容器继续在组件上显式使用 `overflow-hidden`（如 `ThemeStudio` 列表壳层）。未重新打包，待测试版确认后再出包。
+
+- **安装版浅色模式部分输入框发浅绿（本次修复）**：根因是部分机器上的 Electron/Chromium 对输入控件触发了 `:-webkit-autofill` 默认底色（浅绿色），导致子项新建/编辑弹窗里仅部分字段变绿且输入后不一定恢复。已在 `src/renderer/src/index.css` 增加全局 autofill 覆盖（浅色/深色/跟随系统深色三套），并为 `PresetTextField` 及 `AddSubReminderModal` 的数字输入补 `autoComplete="off"`，统一消除绿色底色干扰。已执行 `npm run build:win`，重新产出 `release/WorkBreak-0.0.19-Setup.exe` 供跨机器复测。
+
 - **深色模式下主题预览涂黑（本次修复）**：`index.css` 的深色覆盖曾包含过宽选择器 `html.dark [role="dialog"] div`（并伴随 `rounded-xl` 泛匹配），导致主题编辑预览画布内所有层（含文字层、框选层、遮罩层）被强制刷成深色背景，出现“框选拖过变深色块 / 文字后黑底 / 遮罩不透底”。现已收敛为仅覆盖 `bg-white` 相关类，不再污染预览画布内部图层。建议手测：深色模式下进入壁纸主题编辑，验证框选、文字层与遮罩透明度均恢复正常。
 
 - **深色模式对比度补齐（本次修复）**：`PopupThemeLayersBar` 图层选中行增加深色专用样式（`dark:border-sky-500/55 + dark:bg-slate-600/85 + dark:ring-sky-400/35`），避免“亮底白字”读不清；`ThemeStudio` 顶栏「恢复默认」按钮补深色专用文字与底色（`dark:text-amber-200` 等），提升暗色主题下可读性。
@@ -33,6 +43,11 @@
 - **图片图层属性区重排（本次修复）**：`PopupThemeEditorPanel` 中 `图片层 · 属性` 去掉外层青色边框卡片，改为与文本属性一致的平铺分区；参数顺序调整为 **图片路径（路径输入框 + 更换图片按钮）→ 填充 → 变换**。图片 `变换` 现对齐背景图交互：**水平位移/垂直位移（-50~50）+ 旋转 + 缩放 + 重置**，位移以图片层中心点百分比映射，保持现有预览与真弹窗渲染语义。
 - **预览区新增自动吸附开关（本次实现）**：在 `ThemeStudioEditWorkspace` 的预览工具栏右侧（全屏预览按钮左边）增加「吸附」开关按钮，默认开启。开时 `ThemePreviewEditor` 的 Moveable 启用 `snappable/snapGap/elementGuidelines/horizontalGuidelines/verticalGuidelines`；关时上述吸附能力全部关闭，图层可自由移动不再贴边或贴元素参考线。
 - **深色主题按钮风格统一（本次修复）**：补齐 `ThemePreviewEditor` 顶部对齐/打组按钮与分隔线、`ThemeStudio` 顶部「吸附」按钮、`PopupThemeLayersBar` 的「+ 主文本」按钮在 `dark` 下的边框/底色/文字/hover 规则，统一到现有工具栏按钮体系，避免深色模式下出现浅色态残留和对比不一致。
+- **图层管理区左右裁切感修复（本次）**：`PopupThemeLayersBar` 的图层列表滚动容器从右内边距改为两侧内边距（`pr-0.5` → `px-1`），给每行卡片的边框/阴影留出安全显示空间，避免贴边时出现左右被“截断一条边”的视觉问题。
+- **深色背景再压暗（本次）**：`index.css` 中深色与跟随系统深色分支统一下调到更接近黑色：页面主背景 `#121212`、卡片底 `#1f1f1f`、`bg-slate-50*` 系列改为 `#1a1a1a`。这样设置页整体更深，子项卡片（使用 `bg-slate-50`）也同步再暗一档。
+- **子项底部「添加…」按钮样式对齐（本次）**：`Settings.tsx` 中子项下方「+ 添加闹钟/倒计时/秒表」按钮改为复用 `wb-add-type-btn` 的配色体系，并调整为与顶部「+ 类型」一致的默认/hover 视觉（边框、文字、背景），但保持**实线边框**（不使用虚线）。
+- **打包版 preload API 缺失修复（本次）**：`src/main/index.ts` 生产环境加载 `../preload/index.cjs`，但 `src/preload/index.ts` 之前缺少 `getReminderCountdowns/resetReminderProgress/setFixedTimeCountdownOverride/resetAllReminderProgress/restartReminders/onMenuUndo/onMenuRedo`。导致打包安装到其他电脑后提醒进度条与部分交互失效。现已补齐 `index.ts` 与 `preload.cjs` 能力对齐，避免“开发机正常、安装机异常”。
+- **首装默认预置（延续 / 再改版）**：三大类模板：`闹钟`（上午专注 `09:00–12:00`、下午专注 `13:30–18:00`，工作日 `weekdaysEnabled`，**默认全部 `enabled: false`**）、`倒计时`（单条 **番茄钟 25 分钟**，默认关闭）、`秒表`（单条「专注计时」）。`getDefaultPresetPools` 对齐专注/番茄文案池。`main/settings.ts` 的 **`migrateFromLegacy`** 已按新三类结构重写（旧「三餐/活动/休息」扁平均射到新 alarm / countdown，必要时追加晚餐 fixed 或第二条 interval）。**应用设置**：顶栏 **「设置」** 内仅保留 **配置文件**：展示当前/默认路径、`showSettingsInFolder`、**另存为并改用** / **改用已有** / **恢复默认**；自定义路径由 `userData/settings-file-location.json` 指向，API 见 `getSettingsPathMeta`、`saveCurrentSettingsToCustomPath`、`pointSettingsToExistingFile`、`resetSettingsFileToDefaultLocation` 与对应 IPC（成功后 `restartReminders`）。不在此页编辑预设池（仍在各输入处就地维护）。
 
 - **主题工坊浮动编辑**：第二行仅主题名 + 居中「恢复默认/设为桌面壁纸」+ 右侧取消/保存等；**预览比例** 在 **ThemePreviewEditor** 顶栏 **行内居中**（`toolbarCenter`），全屏预览仍 **最右侧**（`toolbarTrailing`）。
 

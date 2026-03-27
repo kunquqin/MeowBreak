@@ -60,7 +60,7 @@ export function ThemeToggle({ value, onChange }: ThemeToggleProps) {
       type="button"
       onClick={cycle}
       title={LABELS[value]}
-      className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium border
+      className="wb-theme-toggle-btn box-border inline-flex h-9 min-h-9 items-center justify-center gap-1.5 rounded-md border px-3 text-sm font-medium
                  border-slate-300 bg-white text-slate-700
                  hover:bg-slate-50 hover:border-slate-400
                  dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200

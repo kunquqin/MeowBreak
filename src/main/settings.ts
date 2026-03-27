@@ -1,6 +1,6 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { join, dirname, resolve } from 'node:path'
 import type {
   AppSettings,
   BackgroundImageXYKind,
@@ -16,6 +16,7 @@ import type {
 } from '../shared/settings'
 import { isPopupFontFamilyPresetId, sanitizeSystemFontFamilyName } from '../shared/popupThemeFonts'
 import {
+  genId,
   getDefaultPresetPools,
   getStableDefaultCategories,
   getDefaultPopupThemes,
@@ -97,49 +98,88 @@ function hasLegacyFields(data: unknown): data is LegacySettings {
   )
 }
 
-/** 将旧版扁平配置转为 reminderCategories */
+/** 将旧版扁平配置转为 reminderCategories（模板为：闹钟两条 fixed + 倒计时一条 interval + 秒表） */
 function migrateFromLegacy(legacy: LegacySettings): ReminderCategory[] {
   const cats = getStableDefaultCategories()
-  const meal = cats[0]
-  const activity = cats[1]
-  const rest = cats[2]
+  const alarm = cats[0]
+  const countdown = cats[1]
   type FixedItem = Extract<SubReminder, { mode: 'fixed' }>
   type IntervalItem = Extract<SubReminder, { mode: 'interval' }>
-  if (legacy.breakfastTime != null) {
-    const cur = meal.items[0] as FixedItem
-    meal.items[0] = { ...cur, mode: 'fixed', time: legacy.breakfastTime, content: legacy.breakfastContent ?? cur.content }
+  if (legacy.breakfastTime != null && alarm.items[0]?.mode === 'fixed') {
+    const cur = alarm.items[0] as FixedItem
+    alarm.items[0] = {
+      ...cur,
+      mode: 'fixed',
+      time: legacy.breakfastTime,
+      content: legacy.breakfastContent ?? cur.content,
+    }
   }
-  if (legacy.lunchTime != null) {
-    const cur = meal.items[1] as FixedItem
-    meal.items[1] = { ...cur, mode: 'fixed', time: legacy.lunchTime, content: legacy.lunchContent ?? cur.content }
+  if (legacy.lunchTime != null && alarm.items[1]?.mode === 'fixed') {
+    const cur = alarm.items[1] as FixedItem
+    alarm.items[1] = {
+      ...cur,
+      mode: 'fixed',
+      time: legacy.lunchTime,
+      content: legacy.lunchContent ?? cur.content,
+    }
   }
   if (legacy.dinnerTime != null) {
-    const cur = meal.items[2] as FixedItem
-    meal.items[2] = { ...cur, mode: 'fixed', time: legacy.dinnerTime, content: legacy.dinnerContent ?? cur.content }
+    const template = (alarm.items[0] as FixedItem | undefined) ?? {
+      id: genId(),
+      mode: 'fixed' as const,
+      enabled: false,
+      time: '18:00',
+      content: '记得吃晚饭～',
+    }
+    alarm.items.push({
+      ...template,
+      id: `meal_dinner_${genId().slice(-8)}`,
+      title: '晚餐',
+      enabled: false,
+      startTime: '17:30',
+      time: legacy.dinnerTime,
+      content: legacy.dinnerContent ?? '记得吃晚饭～',
+      weekdaysEnabled: template.weekdaysEnabled,
+    })
   }
-  if (Array.isArray(legacy.mealPresets)) meal.presets = legacy.mealPresets
-  if (typeof legacy.activityIntervalMinutes === 'number') {
-    const cur = activity.items[0] as IntervalItem
-    activity.items[0] = {
+  if (Array.isArray(legacy.mealPresets)) alarm.presets = legacy.mealPresets
+
+  const hasActivityInterval = typeof legacy.activityIntervalMinutes === 'number'
+  const hasWorkRest = typeof legacy.workMinutes === 'number'
+
+  if (hasActivityInterval && countdown.items[0]?.mode === 'interval') {
+    const cur = countdown.items[0] as IntervalItem
+    countdown.items[0] = {
       ...cur,
       mode: 'interval',
-      intervalMinutes: Math.max(1, legacy.activityIntervalMinutes),
+      intervalMinutes: Math.max(1, legacy.activityIntervalMinutes!),
       content: legacy.activityContent ?? cur.content,
       repeatCount: null,
     }
   }
-  if (Array.isArray(legacy.activityPresets)) activity.presets = legacy.activityPresets
-  if (typeof legacy.workMinutes === 'number') {
-    const cur = rest.items[0] as IntervalItem
-    rest.items[0] = {
-      ...cur,
+  if (Array.isArray(legacy.activityPresets)) countdown.presets = legacy.activityPresets
+  if (Array.isArray(legacy.restPresets)) {
+    countdown.presets = uniqStrings([...(countdown.presets ?? []), ...legacy.restPresets])
+  }
+
+  if (hasWorkRest) {
+    const restContent = legacy.restContent ?? '已经工作一段时间了，休息一下吧～'
+    const newItem: IntervalItem = {
+      id: `legacy_work_${genId().slice(-8)}`,
       mode: 'interval',
-      intervalMinutes: Math.max(1, legacy.workMinutes),
-      content: legacy.restContent ?? cur.content,
+      enabled: false,
+      intervalMinutes: Math.max(1, legacy.workMinutes!),
+      content: restContent,
       repeatCount: null,
     }
+    if (hasActivityInterval) {
+      countdown.items.push(newItem)
+    } else if (countdown.items[0]?.mode === 'interval') {
+      countdown.items[0] = { ...(countdown.items[0] as IntervalItem), ...newItem, id: (countdown.items[0] as IntervalItem).id }
+    } else {
+      countdown.items.push(newItem)
+    }
   }
-  if (Array.isArray(legacy.restPresets)) rest.presets = legacy.restPresets
   return cats
 }
 
@@ -764,8 +804,10 @@ function normalizeEntitlements(raw: unknown): AppEntitlements {
   }
 }
 
-/** 开发时写到项目根目录，便于确认；正式用 userData */
-function getSettingsPath(): string {
+const SETTINGS_LOCATION_OVERRIDE_BASENAME = 'settings-file-location.json'
+
+/** 开发时写到项目根目录，便于确认；正式用 userData。不含「自定义路径」覆盖。 */
+function getDefaultSettingsPathOnly(): string {
   const isDev = !!process.env.VITE_DEV_SERVER_URL
   if (isDev) {
     return join(process.cwd(), 'workbreak-settings.json')
@@ -773,8 +815,141 @@ function getSettingsPath(): string {
   return join(app.getPath('userData'), 'settings.json')
 }
 
+function getSettingsLocationOverridePath(): string {
+  return join(app.getPath('userData'), SETTINGS_LOCATION_OVERRIDE_BASENAME)
+}
+
+function readResolvedSettingsDataFilePath(): string {
+  const overrideFile = getSettingsLocationOverridePath()
+  try {
+    if (!existsSync(overrideFile)) return getDefaultSettingsPathOnly()
+    const raw = JSON.parse(readFileSync(overrideFile, 'utf-8')) as Record<string, unknown>
+    const p = raw.settingsFile
+    if (typeof p !== 'string' || !p.trim()) return getDefaultSettingsPathOnly()
+    const resolved = resolve(p.trim())
+    if (!resolved) return getDefaultSettingsPathOnly()
+    if (resolve(overrideFile) === resolved) return getDefaultSettingsPathOnly()
+    return resolved
+  } catch {
+    return getDefaultSettingsPathOnly()
+  }
+}
+
+function writeSettingsLocationOverride(targetSettingsFile: string): void {
+  const abs = resolve(targetSettingsFile.trim())
+  const overrideFile = getSettingsLocationOverridePath()
+  const dir = dirname(overrideFile)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(overrideFile, JSON.stringify({ settingsFile: abs }, null, 2), 'utf-8')
+}
+
+function clearSettingsLocationOverrideFile(): void {
+  const overrideFile = getSettingsLocationOverridePath()
+  try {
+    if (existsSync(overrideFile)) unlinkSync(overrideFile)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 实际读写的配置文件绝对路径（可能为用户自定义） */
+function getSettingsPath(): string {
+  return readResolvedSettingsDataFilePath()
+}
+
 export function getSettingsFilePath(): string {
   return getSettingsPath()
+}
+
+/** 未应用自定义路径时的默认配置文件绝对路径 */
+export function getDefaultSettingsFilePath(): string {
+  return getDefaultSettingsPathOnly()
+}
+
+export function getSettingsPathMeta(): {
+  currentPath: string
+  defaultPath: string
+  isCustom: boolean
+} {
+  const defaultPath = getDefaultSettingsPathOnly()
+  const currentPath = readResolvedSettingsDataFilePath()
+  return {
+    currentPath,
+    defaultPath,
+    isCustom: resolve(currentPath) !== resolve(defaultPath),
+  }
+}
+
+/**
+ * 将当前内存中的完整设置写入目标路径，并记录为后续使用的配置文件。
+ * 若目标已存在将被覆盖（由渲染进程确认）。
+ */
+export function saveCurrentSettingsToCustomPath(
+  targetPath: string,
+): { success: true } | { success: false; error: string } {
+  try {
+    const resolved = resolve(targetPath.trim())
+    if (!resolved.toLowerCase().endsWith('.json')) {
+      return { success: false, error: '请选择 .json 文件路径' }
+    }
+    if (resolve(getSettingsLocationOverridePath()) === resolved) {
+      return { success: false, error: '不能使用应用内部路径文件' }
+    }
+    const current = getSettings()
+    const dir = dirname(resolved)
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    writeFileSync(resolved, JSON.stringify(current, null, 2), 'utf-8')
+    writeSettingsLocationOverride(resolved)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * 仅将配置文件指向已有文件（不覆盖内容）；下次 getSettings 从该文件读取。
+ */
+export function pointSettingsToExistingFile(
+  targetPath: string,
+): { success: true } | { success: false; error: string } {
+  try {
+    const resolved = resolve(targetPath.trim())
+    if (resolve(getSettingsLocationOverridePath()) === resolved) {
+      return { success: false, error: '不能使用应用内部路径文件' }
+    }
+    if (!existsSync(resolved)) return { success: false, error: '文件不存在' }
+    const raw = readFileSync(resolved, 'utf-8')
+    const data = JSON.parse(raw) as Record<string, unknown>
+    if (!data || typeof data !== 'object') return { success: false, error: '不是有效的 JSON' }
+    if (!Array.isArray(data.reminderCategories) && !hasLegacyFields(data)) {
+      return { success: false, error: '缺少有效提醒配置字段' }
+    }
+    writeSettingsLocationOverride(resolved)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * 将当前配置写回默认路径并删除自定义指向；之后使用默认路径。
+ */
+export function resetSettingsFileToDefaultLocation(): { success: true } | { success: false; error: string } {
+  try {
+    const currentPath = readResolvedSettingsDataFilePath()
+    const defaultPath = getDefaultSettingsPathOnly()
+    const current = getSettings()
+    const defDir = dirname(defaultPath)
+    if (!existsSync(defDir)) mkdirSync(defDir, { recursive: true })
+    writeFileSync(defaultPath, JSON.stringify(current, null, 2), 'utf-8')
+    clearSettingsLocationOverrideFile()
+    if (resolve(currentPath) !== resolve(defaultPath) && existsSync(currentPath)) {
+      /* 保留用户原自定义文件不删除，仅不再引用 */
+    }
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 export function getSettings(): AppSettings {

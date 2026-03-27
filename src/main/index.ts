@@ -1,15 +1,28 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, Notification, screen, type OpenDialogOptions } from 'electron'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  ipcMain,
+  Notification,
+  screen,
+  shell,
+  type OpenDialogOptions,
+} from 'electron'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { createTray, destroyTray, setLiveWallpaperTrayHooks } from './tray'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-// 统一应用名，保证开发/打包后 userData 路径一致，设置才能持久化
-app.setName('workbreak')
-
-import { getSettings, setSettings, getSettingsFilePath, type AppSettings } from './settings'
+import { createTray, destroyTray, destroyTrayIconOnly, setLiveWallpaperTrayHooks } from './tray'
+import {
+  getSettings,
+  setSettings,
+  getSettingsFilePath,
+  getSettingsPathMeta,
+  saveCurrentSettingsToCustomPath,
+  pointSettingsToExistingFile,
+  resetSettingsFileToDefaultLocation,
+  type AppSettings,
+} from './settings'
 import {
   startReminders,
   getReminderCountdowns,
@@ -36,6 +49,26 @@ import {
   getDesktopLiveWallpaperState,
   registerDesktopLiveWallpaperQuitHook,
 } from './desktopWallpaperPlayer'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// 统一应用名，保证开发/打包后 userData 路径一致，设置才能持久化
+app.setName('workbreak')
+
+/**
+ * 开发模式：Chromium 缓存与已安装版共用 %APPDATA%\\workbreak 时，易出现
+ * Unable to move the cache / 0x5（拒绝访问）导致进程秒退。将 userData 指到仓库内目录，与正式安装隔离。
+ * （设置文件仍由 settings.ts 在开发时写项目根 workbreak-settings.json，不依赖此处。）
+ */
+if (process.env.VITE_DEV_SERVER_URL) {
+  const devUserData = join(__dirname, '../../.electron-user-data')
+  try {
+    mkdirSync(devUserData, { recursive: true })
+    app.setPath('userData', devUserData)
+  } catch (e) {
+    console.warn('[WorkBreak] 开发模式无法创建 .electron-user-data，沿用默认 userData:', e)
+  }
+}
 
 let mainWindow: BrowserWindow | null = null
 
@@ -190,7 +223,20 @@ function createWindow() {
   const preloadExists = existsSync(preloadPath)
   if (!preloadExists) console.warn('[WorkBreak] preload 路径:', preloadPath, '不存在')
 
-  mainWindow = new BrowserWindow({
+  /** 开发 HMR / 重复 createWindow：旧窗 close 用了 preventDefault，须先卸监听再 destroy，否则会留下「点×无效」的幽灵窗 */
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    destroyTrayIconOnly()
+    const oldWin = mainWindow
+    mainWindow = null
+    try {
+      oldWin.removeAllListeners()
+      oldWin.destroy()
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const win = new BrowserWindow({
     width: 800,
     height: 560,
     webPreferences: {
@@ -200,35 +246,49 @@ function createWindow() {
       sandbox: false, // 部分环境下 sandbox 会导致 preload 无法注入
     },
   })
+  mainWindow = win
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
-    mainWindow.webContents.openDevTools() // 开发时打开控制台，便于调试
-    mainWindow.webContents.on('did-finish-load', () => {
-      mainWindow?.webContents.executeJavaScript('typeof window.electronAPI')
+    win.loadURL(process.env.VITE_DEV_SERVER_URL)
+    win.webContents.openDevTools() // 开发时打开控制台，便于调试
+    win.webContents.on('did-finish-load', () => {
+      win.webContents
+        .executeJavaScript('typeof window.electronAPI')
         .then((t) => console.log('[WorkBreak] 页面加载后 window.electronAPI 类型:', t))
         .catch((e) => console.error('[WorkBreak] 检查 electronAPI 失败', e))
     })
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
   })
 
-  mainWindow.on('close', (e) => {
+  win.on('close', (e) => {
     e.preventDefault()
-    mainWindow?.hide()
-    if (Notification.isSupported()) {
-      new Notification({
-        title: 'WorkBreak',
-        body: '已最小化到托盘。请点击任务栏右下角（时钟旁）的图标，或点击「↑」展开隐藏图标后找到 WorkBreak。',
-      }).show()
+    try {
+      if (!win.isDestroyed()) win.hide()
+    } catch (err) {
+      console.error('[WorkBreak] 关闭时隐藏窗口失败', err)
+    }
+    try {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'WorkBreak',
+          body: '已最小化到托盘。请点击任务栏右下角（时钟旁）的图标，或点击「↑」展开隐藏图标后找到 WorkBreak。',
+        }).show()
+      }
+    } catch (err) {
+      console.warn('[WorkBreak] 托盘提示通知失败', err)
     }
   })
 
-  createTray(mainWindow)
+  try {
+    createTray(win)
+  } catch (err) {
+    console.error('[WorkBreak] createTray 失败（将无托盘图标）', err)
+  }
 }
 
 ;(globalThis as unknown as { workbreakQuit?: () => void }).workbreakQuit = () => {
@@ -260,6 +320,10 @@ app.whenReady().then(() => {
   startReminders()
 })
 
+app.on('before-quit', () => {
+  destroyTray()
+})
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
@@ -271,6 +335,46 @@ app.on('activate', () => {
 
 ipcMain.handle('getSettings', () => getSettings())
 ipcMain.handle('getSettingsFilePath', () => getSettingsFilePath())
+ipcMain.handle('getSettingsPathMeta', () => getSettingsPathMeta())
+ipcMain.handle('pickAndSaveSettingsFile', async () => {
+  const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  const { canceled, filePath } = await dialog.showSaveDialog(win ?? undefined, {
+    title: '将当前配置保存到…',
+    defaultPath: 'workbreak-settings.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (canceled || !filePath) return { success: false as const, error: '已取消' }
+  const r = saveCurrentSettingsToCustomPath(filePath)
+  if (r.success) restartReminders()
+  return r
+})
+ipcMain.handle('pickExistingSettingsFile', async () => {
+  const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  const { canceled, filePaths } = await dialog.showOpenDialog(win ?? undefined, {
+    title: '改用已有配置文件',
+    properties: ['openFile'],
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (canceled || !filePaths?.[0]) return { success: false as const, error: '已取消' }
+  const r = pointSettingsToExistingFile(filePaths[0])
+  if (r.success) restartReminders()
+  return r
+})
+ipcMain.handle('resetSettingsFileToDefault', () => {
+  const r = resetSettingsFileToDefaultLocation()
+  if (r.success) restartReminders()
+  return r
+})
+ipcMain.handle('showSettingsInFolder', () => {
+  try {
+    const p = getSettingsFilePath()
+    shell.showItemInFolder(p)
+    return { success: true as const }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    return { success: false as const, error: message }
+  }
+})
 ipcMain.handle('setSettings', (_e, settings: Partial<AppSettings>) => {
   const path = getSettingsFilePath()
   console.log('[WorkBreak] setSettings 被调用，写入路径:', path)

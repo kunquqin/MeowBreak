@@ -165,6 +165,7 @@ export function PresetTextField({
       ) : (
         <input
           type="text"
+          autoComplete="off"
           autoFocus={autoFocusInput}
           value={value}
           onChange={(e) => onChange(clampText(e.target.value))}

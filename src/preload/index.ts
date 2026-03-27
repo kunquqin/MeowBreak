@@ -6,6 +6,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   getSettings: () => ipcRenderer.invoke('getSettings') as Promise<AppSettings>,
   getSettingsFilePath: () => ipcRenderer.invoke('getSettingsFilePath') as Promise<string>,
+  getSettingsPathMeta: () =>
+    ipcRenderer.invoke('getSettingsPathMeta') as Promise<{
+      currentPath: string
+      defaultPath: string
+      isCustom: boolean
+    }>,
+  pickAndSaveSettingsFile: () =>
+    ipcRenderer.invoke('pickAndSaveSettingsFile') as Promise<
+      { success: true } | { success: false; error: string }
+    >,
+  pickExistingSettingsFile: () =>
+    ipcRenderer.invoke('pickExistingSettingsFile') as Promise<
+      { success: true } | { success: false; error: string }
+    >,
+  resetSettingsFileToDefault: () =>
+    ipcRenderer.invoke('resetSettingsFileToDefault') as Promise<
+      { success: true } | { success: false; error: string }
+    >,
+  showSettingsInFolder: () =>
+    ipcRenderer.invoke('showSettingsInFolder') as Promise<{ success: true } | { success: false; error: string }>,
   setSettings: (settings: Partial<AppSettings>) =>
     ipcRenderer.invoke('setSettings', settings) as Promise<
       { success: true; data: AppSettings } | { success: false; error: string }

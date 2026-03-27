@@ -8,6 +8,15 @@ declare global {
       platform: string
       getSettings: () => Promise<AppSettings>
       getSettingsFilePath: () => Promise<string>
+      getSettingsPathMeta: () => Promise<{
+        currentPath: string
+        defaultPath: string
+        isCustom: boolean
+      }>
+      pickAndSaveSettingsFile: () => Promise<{ success: true } | { success: false; error: string }>
+      pickExistingSettingsFile: () => Promise<{ success: true } | { success: false; error: string }>
+      resetSettingsFileToDefault: () => Promise<{ success: true } | { success: false; error: string }>
+      showSettingsInFolder: () => Promise<{ success: true } | { success: false; error: string }>
       setSettings: (settings: Partial<AppSettings>) => Promise<
         { success: true; data: AppSettings } | { success: false; error: string }
       >

@@ -152,11 +152,12 @@ const SettingsReminderTabRow = React.memo(function SettingsReminderTabRow({
               type="button"
               role="tab"
               aria-selected={active}
+              data-active={active ? 'true' : 'false'}
               onClick={() => onCategory(id)}
-              className={`rounded-md px-4 py-2 text-sm font-medium ${
+              className={`wb-filter-tab rounded-md border px-4 py-2 text-sm font-medium ${
                 active
-                  ? 'bg-slate-800 text-white shadow-sm'
-                  : 'border border-transparent bg-slate-50 text-slate-700 hover:bg-slate-100'
+                  ? 'border-transparent bg-slate-800 text-white shadow-sm'
+                  : 'border-transparent bg-slate-50 text-slate-700 hover:bg-slate-100'
               }`}
             >
               {label}
@@ -168,11 +169,12 @@ const SettingsReminderTabRow = React.memo(function SettingsReminderTabRow({
         type="button"
         role="tab"
         aria-selected={themeStudioOpen}
+        data-active={themeStudioOpen ? 'true' : 'false'}
         onClick={onStudio}
-        className={`shrink-0 rounded-md px-3 py-2 text-sm font-medium ${
+        className={`wb-settings-studio-tab shrink-0 rounded-md border px-3 py-2 text-sm font-medium ${
           themeStudioOpen
-            ? 'bg-slate-800 text-white shadow-sm'
-            : 'border border-slate-300 bg-white text-slate-800 shadow-sm hover:bg-slate-50'
+            ? 'border-transparent bg-slate-800 text-white shadow-sm'
+            : 'border-transparent bg-slate-50 text-slate-700 hover:bg-slate-100'
         }`}
       >
         主题工坊
@@ -1426,7 +1428,7 @@ function SubReminderRow({
         <button
           type="button"
           onClick={() => toggleExpandedEditSub(categoryId, item.id)}
-          className="group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
+          className="wb-subitem-clock-btn group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
           title="编辑开始时间、结束时间与拆分"
           aria-label={`编辑${fixedStartBlockSafe.caption} ${fixedStartBlockSafe.timeLine}`}
         >
@@ -1443,7 +1445,7 @@ function SubReminderRow({
         <button
           type="button"
           onClick={() => toggleExpandedEditSub(categoryId, item.id)}
-          className="group flex min-w-[8rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-4 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[8.5rem]"
+          className="wb-subitem-clock-btn group flex min-w-[8rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 px-4 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[8.5rem]"
           title="编辑时间与拆分"
           aria-label={`编辑时间，${largeTimeMain}`}
         >
@@ -1642,7 +1644,7 @@ function SubReminderRow({
         <button
           type="button"
           onClick={() => toggleExpandedEditSub(categoryId, item.id)}
-          className="group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
+          className="wb-subitem-clock-btn group flex min-w-[6.5rem] shrink-0 flex-col items-center justify-center self-stretch rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 sm:min-w-[7.5rem]"
           title="编辑开始时间、结束时间与拆分"
           aria-label={`编辑${fixedEndBlockSafe.caption} ${fixedEndBlockSafe.timeLine}`}
         >
@@ -2424,6 +2426,13 @@ export function Settings() {
   }, [popupPreviewAspectPreset, primaryDisplaySize?.width, primaryDisplaySize?.height])
   type ThemeStudioNav = null | { view: 'list' }
   const [themeStudioNav, setThemeStudioNav] = useState<ThemeStudioNav>(null)
+  /** 应用级设置（路径、预设池等），与「提醒列表 / 主题工坊」并列入口 */
+  const [formalSettingsOpen, setFormalSettingsOpen] = useState(false)
+  const [settingsPathMeta, setSettingsPathMeta] = useState<{
+    currentPath: string
+    defaultPath: string
+    isCustom: boolean
+  } | null>(null)
   /** 与导航分开提交：避免首帧同步挂载整页 ThemeStudioListView 阻塞绘制，导致顶部分页按钮看似「等缩略图后才变」 */
   const [themeStudioListMounted, setThemeStudioListMounted] = useState(false)
   const [floatingThemeEdit, setFloatingThemeEdit] = useState<
@@ -2461,6 +2470,7 @@ export function Settings() {
 
   const applyCategoryListFilter = useCallback((f: CategoryListFilter) => {
     flushSync(() => {
+      setFormalSettingsOpen(false)
       setThemeStudioNav(null)
       setThemeStudioListMounted(false)
     })
@@ -2508,9 +2518,39 @@ export function Settings() {
 
   const openThemeStudioList = useCallback(() => {
     flushSync(() => {
+      setFormalSettingsOpen(false)
       setThemeStudioNav({ view: 'list' })
       setThemeStudioListMounted(false)
     })
+  }, [])
+
+  useEffect(() => {
+    if (!formalSettingsOpen) return
+    const api = getApi()
+    if (!api?.getSettingsPathMeta) {
+      setSettingsPathMeta(null)
+      return
+    }
+    api.getSettingsPathMeta().then(setSettingsPathMeta).catch(() => setSettingsPathMeta(null))
+  }, [formalSettingsOpen])
+
+  const reloadFullSettingsFromDisk = useCallback(async () => {
+    const api = getApi()
+    if (!api?.getSettings) return
+    try {
+      setSaveError('')
+      const s = await api.getSettings()
+      suppressAutoSaveAfterHydrateRef.current = true
+      setSettingsState(s)
+      if (api.getSettingsPathMeta) {
+        const meta = await api.getSettingsPathMeta()
+        setSettingsPathMeta(meta)
+      }
+      const cds = await api.getReminderCountdowns?.()
+      if (cds) setCountdowns(cds)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+    }
   }, [])
 
   const autoSaveGen = useRef(0)
@@ -3357,7 +3397,28 @@ export function Settings() {
       <header className="bg-white border-b border-slate-200 px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-semibold">WorkBreak</h1>
-          <ThemeToggle value={appTheme} onChange={handleAppThemeChange} />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                flushSync(() => {
+                  setThemeStudioNav(null)
+                  setThemeStudioListMounted(false)
+                })
+                setFormalSettingsOpen(true)
+              }}
+              className={`wb-header-app-settings-btn box-border inline-flex h-9 min-h-9 items-center justify-center rounded-md border px-3 text-sm font-medium transition-colors ${
+                formalSettingsOpen
+                  ? 'border-transparent bg-slate-800 text-white shadow-sm'
+                  : 'border-transparent bg-slate-50 text-slate-700 hover:bg-slate-100'
+              }`}
+              aria-pressed={formalSettingsOpen}
+              data-active={formalSettingsOpen ? 'true' : 'false'}
+            >
+              设置
+            </button>
+            <ThemeToggle value={appTheme} onChange={handleAppThemeChange} />
+          </div>
         </div>
         {!isElectron && (
           <div className="mt-2 p-3 bg-amber-100 border border-amber-400 rounded text-amber-800 text-sm">
@@ -3368,6 +3429,147 @@ export function Settings() {
       </header>
 
       <main className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-col space-y-6 px-4 py-4 sm:px-6 sm:py-6">
+        {formalSettingsOpen ? (
+          <div className="box-border w-full min-w-0 flex-1 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+            <div className="mb-6 flex flex-wrap items-center gap-3 border-b border-slate-100 pb-4">
+              <button
+                type="button"
+                onClick={() => setFormalSettingsOpen(false)}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                ← 返回提醒与主题
+              </button>
+              <h2 className="text-lg font-semibold text-slate-800">应用设置</h2>
+            </div>
+
+            <div className="mx-auto max-w-3xl space-y-6">
+              <section className="space-y-3">
+                <h3 className="text-base font-semibold text-slate-800">配置文件</h3>
+                <p className="text-sm text-slate-600">
+                  提醒与主题壁纸等全部保存在一个 JSON 文件中。可改为任意路径（如云同步文件夹）。自定义指向记录在应用用户数据目录下的{' '}
+                  <code className="rounded bg-slate-100 px-1 text-xs">settings-file-location.json</code>
+                  ，请勿手动删除除非您了解其作用。
+                </p>
+
+                <div className="space-y-1">
+                  <div className="text-xs font-medium uppercase tracking-wide text-slate-500">当前使用的文件</div>
+                  <code className="block min-w-0 break-all rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800">
+                    {settingsPathMeta?.currentPath ?? '（加载中…）'}
+                  </code>
+                </div>
+
+                {settingsPathMeta?.isCustom ? (
+                  <div className="space-y-1">
+                    <div className="text-xs font-medium uppercase tracking-wide text-slate-500">未自定义时默认路径</div>
+                    <code className="block min-w-0 break-all rounded-md border border-dashed border-slate-200 bg-slate-50/80 px-3 py-2 text-xs text-slate-600">
+                      {settingsPathMeta.defaultPath}
+                    </code>
+                  </div>
+                ) : null}
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={!settingsPathMeta?.currentPath}
+                    onClick={() => {
+                      void navigator.clipboard?.writeText?.(settingsPathMeta?.currentPath ?? '')
+                    }}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    复制当前路径
+                  </button>
+                  {isElectron && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void getApi()?.showSettingsInFolder?.().then((r) => {
+                          if (r && 'success' in r && !r.success && 'error' in r) {
+                            setSaveError(r.error)
+                          }
+                        })
+                      }}
+                      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      在文件夹中显示
+                    </button>
+                  )}
+                  {isElectron && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void getApi()
+                          ?.pickAndSaveSettingsFile?.()
+                          .then((r) => {
+                            if (!r) return
+                            if (!('success' in r) || !r.success) {
+                              if ('error' in r && r.error && r.error !== '已取消') setSaveError(r.error)
+                              return
+                            }
+                            void reloadFullSettingsFromDisk()
+                          })
+                      }}
+                      className="rounded-md border border-slate-800 bg-slate-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+                    >
+                      另存为并改用此路径
+                    </button>
+                  )}
+                  {isElectron && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void getApi()
+                          ?.pickExistingSettingsFile?.()
+                          .then((r) => {
+                            if (!r) return
+                            if (!('success' in r) || !r.success) {
+                              if ('error' in r && r.error && r.error !== '已取消') setSaveError(r.error)
+                              return
+                            }
+                            void reloadFullSettingsFromDisk()
+                          })
+                      }}
+                      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      改用已有配置文件
+                    </button>
+                  )}
+                  {isElectron && settingsPathMeta?.isCustom ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            '将先把当前界面上的配置写入「默认路径」，然后改回使用默认路径。原自定义路径下的文件会保留在磁盘上，但应用不再读取它。是否继续？',
+                          )
+                        ) {
+                          return
+                        }
+                        void getApi()
+                          ?.resetSettingsFileToDefault?.()
+                          .then((r) => {
+                            if (!r) return
+                            if (!('success' in r) || !r.success) {
+                              if ('error' in r) setSaveError(r.error)
+                              return
+                            }
+                            void reloadFullSettingsFromDisk()
+                          })
+                      }}
+                      className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-950 hover:bg-amber-100"
+                    >
+                      恢复默认路径
+                    </button>
+                  ) : null}
+                </div>
+
+                <p className="text-xs text-slate-500">
+                  「另存为并改用」会把当前内存中的完整配置写入所选文件并立即切换；「改用已有」仅切换读取路径，不会覆盖该文件内容。
+                </p>
+              </section>
+            </div>
+          </div>
+        ) : (
+          <>
         <SettingsReminderTabRow
           categoryListFilter={categoryListFilter}
           themeStudioOpen={Boolean(themeStudioNav)}
@@ -3470,7 +3672,27 @@ export function Settings() {
               + 秒表类型
             </button>
           )}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <button
+              onClick={save}
+              disabled={saveStatus === 'saving'}
+              className="wb-save-now-btn rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+            >
+              {saveStatus === 'saving' ? '保存中…' : '立即保存'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowResetConfirm(true)}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              title="将所有提醒的开始点与进度更新为当前时刻"
+            >
+              全部重置
+            </button>
+            {saveStatus === 'ok' && <span className="text-sm font-medium text-green-600">已保存</span>}
+            {saveStatus === 'error' && <span className="text-sm font-medium text-red-600">保存失败</span>}
+          </div>
         </div>
+        {saveError && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded">错误：{saveError}</p>}
 
         <DndContext
           sensors={categorySensors}
@@ -3559,30 +3781,7 @@ export function Settings() {
 
         </div>
         )}
-
-        {!themeStudioNav && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={save}
-              disabled={saveStatus === 'saving'}
-              className="rounded-lg bg-slate-800 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
-            >
-              {saveStatus === 'saving' ? '保存中…' : '立即保存'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowResetConfirm(true)}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
-              title="将所有提醒的开始点与进度更新为当前时刻"
-            >
-              全部重置
-            </button>
-            {saveStatus === 'ok' && <span className="text-sm font-medium text-green-600">已保存</span>}
-            {saveStatus === 'error' && <span className="text-sm font-medium text-red-600">保存失败</span>}
-          </div>
-          {saveError && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded">错误：{saveError}</p>}
-        </div>
+          </>
         )}
       </main>
 

@@ -23,11 +23,11 @@
 /* 深色主题 — macOS Big Sur+ 风格 */
 :root.dark,
 .dark {
-  --color-bg: #1e1e1e;
-  --color-bg-elevated: #2d2d2d;
-  --color-bg-overlay: #262626;
-  --color-border: #3d3d3d;
-  --color-border-subtle: #333333;
+  --color-bg: #121212;
+  --color-bg-elevated: #1f1f1f;
+  --color-bg-overlay: #1a1a1a;
+  --color-border: #2f2f2f;
+  --color-border-subtle: #262626;
   --color-text-primary: #f5f5f5;
   --color-text-secondary: #a1a1a6;
   --color-text-muted: #6e6e73;
@@ -41,11 +41,11 @@
 /* 跟随系统 - 当系统是深色时 */
 @media (prefers-color-scheme: dark) {
   :root:not(.light):not(.dark) {
-    --color-bg: #1e1e1e;
-    --color-bg-elevated: #2d2d2d;
-    --color-bg-overlay: #262626;
-    --color-border: #3d3d3d;
-    --color-border-subtle: #333333;
+    --color-bg: #121212;
+    --color-bg-elevated: #1f1f1f;
+    --color-bg-overlay: #1a1a1a;
+    --color-border: #2f2f2f;
+    --color-border-subtle: #262626;
     --color-text-primary: #f5f5f5;
     --color-text-secondary: #a1a1a6;
     --color-text-muted: #6e6e73;
@@ -62,12 +62,64 @@
 @tailwind utilities;
 
 /* ========================
+   Autofill (Chrome/Electron) 覆盖
+   避免部分机器输入框出现浅绿色底
+   ======================== */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+select:-webkit-autofill,
+select:-webkit-autofill:hover,
+select:-webkit-autofill:focus {
+  -webkit-text-fill-color: #1e293b !important;
+  caret-color: #1e293b !important;
+  -webkit-box-shadow: 0 0 0 1000px #ffffff inset !important;
+  box-shadow: 0 0 0 1000px #ffffff inset !important;
+  transition: background-color 99999s ease-out 0s !important;
+}
+
+html.dark input:-webkit-autofill,
+html.dark input:-webkit-autofill:hover,
+html.dark input:-webkit-autofill:focus,
+html.dark textarea:-webkit-autofill,
+html.dark textarea:-webkit-autofill:hover,
+html.dark textarea:-webkit-autofill:focus,
+html.dark select:-webkit-autofill,
+html.dark select:-webkit-autofill:hover,
+html.dark select:-webkit-autofill:focus {
+  -webkit-text-fill-color: #f5f5f5 !important;
+  caret-color: #f5f5f5 !important;
+  -webkit-box-shadow: 0 0 0 1000px #2d2d2d inset !important;
+  box-shadow: 0 0 0 1000px #2d2d2d inset !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) input:-webkit-autofill,
+  html:not(.light):not(.dark) input:-webkit-autofill:hover,
+  html:not(.light):not(.dark) input:-webkit-autofill:focus,
+  html:not(.light):not(.dark) textarea:-webkit-autofill,
+  html:not(.light):not(.dark) textarea:-webkit-autofill:hover,
+  html:not(.light):not(.dark) textarea:-webkit-autofill:focus,
+  html:not(.light):not(.dark) select:-webkit-autofill,
+  html:not(.light):not(.dark) select:-webkit-autofill:hover,
+  html:not(.light):not(.dark) select:-webkit-autofill:focus {
+    -webkit-text-fill-color: #f5f5f5 !important;
+    caret-color: #f5f5f5 !important;
+    -webkit-box-shadow: 0 0 0 1000px #2d2d2d inset !important;
+    box-shadow: 0 0 0 1000px #2d2d2d inset !important;
+  }
+}
+
+/* ========================
    深色模式覆盖 Tailwind 硬编码颜色
    ======================== */
 
 /* 当 html 有 .dark class 时（用户明确选择深色） */
 html.dark body {
-  background-color: #1e1e1e !important;
+  background-color: #121212 !important;
   color: #f5f5f5 !important;
 }
 
@@ -75,26 +127,24 @@ html.dark body {
 html.dark .bg-white,
 html.dark [class*="bg-white"],
 html.dark [class~="bg-white"] {
-  background-color: #2d2d2d !important;
+  background-color: #1f1f1f !important;
 }
-html.dark .bg-slate-50 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/95 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/80 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/70 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/60 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/50 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/40 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/30 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/20 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/10 { background-color: #262626 !important; }
-html.dark .bg-slate-50\/0 { background-color: #262626 !important; }
+html.dark .bg-slate-50 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/95 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/80 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/70 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/60 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/50 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/40 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/30 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/20 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/10 { background-color: #1a1a1a !important; }
+html.dark .bg-slate-50\/0 { background-color: #1a1a1a !important; }
 
-/* ===== 弹窗表头顶部圆角修复 ===== */
-/* embedded 弹窗的表头需要顶部圆角来匹配外层容器 */
-html.dark .rounded-lg {
-  overflow: hidden !important;
-}
-
+/* ===== 弹窗表头顶部圆角修复（勿对全部 .rounded-lg 设 overflow:hidden）=====
+   历史上曾对 html.dark 下所有 .rounded-lg 强制 overflow:hidden，导致设置页子项卡片
+   （同样使用 rounded-lg）截断内部绝对定位下拉、并压过 CategoryCard 的 overflow-visible，
+   使 dnd-kit 拖拽像在「大类区域内被裁切」。仅保留表头/底角的半径配合规则。 */
 html.dark .rounded-lg > [class*="border-b"]:first-child {
   border-top-left-radius: 0.5rem !important;
   border-top-right-radius: 0.5rem !important;
@@ -219,25 +269,25 @@ html.dark .bg-amber-50 { background-color: #2d2a1a !important; }
    ======================== */
 @media (prefers-color-scheme: dark) {
   html:not(.light):not(.dark) body {
-    background-color: #1e1e1e !important;
+    background-color: #121212 !important;
     color: #f5f5f5 !important;
   }
 
   /* 背景色覆盖 */
   html:not(.light):not(.dark) .bg-white,
   html:not(.light):not(.dark) [class*="bg-white"],
-  html:not(.light):not(.dark) [class~="bg-white"] { background-color: #2d2d2d !important; }
-  html:not(.light):not(.dark) .bg-slate-50 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/95 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/80 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/70 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/60 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/50 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/40 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/30 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/20 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/10 { background-color: #262626 !important; }
-  html:not(.light):not(.dark) .bg-slate-50\/0 { background-color: #262626 !important; }
+  html:not(.light):not(.dark) [class~="bg-white"] { background-color: #1f1f1f !important; }
+  html:not(.light):not(.dark) .bg-slate-50 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/95 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/80 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/70 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/60 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/50 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/40 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/30 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/20 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/10 { background-color: #1a1a1a !important; }
+  html:not(.light):not(.dark) .bg-slate-50\/0 { background-color: #1a1a1a !important; }
 
   /* 弹窗表头顶部圆角修复 */
   html:not(.light):not(.dark) .rounded-lg > :first-child {
@@ -251,15 +301,12 @@ html.dark .bg-amber-50 { background-color: #2d2a1a !important; }
     border-bottom-right-radius: 0.5rem !important;
   }
 
-  /* 修复 formFooter 区域的圆角问题 */
-  html:not(.light):not(.dark) .rounded-lg [class*="border-t"] {
+  /* 修复 formFooter：去掉「上沿横条」的顶圆角，避免与卡片整体圆角叠出缺口。
+     不可用 [class*="border-t"]：会误匹配 border-transparent（含子串 border-…t…），导致
+     rounded-lg 内大量按钮（如顶部分类 tab）仅上角被抹平。 */
+  html:not(.light):not(.dark) .rounded-lg [class*="border-t"]:not([class*="border-transparent"]) {
     border-top-left-radius: 0 !important;
     border-top-right-radius: 0 !important;
-  }
-
-  /* 弹窗表头顶部圆角修复 */
-  html:not(.light):not(.dark) .rounded-lg {
-    overflow: hidden !important;
   }
 
   html:not(.light):not(.dark) .rounded-lg > [class*="border-b"]:first-child {
@@ -469,5 +516,178 @@ html.dark .wb-add-type-btn:hover {
   html:not(.light):not(.dark) .wb-add-type-btn:hover {
     border-color: rgba(255, 255, 255, 0.4) !important;
     color: #ffffff !important;
+  }
+}
+
+/* 设置页「立即保存」按钮：深色下接近黑色且 hover 有明显反馈 */
+html.dark .wb-save-now-btn {
+  background-color: #0f0f0f !important;
+  color: #ffffff !important;
+}
+html.dark .wb-save-now-btn:hover:not(:disabled) {
+  background-color: #2a2a2a !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) .wb-save-now-btn {
+    background-color: #0f0f0f !important;
+    color: #ffffff !important;
+  }
+  html:not(.light):not(.dark) .wb-save-now-btn:hover:not(:disabled) {
+    background-color: #2a2a2a !important;
+  }
+}
+
+/* 顶部筛选按钮：深色下强制中性灰描边与更深选中底色 */
+html.dark .wb-filter-tab {
+  outline: none !important;
+}
+html.dark .wb-filter-tab[data-active='false'] {
+  border-color: transparent !important;
+  background-color: #171717 !important;
+  color: #cbd5db !important;
+}
+html.dark .wb-filter-tab[data-active='false']:hover {
+  background-color: #232323 !important;
+  color: #f1f5f9 !important;
+}
+html.dark .wb-filter-tab[data-active='true'] {
+  border-color: #5a5a5a !important;
+  background-color: #0f0f0f !important;
+  color: #ffffff !important;
+}
+html.dark .wb-filter-tab:focus-visible {
+  box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+}
+
+/* 设置页顶栏 ·「主题工坊」与左侧分页同系，避免 bg-white/bg-slate-800 被全局映射后糊成一片 */
+html.dark .wb-settings-studio-tab {
+  outline: none !important;
+}
+html.dark .wb-settings-studio-tab[data-active='false'] {
+  border-color: transparent !important;
+  background-color: #171717 !important;
+  color: #cbd5db !important;
+}
+html.dark .wb-settings-studio-tab[data-active='false']:hover {
+  background-color: #232323 !important;
+  color: #f1f5f9 !important;
+}
+html.dark .wb-settings-studio-tab[data-active='true'] {
+  border-color: #5a5a5a !important;
+  background-color: #0f0f0f !important;
+  color: #ffffff !important;
+}
+html.dark .wb-settings-studio-tab:focus-visible {
+  box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+}
+
+/* 顶栏「设置」：与左侧分页 tab 同系选中/未选中（深色下描边与底色对齐 wb-filter-tab） */
+html.dark .wb-header-app-settings-btn {
+  outline: none !important;
+}
+html.dark .wb-header-app-settings-btn[data-active='false'] {
+  border-color: transparent !important;
+  background-color: #171717 !important;
+  color: #cbd5db !important;
+}
+html.dark .wb-header-app-settings-btn[data-active='false']:hover {
+  background-color: #232323 !important;
+  color: #f1f5f9 !important;
+}
+html.dark .wb-header-app-settings-btn[data-active='true'] {
+  border-color: #5a5a5a !important;
+  background-color: #0f0f0f !important;
+  color: #ffffff !important;
+}
+html.dark .wb-header-app-settings-btn:focus-visible {
+  box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+}
+
+/* 子项左右时间块：全局曾把 slate-800/900 收成灰/靛蓝，与时间块「近黑表盘」语义不符 */
+.wb-subitem-clock-btn {
+  background-color: #0f172a;
+}
+.wb-subitem-clock-btn:hover {
+  background-color: #1e293b;
+}
+html.dark .wb-subitem-clock-btn {
+  background-color: #0a0a0a !important;
+  border-color: #404040 !important;
+}
+html.dark .wb-subitem-clock-btn:hover {
+  background-color: #262626 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) .wb-filter-tab {
+    outline: none !important;
+  }
+  html:not(.light):not(.dark) .wb-filter-tab[data-active='false'] {
+    border-color: transparent !important;
+    background-color: #171717 !important;
+    color: #cbd5db !important;
+  }
+  html:not(.light):not(.dark) .wb-filter-tab[data-active='false']:hover {
+    background-color: #232323 !important;
+    color: #f1f5f9 !important;
+  }
+  html:not(.light):not(.dark) .wb-filter-tab[data-active='true'] {
+    border-color: #5a5a5a !important;
+    background-color: #0f0f0f !important;
+    color: #ffffff !important;
+  }
+  html:not(.light):not(.dark) .wb-filter-tab:focus-visible {
+    box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+  }
+
+  html:not(.light):not(.dark) .wb-settings-studio-tab {
+    outline: none !important;
+  }
+  html:not(.light):not(.dark) .wb-settings-studio-tab[data-active='false'] {
+    border-color: transparent !important;
+    background-color: #171717 !important;
+    color: #cbd5db !important;
+  }
+  html:not(.light):not(.dark) .wb-settings-studio-tab[data-active='false']:hover {
+    background-color: #232323 !important;
+    color: #f1f5f9 !important;
+  }
+  html:not(.light):not(.dark) .wb-settings-studio-tab[data-active='true'] {
+    border-color: #5a5a5a !important;
+    background-color: #0f0f0f !important;
+    color: #ffffff !important;
+  }
+  html:not(.light):not(.dark) .wb-settings-studio-tab:focus-visible {
+    box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+  }
+
+  html:not(.light):not(.dark) .wb-header-app-settings-btn {
+    outline: none !important;
+  }
+  html:not(.light):not(.dark) .wb-header-app-settings-btn[data-active='false'] {
+    border-color: transparent !important;
+    background-color: #171717 !important;
+    color: #cbd5db !important;
+  }
+  html:not(.light):not(.dark) .wb-header-app-settings-btn[data-active='false']:hover {
+    background-color: #232323 !important;
+    color: #f1f5f9 !important;
+  }
+  html:not(.light):not(.dark) .wb-header-app-settings-btn[data-active='true'] {
+    border-color: #5a5a5a !important;
+    background-color: #0f0f0f !important;
+    color: #ffffff !important;
+  }
+  html:not(.light):not(.dark) .wb-header-app-settings-btn:focus-visible {
+    box-shadow: 0 0 0 2px rgba(120, 120, 120, 0.45) !important;
+  }
+
+  html:not(.light):not(.dark) .wb-subitem-clock-btn {
+    background-color: #0a0a0a !important;
+    border-color: #404040 !important;
+  }
+  html:not(.light):not(.dark) .wb-subitem-clock-btn:hover {
+    background-color: #262626 !important;
   }
 }

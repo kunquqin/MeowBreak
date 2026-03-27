@@ -3,15 +3,55 @@
   "productName": "WorkBreak",
   "version": "0.0.19",
   "type": "module",
-  "description": "帮助打工人按时吃饭、起身活动和休息的桌面提醒应用",
+  "description": "WorkBreak｜专注工作与健康休息提醒",
   "main": "out/main/index.js",
   "author": "",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.node.json && vite build",
+    "build:win": "npm run build && electron-builder --win",
     "start": "electron .",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.workbreak.app",
+    "productName": "WorkBreak",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    },
+    "nsis": {
+      "artifactName": "${productName}-${version}-Setup.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -20,6 +60,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "font-list": "^2.0.2",
     "framer-motion": "^12.38.0",
+    "playwright": "^1.58.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-moveable": "^0.56.0"
@@ -31,6 +72,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
     "electron": "^28.0.0",
+    "electron-builder": "^26.8.1",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.3.3",

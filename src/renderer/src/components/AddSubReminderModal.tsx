@@ -797,6 +797,7 @@ export function AddSubReminderModal({
               <div className="flex flex-wrap items-center gap-2 justify-center w-full">
                 <input
                   type="number"
+                  autoComplete="off"
                   min={0}
                   max={23}
                   value={intervalHours}
@@ -806,6 +807,7 @@ export function AddSubReminderModal({
                 <span className="text-slate-500 text-sm">时</span>
                 <input
                   type="number"
+                  autoComplete="off"
                   min={0}
                   max={59}
                   value={intervalMinutes}
@@ -815,6 +817,7 @@ export function AddSubReminderModal({
                 <span className="text-slate-500 text-sm">分</span>
                 <input
                   type="number"
+                  autoComplete="off"
                   min={0}
                   max={59}
                   value={intervalSeconds}
@@ -906,6 +909,7 @@ export function AddSubReminderModal({
                   <span className="shrink-0 text-sm text-slate-600">拆分</span>
                   <input
                     type="number"
+                    autoComplete="off"
                     min={1}
                     max={10}
                     value={splitCount}
@@ -935,6 +939,7 @@ export function AddSubReminderModal({
                   <div className="flex flex-wrap items-center justify-center gap-1.5">
                     <input
                       type="number"
+                      autoComplete="off"
                       min={0}
                       max={23}
                       value={restH}
@@ -944,6 +949,7 @@ export function AddSubReminderModal({
                     <span className="text-sm text-slate-500">时</span>
                     <input
                       type="number"
+                      autoComplete="off"
                       min={0}
                       max={59}
                       value={restM}
@@ -953,6 +959,7 @@ export function AddSubReminderModal({
                     <span className="text-sm text-slate-500">分</span>
                     <input
                       type="number"
+                      autoComplete="off"
                       min={0}
                       max={59}
                       value={restS}
