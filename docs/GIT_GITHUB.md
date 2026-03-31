@@ -14,7 +14,7 @@
 ### 2. GitHub 账号与仓库
 
 - 注册/登录：<https://github.com>
-- 在 GitHub 网页上 **New repository** 新建一个空仓库（仓库名可与项目代号一致，例如 `WorkBreak`），**不要**勾选 “Add a README”等，保持空仓库。
+- 在 GitHub 网页上 **New repository** 新建一个空仓库（仓库名可与项目英文名一致，例如 `MeowBreak`），**不要**勾选 “Add a README”等，保持空仓库。
 
 ---
 
