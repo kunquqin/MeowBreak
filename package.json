@@ -1,16 +1,21 @@
 {
   "name": "workbreak",
   "productName": "MeowBreak",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "喵息 MeowBreak｜专注工作与健康休息提醒",
   "main": "out/main/index.js",
-  "author": "",
+  "author": "KevinQin",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kunquqin/MeowBreak.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.node.json && vite build",
     "build:win": "npm run build && electron-builder --win",
+    "build:win:store": "npm run build && electron-builder --win appx --x64",
     "start": "electron .",
     "preview": "vite preview"
   },
@@ -51,6 +56,18 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
+    },
+    "appx": {
+      "displayName": "喵息",
+      "publisherDisplayName": "KevinQin",
+      "applicationId": "MeowBreak",
+      "identityName": "KunquQin.MeowBreak",
+      "backgroundColor": "#1e3a5f",
+      "languages": ["zh-CN", "en-US"],
+      "minVersion": "10.0.17763.0",
+      "maxVersionTested": "10.0.26100.0",
+      "artifactName": "${productName}-${version}-Store.${ext}",
+      "addAutoLaunchExtension": false
     }
   },
   "dependencies": {

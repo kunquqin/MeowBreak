@@ -375,6 +375,10 @@ export interface AppSettings {
    */
   forcedRestMode?: boolean
   /**
+   * 关闭主窗口时是否进入托盘（隐藏窗口、提醒继续）。默认 true；为 false 时点窗口关闭将退出应用。
+   */
+  closeToTray?: boolean
+  /**
    * 用户上次成功启用的「动态桌面壁纸」主题 id（仅 Windows）；开机后由主进程自动恢复。
    * 用户主动关闭壁纸时清空。
    */

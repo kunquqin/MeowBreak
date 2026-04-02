@@ -94,6 +94,7 @@ const defaultSettings: AppSettings = {
   entitlements: getDefaultEntitlements(),
   launchAtLogin: false,
   forcedRestMode: false,
+  closeToTray: true,
 }
 
 /** 列表筛选：全部 / 仅闹钟大类 / 仅倒计时大类 */
@@ -2876,6 +2877,23 @@ export function Settings() {
     }
   }, [])
 
+  const handleCloseToTrayChange = useCallback(async (enabled: boolean) => {
+    const api = getApi()
+    if (!api?.setSettings) return
+    try {
+      setSaveError('')
+      const r = await api.setSettings({ closeToTray: enabled })
+      if (r.success) {
+        suppressAutoSaveAfterHydrateRef.current = true
+        setSettingsState(r.data)
+      } else {
+        setSaveError(r.error)
+      }
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
   const updateItem = (categoryIndex: number, itemIndex: number, patch: Partial<SubReminder>) => {
     const next = settings.reminderCategories.slice()
     const cat = { ...next[categoryIndex], items: next[categoryIndex].items.slice() }
@@ -3703,6 +3721,31 @@ export function Settings() {
 
               <section className="space-y-3 border-t border-slate-100 pt-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <h3 className="shrink-0 text-base font-semibold text-slate-800">强制休息模式</h3>
+                    <p className="text-xs text-slate-500">开启后将无法关闭休息弹窗与休息结束前倒计时</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                    <IoSwitch
+                      id="settings-forced-rest-mode"
+                      checked={settings.forcedRestMode === true}
+                      disabled={!isElectron}
+                      onChange={(v) => void handleForcedRestModeChange(v)}
+                      ariaLabel="强制休息模式"
+                    />
+                    <span
+                      className={`text-sm font-medium tabular-nums ${
+                        settings.forcedRestMode ? 'text-emerald-700' : 'text-slate-500'
+                      }`}
+                    >
+                      {settings.forcedRestMode ? '开启' : '关闭'}
+                    </span>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-3 border-t border-slate-100 pt-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <h3 className="text-base font-semibold text-slate-800">开机自启动</h3>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                     <IoSwitch
@@ -3725,24 +3768,21 @@ export function Settings() {
 
               <section className="space-y-3 border-t border-slate-100 pt-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <h3 className="shrink-0 text-base font-semibold text-slate-800">强制休息模式</h3>
-                    <p className="text-xs text-slate-500">开启后将无法关闭休息弹窗与休息结束前倒计时</p>
-                  </div>
+                  <h3 className="text-base font-semibold text-slate-800">关闭进入托盘</h3>
                   <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                     <IoSwitch
-                      id="settings-forced-rest-mode"
-                      checked={settings.forcedRestMode === true}
+                      id="settings-close-to-tray"
+                      checked={settings.closeToTray !== false}
                       disabled={!isElectron}
-                      onChange={(v) => void handleForcedRestModeChange(v)}
-                      ariaLabel="强制休息模式"
+                      onChange={(v) => void handleCloseToTrayChange(v)}
+                      ariaLabel="关闭进入托盘"
                     />
                     <span
                       className={`text-sm font-medium tabular-nums ${
-                        settings.forcedRestMode ? 'text-emerald-700' : 'text-slate-500'
+                        settings.closeToTray !== false ? 'text-emerald-700' : 'text-slate-500'
                       }`}
                     >
-                      {settings.forcedRestMode ? '开启' : '关闭'}
+                      {settings.closeToTray !== false ? '开启' : '关闭'}
                     </span>
                   </div>
                 </div>

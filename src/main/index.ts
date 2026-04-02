@@ -67,12 +67,12 @@ function showAboutDialog() {
     message: '',
     detail: [
       `版本：v${v}`,
-      '开发者：KevinQin',
+      '开发者：Kevin Qin',
       '博客：https://kunquqin.github.io',
       '邮箱：3790891281@qq.com',
       '系统：Windows 10及以上',
-      '发布：2026-03-29',
-      '版权：© 2026 KevinQin All Rights Reserved.',
+      '发布：2026-04-02',
+      '版权：© 2026 Kevin Qin All Rights Reserved.',
     ].join('\n'),
     /**
      * Windows：不传 `icon` 时仍会套用应用图标，正文左侧出现大图。
@@ -402,6 +402,12 @@ function createWindow(options?: { startHidden?: boolean }) {
 
   win.on('close', (e) => {
     if (isAppQuitting) return
+    const closeToTray = getSettings().closeToTray !== false
+    if (!closeToTray) {
+      e.preventDefault()
+      ;(globalThis as unknown as { workbreakQuit?: () => void }).workbreakQuit?.()
+      return
+    }
     e.preventDefault()
     try {
       if (!win.isDestroyed()) win.hide()

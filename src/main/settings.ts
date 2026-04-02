@@ -980,6 +980,7 @@ export function getSettings(): AppSettings {
       appTheme: 'system',
       launchAtLogin: false,
       forcedRestMode: false,
+      closeToTray: true,
       desktopLiveWallpaperThemeId: undefined,
     }
   }
@@ -997,6 +998,7 @@ export function getSettings(): AppSettings {
         appTheme: normalizeAppTheme(data.appTheme),
         launchAtLogin: normalizeLaunchAtLogin(data.launchAtLogin),
         forcedRestMode: normalizeForcedRestMode(data.forcedRestMode),
+        closeToTray: normalizeCloseToTray(data.closeToTray),
         desktopLiveWallpaperThemeId: normalizePersistedDesktopWallpaperThemeId(data.desktopLiveWallpaperThemeId, popupThemesM),
       }
       const dir = dirname(path)
@@ -1015,6 +1017,7 @@ export function getSettings(): AppSettings {
       appTheme: normalizeAppTheme(data.appTheme),
       launchAtLogin: normalizeLaunchAtLogin(data.launchAtLogin),
       forcedRestMode: normalizeForcedRestMode(data.forcedRestMode),
+      closeToTray: normalizeCloseToTray(data.closeToTray),
       desktopLiveWallpaperThemeId: normalizePersistedDesktopWallpaperThemeId(data.desktopLiveWallpaperThemeId, popupThemesNorm),
     }
     if (process.env.VITE_DEV_SERVER_URL) console.log('[WorkBreak] 已读取设置:', path)
@@ -1029,6 +1032,7 @@ export function getSettings(): AppSettings {
       appTheme: 'system',
       launchAtLogin: false,
       forcedRestMode: false,
+      closeToTray: true,
       desktopLiveWallpaperThemeId: undefined,
     }
   }
@@ -1072,6 +1076,11 @@ function normalizeLaunchAtLogin(value: unknown): boolean {
 
 function normalizeForcedRestMode(value: unknown): boolean {
   return value === true
+}
+
+function normalizeCloseToTray(value: unknown): boolean {
+  if (value === false) return false
+  return true
 }
 
 /**
@@ -1132,6 +1141,10 @@ export function setSettings(
       settings.forcedRestMode !== undefined
         ? normalizeForcedRestMode(settings.forcedRestMode)
         : normalizeForcedRestMode(current.forcedRestMode),
+    closeToTray:
+      settings.closeToTray !== undefined
+        ? normalizeCloseToTray(settings.closeToTray)
+        : normalizeCloseToTray(current.closeToTray),
     desktopLiveWallpaperThemeId: resolveNextDesktopLiveWallpaperThemeId(
       settings.desktopLiveWallpaperThemeId,
       current.desktopLiveWallpaperThemeId,

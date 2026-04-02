@@ -32,6 +32,14 @@ npm run build:win
 
 产物默认输出到 `release/`（如 `MeowBreak-0.1.0-Setup.exe`、便携版等）。
 
+### 微软商店（AppX / MSIX）
+
+```bash
+npm run build:win:store
+```
+
+生成 `release/` 下的 **`.appx`**，用于合作伙伴中心提交。须在本机 **Windows + Windows SDK** 环境执行；打包前请在 `package.json` 的 `build.appx` 中把 **`identityName`**（及正式签名时的 **`publisher`**）改成与商店预留信息一致。详见 **`docs/MSIX_STORE.md`**。
+
 ## 若双击「启动开发环境.bat」被 Windows 拦截（拒绝访问）
 
 Windows 可能因安全策略阻止运行该批处理文件（例如提示“无法打开这些文件”或“Internet 安全设置阻止”），可任选其一：
@@ -42,3 +50,4 @@ Windows 可能因安全策略阻止运行该批处理文件（例如提示“无
 ## 文档
 
 - **AGENTS.md**：产品说明、MVP 范围、目录结构及开发约定（面向 AI Agent 与开发者）
+- **docs/MSIX_STORE.md**：微软商店 AppX 打包与 `identityName` / 签名说明
